@@ -1,0 +1,14 @@
+[
+  {
+    "id": 97,
+    "name": "BSC Testnet",
+    "slug": "bsc",
+    "rpc": "https://data-seed-prebsc-1-s1.binance.org:8545"
+  },
+  {
+    "id": 56,
+    "name": "BSC Mainnet",
+    "slug": "bsc",
+    "rpc": "https://bsc-dataseed1.binance.org"
+  }
+]

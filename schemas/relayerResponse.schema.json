@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RelayerSwapResponse",
+  "type": "object",
+  "required": ["version", "intentId", "swapOutput", "commitments", "txHash"],
+  "properties": {
+    "version": { "type": "string" },
+    "intentId": { "type": "string" },
+    "swapOutput": {
+      "type": "object",
+      "required": ["amount", "assetId", "minAmount"],
+      "properties": {
+        "amount": { "type": "string" },
+        "assetId": { "type": "integer" },
+        "minAmount": { "type": "string" }
+      }
+    },
+    "commitments": {
+      "type": "object",
+      "required": ["swap", "change"],
+      "properties": {
+        "swap": { "type": "string" },
+        "change": { "type": "string" }
+      }
+    },
+    "txHash": { "type": "string" },
+    "blockNumber": { "type": "integer" },
+    "encryptedPayload": { "type": "string" }
+  }
+}

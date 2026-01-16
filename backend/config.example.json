@@ -1,0 +1,10 @@
+{
+  "PORT": 5050,
+  "RPC_URL": "https://data-seed-prebsc-1-s1.binance.org:8545",
+  "CHAIN_ID": 97,
+  "RELAYER_PRIVATE_KEY": "0x",
+  "SHIELDED_POOL_ADDRESS": "0x",
+  "RELAYER_DRY_RUN": true,
+  "OFFCHAIN_ORACLE_ADDRESS": "0x",
+  "ORACLE_SIGNER_PRIVATE_KEY": "0x"
+}

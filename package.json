@@ -1,0 +1,39 @@
+{
+  "name": "shadow-defi-protocol",
+  "version": "1.0.0",
+  "description": "Multi-Asset ZK-Pool with Shielded Swaps on BSC",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:bsc": "hardhat run scripts/deploy.js --network bsc",
+    "deploy:testnet": "hardhat run scripts/deploy.js --network bscTestnet",
+    "deploy:oracle:testnet": "hardhat run scripts/deploy_oracle.js --network bscTestnet",
+    "deploy:pool:testnet": "hardhat run scripts/deploy_pool.js --network bscTestnet",
+    "verify": "hardhat verify",
+    "backend:install": "npm --prefix backend install",
+    "backend:dev": "npm --prefix backend run dev",
+    "frontend:install": "npm --prefix frontend install",
+    "frontend:dev": "npm --prefix frontend run dev"
+  },
+  "keywords": [
+    "defi",
+    "privacy",
+    "zk-snark",
+    "bsc",
+    "pancakeswap"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "chai": "^4.3.10",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "circomlib": "^2.0.5",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.16.0"
+  }
+}
