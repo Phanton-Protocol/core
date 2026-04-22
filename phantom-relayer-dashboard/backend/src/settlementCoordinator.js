@@ -29,6 +29,7 @@ const PRECHECK_REASON = Object.freeze({
   SUBMIT_FATAL_ERROR: "SUBMIT_FATAL_ERROR",
   FALLBACK_ROUTED: "FALLBACK_ROUTED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
+  ONCHAIN_DATA_MISSING: "ONCHAIN_DATA_MISSING",
 });
 
 function b(v) {
@@ -60,6 +61,9 @@ function classifySubmissionError(err) {
     msg.includes("rate")
   ) {
     return { transient: true, reasonCode: PRECHECK_REASON.SUBMIT_TRANSIENT_ERROR };
+  }
+  if (msg.includes("poolerr(") || msg.includes("execution reverted") || msg.includes("call exception")) {
+    return { transient: false, reasonCode: PRECHECK_REASON.SUBMIT_FATAL_ERROR };
   }
   return { transient: false, reasonCode: PRECHECK_REASON.SUBMIT_FATAL_ERROR };
 }
@@ -106,6 +110,7 @@ function buildSettlementPayload(match, fills, policy) {
     })),
     noteRefs,
     witness,
+    onchain: meta.onchain || null,
     fheBinding: {
       fheDecisionHash: match.fheDecisionHash || null,
       fheResultHash: match.fheResultHash || null,
@@ -146,6 +151,12 @@ function runPrechecks(payload, policy) {
   if (b(payload.amounts.matchedOut) < 0n) {
     return { ok: false, reasonCode: PRECHECK_REASON.CONSERVATION_CHECK_FAILED, details: payload.amounts };
   }
+  if (policy.submissionMode === "live_internal_match") {
+    const required = payload?.onchain?.internalMatchData;
+    if (!required || typeof required !== "object") {
+      return { ok: false, reasonCode: PRECHECK_REASON.ONCHAIN_DATA_MISSING, details: {} };
+    }
+  }
   return { ok: true };
 }
 
@@ -170,7 +181,7 @@ function createSettlementCoordinator({ db, submitter } = {}) {
     return { execution: exec, events };
   }
 
-  function start(matchHash, options = {}) {
+  async function start(matchHash, options = {}) {
     const traceId = crypto.randomUUID();
     const policy = normalizePolicy(options.policy || {});
     const now = Date.now();
@@ -283,16 +294,30 @@ function createSettlementCoordinator({ db, submitter } = {}) {
       if (policy.submissionMode === "disabled") {
         throw new Error(PRECHECK_REASON.POLICY_NO_SUBMIT);
       }
-      const tx = (submitter || defaultSubmitter)({ payload, match, fills, traceId, attempt, policy });
+      const tx = await (submitter || defaultSubmitter)({ payload, match, fills, traceId, attempt, policy });
       const txHash = String(tx?.txHash || ethers.keccak256(ethers.toUtf8Bytes(`${matchHash}:${attempt}`)));
       const submitted = {
         ...submitting,
         status: SETTLEMENT_STATUS.SUBMITTED,
+        payloadJson: {
+          ...payload,
+          onchainResult: tx?.receipt
+            ? {
+                blockNumber: tx.receipt.blockNumber ?? null,
+                status: tx.receipt.status ?? null,
+                gasUsed: tx.receipt.gasUsed != null ? String(tx.receipt.gasUsed) : null,
+              }
+            : null,
+        },
         txHash,
         updatedAt: Date.now(),
       };
       updateSettlementExecution(db, submitted);
-      persistEvent(submitted, traceId, "settlement_submitted", null, { txHash, attempt });
+      persistEvent(submitted, traceId, "settlement_submitted", null, {
+        txHash,
+        attempt,
+        receipt: tx?.receipt || null,
+      });
       return {
         traceId,
         matchHash,
@@ -329,13 +354,99 @@ function createSettlementCoordinator({ db, submitter } = {}) {
     buildSettlementPayload,
     runPrechecks,
     start,
-    retry: (matchHash, options = {}) => start(matchHash, { ...options, forceRetry: true }),
+    retry: async (matchHash, options = {}) => start(matchHash, { ...options, forceRetry: true }),
     getStatus,
+  };
+}
+
+function toU256(v) {
+  return BigInt(String(v ?? "0"));
+}
+
+function toBytes32(v) {
+  if (v == null) return ethers.ZeroHash;
+  const asString = String(v);
+  if (ethers.isHexString(asString, 32)) return asString;
+  return ethers.zeroPadValue(ethers.toBeHex(toU256(asString)), 32);
+}
+
+function normalizeProofTuple(p) {
+  if (!p) return ["0x", "0x", "0x"];
+  if (Array.isArray(p) && p.length === 3) return p;
+  if (p.a != null && p.b != null && p.c != null) return [p.a, p.b, p.c];
+  return ["0x", "0x", "0x"];
+}
+
+function normalizeJoinSplitInputsTuple(pi) {
+  const path = Array.isArray(pi?.merklePath) ? pi.merklePath : [];
+  const idx = Array.isArray(pi?.merklePathIndices) ? pi.merklePathIndices : [];
+  return [
+    toBytes32(pi?.nullifier),
+    toBytes32(pi?.inputCommitment),
+    toBytes32(pi?.outputCommitmentSwap),
+    toBytes32(pi?.outputCommitmentChange),
+    toBytes32(pi?.merkleRoot),
+    toU256(pi?.inputAssetID),
+    toU256(pi?.outputAssetIDSwap),
+    toU256(pi?.outputAssetIDChange),
+    toU256(pi?.inputAmount),
+    toU256(pi?.swapAmount),
+    toU256(pi?.changeAmount),
+    toU256(pi?.outputAmountSwap),
+    toU256(pi?.minOutputAmountSwap),
+    toU256(pi?.gasRefund),
+    toU256(pi?.protocolFee),
+    Array.from({ length: 10 }, (_, i) => toU256(path[i] ?? 0)),
+    Array.from({ length: 10 }, (_, i) => toU256(idx[i] ?? 0)),
+  ];
+}
+
+function createOnchainInternalMatchSubmitter({
+  rpcUrl = process.env.RPC_URL,
+  privateKey = process.env.RELAYER_PRIVATE_KEY,
+  shieldedPoolAddress = process.env.SHIELDED_POOL_ADDRESS,
+} = {}) {
+  if (!rpcUrl || !privateKey || !shieldedPoolAddress) {
+    throw new Error("onchain_submitter_env_missing");
+  }
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const signer = new ethers.Wallet(privateKey, provider);
+  const abi = [
+    "function internalMatchSettle(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),address,bytes32,bytes32,bytes)) external",
+  ];
+  const contract = new ethers.Contract(shieldedPoolAddress, abi, signer);
+
+  return async function onchainSubmitter({ payload }) {
+    const data = payload?.onchain?.internalMatchData;
+    if (!data) throw new Error("internal_match_data_missing");
+    const tx = await contract.internalMatchSettle([
+      normalizeProofTuple(data.takerProof),
+      normalizeJoinSplitInputsTuple(data.takerInputs),
+      normalizeProofTuple(data.makerProof),
+      normalizeJoinSplitInputsTuple(data.makerInputs),
+      data.relayer || signer.address,
+      toBytes32(data.matchHash || payload.matchHash),
+      toBytes32(data.executionKey || payload.executionKey),
+      data.encryptedPayload || "0x",
+    ]);
+    const receipt = await tx.wait();
+    return {
+      txHash: receipt?.hash || tx.hash,
+      receipt: receipt
+        ? {
+            blockNumber: receipt.blockNumber,
+            status: receipt.status,
+            gasUsed: receipt.gasUsed != null ? String(receipt.gasUsed) : null,
+          }
+        : null,
+      mode: "live_internal_match",
+    };
   };
 }
 
 module.exports = {
   createSettlementCoordinator,
+  createOnchainInternalMatchSubmitter,
   SETTLEMENT_STATUS,
   PRECHECK_REASON,
 };

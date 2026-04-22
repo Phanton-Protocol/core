@@ -766,6 +766,12 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         emit NullifierMarked(inputs.nullifier);
         emit CommitmentAdded(inputs.outputCommitmentChange, changeIndex);
     }
+
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata
+    ) external override nonReentrant {
+        revert("ShieldedPoolUpgradeable: internalMatchSettle not supported");
+    }
     
     /**
      * @notice Executes a multi-output shielded withdrawal (2+ recipients)

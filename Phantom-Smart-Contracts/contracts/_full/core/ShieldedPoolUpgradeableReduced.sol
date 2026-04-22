@@ -641,6 +641,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         revert("SP: portfolio not supported");
     }
 
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata
+    ) external pure override {
+        revert("SP: internal match not supported");
+    }
+
     // ============ Multi-Output Withdraw (Required by Interface) ============
     function multiOutputWithdraw(MultiOutputWithdrawData calldata withdrawData) external override nonReentrant {
         // Simplified implementation - delegate to withdraw handler if available

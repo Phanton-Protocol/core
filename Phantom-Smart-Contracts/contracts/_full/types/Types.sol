@@ -157,6 +157,21 @@ struct JoinSplitSwapData {
 }
 
 /**
+ * @notice Atomic internal match settlement payload (2 inputs, 4 outputs)
+ * @dev Additive path used by relayer settlement coordinator for dual-party matching.
+ */
+struct InternalMatchSettlementData {
+    Proof takerProof;                       // ZK proof for taker leg
+    JoinSplitPublicInputs takerInputs;      // Taker spend + outputs
+    Proof makerProof;                       // ZK proof for maker leg
+    JoinSplitPublicInputs makerInputs;      // Maker spend + outputs
+    address relayer;                        // Relayer receiving gas refunds
+    bytes32 matchHash;                      // Off-chain deterministic match anchor
+    bytes32 executionKey;                   // Coordinator linkage key
+    bytes encryptedPayload;                 // Optional encrypted reconciliation payload
+}
+
+/**
  * @notice Public inputs for portfolio-note swaps/updates
  */
 struct PortfolioSwapPublicInputs {

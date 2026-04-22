@@ -38,6 +38,7 @@ module.exports = {
   networks: {
     hardhat: {
       chainId: 31337,
+      allowUnlimitedContractSize: useFullTree,
     },
     bscTestnet: {
       url: process.env.BSC_TESTNET_RPC || bscTestnetCfg.rpcUrl,

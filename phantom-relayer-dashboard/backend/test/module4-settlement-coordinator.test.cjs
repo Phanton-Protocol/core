@@ -68,11 +68,11 @@ function cryptoRandomId() {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-test("module4 conservation and fee math precheck passes coherent payload", (t) => {
+test("module4 conservation and fee math precheck passes coherent payload", async (t) => {
   const db = withDb(t);
   const { matchHash } = seedMatch(db, { quantity: "100" });
   const coordinator = createSettlementCoordinator({ db });
-  const status = coordinator.start(matchHash, {
+  const status = await coordinator.start(matchHash, {
     policy: { protocolFeeBps: 100, gasRefundWei: "0", submissionMode: "dry_run" },
   });
   assert.equal(status.settlementStatus, SETTLEMENT_STATUS.SUBMITTED);
@@ -85,7 +85,7 @@ test("module4 conservation and fee math precheck passes coherent payload", (t) =
   );
 });
 
-test("module4 precheck failure taxonomy persists without corrupting match/fill", (t) => {
+test("module4 precheck failure taxonomy persists without corrupting match/fill", async (t) => {
   const db = withDb(t);
   const { matchHash } = seedMatch(db, {
     metadataJson: {
@@ -95,7 +95,7 @@ test("module4 precheck failure taxonomy persists without corrupting match/fill",
     },
   });
   const coordinator = createSettlementCoordinator({ db });
-  const out = coordinator.start(matchHash, {
+  const out = await coordinator.start(matchHash, {
     policy: { allowFallback: false, fallbackMode: "none" },
   });
   assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
@@ -104,7 +104,7 @@ test("module4 precheck failure taxonomy persists without corrupting match/fill",
   assert.ok(status.events.some((e) => e.reasonCode === PRECHECK_REASON.MISSING_NOTE_REFERENCES));
 });
 
-test("module4 idempotent re-trigger returns already submitted without duplicate submit", (t) => {
+test("module4 idempotent re-trigger returns already submitted without duplicate submit", async (t) => {
   const db = withDb(t);
   const { matchHash } = seedMatch(db, {});
   let submits = 0;
@@ -115,14 +115,14 @@ test("module4 idempotent re-trigger returns already submitted without duplicate 
       return { txHash: ethers.keccak256(ethers.toUtf8Bytes(payload.matchHash)) };
     },
   });
-  const first = coordinator.start(matchHash, { policy: { submissionMode: "live" } });
-  const second = coordinator.start(matchHash, { policy: { submissionMode: "live" } });
+  const first = await coordinator.start(matchHash, { policy: { submissionMode: "live" } });
+  const second = await coordinator.start(matchHash, { policy: { submissionMode: "live" } });
   assert.equal(first.settlementStatus, SETTLEMENT_STATUS.SUBMITTED);
   assert.equal(second.idempotent, true);
   assert.equal(submits, 1);
 });
 
-test("module4 transient failure -> retriable then explicit retry succeeds", (t) => {
+test("module4 transient failure -> retriable then explicit retry succeeds", async (t) => {
   const db = withDb(t);
   const { matchHash } = seedMatch(db, {});
   let calls = 0;
@@ -134,14 +134,14 @@ test("module4 transient failure -> retriable then explicit retry succeeds", (t) 
       return { txHash: ethers.keccak256(ethers.toUtf8Bytes(`${payload.matchHash}:ok`)) };
     },
   });
-  const first = coordinator.start(matchHash, { policy: { submissionMode: "live" } });
+  const first = await coordinator.start(matchHash, { policy: { submissionMode: "live" } });
   assert.equal(first.settlementStatus, SETTLEMENT_STATUS.RETRIABLE);
   assert.equal(first.decisionReasonCode, PRECHECK_REASON.SUBMIT_TRANSIENT_ERROR);
-  const second = coordinator.retry(matchHash, { policy: { submissionMode: "live" } });
+  const second = await coordinator.retry(matchHash, { policy: { submissionMode: "live" } });
   assert.equal(second.settlementStatus, SETTLEMENT_STATUS.SUBMITTED);
 });
 
-test("module4 explicit fallback enabled routes deterministically and persists reason", (t) => {
+test("module4 explicit fallback enabled routes deterministically and persists reason", async (t) => {
   const db = withDb(t);
   const { matchHash } = seedMatch(db, {
     metadataJson: {
@@ -151,7 +151,7 @@ test("module4 explicit fallback enabled routes deterministically and persists re
     },
   });
   const coordinator = createSettlementCoordinator({ db });
-  const out = coordinator.start(matchHash, {
+  const out = await coordinator.start(matchHash, {
     policy: { allowFallback: true, fallbackMode: "shieldedSwapJoinSplit" },
   });
   assert.equal(out.settlementStatus, SETTLEMENT_STATUS.RETRIABLE);

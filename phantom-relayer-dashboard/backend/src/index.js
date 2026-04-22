@@ -52,7 +52,7 @@ const {
   logModule4
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs } = require("./swapIntentBinding");
-const { createSettlementCoordinator } = require("./settlementCoordinator");
+const { createSettlementCoordinator, createOnchainInternalMatchSubmitter } = require("./settlementCoordinator");
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
@@ -301,7 +301,11 @@ const internalOrderRouter = createInternalOrderRouter({
 });
 app.use("/intent/internal", internalOrderRouter);
 configureMatchingEngine({ db });
-const settlementCoordinator = createSettlementCoordinator({ db });
+const settlementCoordinatorSubmitter =
+  String(process.env.SETTLEMENT_SUBMISSION_MODE || "dry_run") === "live_internal_match"
+    ? createOnchainInternalMatchSubmitter()
+    : undefined;
+const settlementCoordinator = createSettlementCoordinator({ db, submitter: settlementCoordinatorSubmitter });
 
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;
@@ -3149,13 +3153,13 @@ app.get("/export", (req, res) => {
   res.json(data);
 });
 
-app.post("/settlement/internal/:matchHash/start", (req, res) => {
+app.post("/settlement/internal/:matchHash/start", async (req, res) => {
   try {
     const matchHash = String(req.params.matchHash || "");
     if (!ethers.isHexString(matchHash, 32)) {
       return res.status(400).json({ error: "invalid_match_hash" });
     }
-    const out = settlementCoordinator.start(matchHash, {
+    const out = await settlementCoordinator.start(matchHash, {
       policy: req.body?.policy || {},
       executionKey: req.body?.executionKey,
     });
@@ -3165,13 +3169,13 @@ app.post("/settlement/internal/:matchHash/start", (req, res) => {
   }
 });
 
-app.post("/settlement/internal/:matchHash/retry", (req, res) => {
+app.post("/settlement/internal/:matchHash/retry", async (req, res) => {
   try {
     const matchHash = String(req.params.matchHash || "");
     if (!ethers.isHexString(matchHash, 32)) {
       return res.status(400).json({ error: "invalid_match_hash" });
     }
-    const out = settlementCoordinator.retry(matchHash, {
+    const out = await settlementCoordinator.retry(matchHash, {
       policy: req.body?.policy || {},
       executionKey: req.body?.executionKey,
     });
