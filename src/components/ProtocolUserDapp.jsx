@@ -8,6 +8,16 @@ import { encryptForRelayer } from "../lib/relayEnvelope";
 import { CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../config";
 import { nullifierToBytes32Hex, SHADOW_SWEEP_GAS_BUFFER_WEI_DEFAULT } from "../lib/relayerDefaults.js";
 import {
+  createInternalIntent,
+  cancelInternalIntent,
+  getInternalIntent,
+  listInternalIntents,
+  settlementStart,
+  settlementRetry,
+  settlementStatus,
+  complianceByOrder,
+} from "../api/phantomApi";
+import {
   addressToOwnerPublicKey,
   commitmentToBytes32,
   noteCommitment,
@@ -31,6 +41,11 @@ function stringifyErr(x) {
     }
   }
   return String(x);
+}
+
+function isSeeAuthError(err) {
+  const msg = String(err?.message || "").toLowerCase();
+  return err?.status === 401 || err?.status === 403 || msg.includes("see") || msg.includes("attestation");
 }
 
 /** Build a v1 vault note payload from swap hints + on-chain commitment (decimal string or bytes32 hex). */
@@ -183,6 +198,62 @@ const INTENT_TYPES = {
     { name: "nullifier", type: "bytes32" },
   ],
 };
+
+const INTERNAL_ORDER_TYPES = {
+  InternalOrderIntent: [
+    { name: "owner", type: "address" },
+    { name: "signingKey", type: "address" },
+    { name: "baseAsset", type: "string" },
+    { name: "quoteAsset", type: "string" },
+    { name: "side", type: "string" },
+    { name: "amount", type: "uint256" },
+    { name: "limitPrice", type: "uint256" },
+    { name: "expiry", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "replayKey", type: "bytes32" },
+  ],
+};
+
+const INTERNAL_CANCEL_TYPES = {
+  InternalOrderCancel: [
+    { name: "orderId", type: "bytes32" },
+    { name: "owner", type: "address" },
+    { name: "reason", type: "string" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
+const ORDER_STATUS_LABEL = {
+  open: "Open",
+  reserved: "Reserved",
+  partially_filled: "Partially filled",
+  filled: "Filled",
+  cancelled: "Cancelled",
+  expired: "Expired",
+  failed: "Failed",
+};
+
+const SETTLEMENT_STATUS_LABEL = {
+  pending: "Pending",
+  retriable: "Retriable",
+  submitted: "Submitted",
+  confirmed: "Confirmed",
+  failed: "Failed",
+};
+
+function reasonToUi(reason) {
+  const key = String(reason || "").toUpperCase();
+  if (!key) return "";
+  if (key === "COMPLIANCE_BLOCKED") return "Compliance policy blocked this action.";
+  if (key === "COMPLIANCE_HOLD") return "Compliance hold in effect. Retry later or contact support.";
+  if (key === "COMPLIANCE_ESCALATED") return "Escalated for manual compliance review.";
+  if (key === "ATTESTATION_MISSING") return "Validator attestation is missing for this settlement.";
+  if (key === "ATTESTATION_INVALID") return "Validator attestation is invalid for this settlement.";
+  if (key === "ATTESTATION_QUORUM_INSUFFICIENT") return "Validator attestation quorum is insufficient.";
+  if (key === "SEE_ATTESTATION_REQUIRED" || key === "SEE_AUTH_REQUIRED") return "Secure enclave authentication is required.";
+  return key.replaceAll("_", " ");
+}
 
 const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const WBNB_BSC_MAINNET = "0xbb4CdB9Cbd36B01bD1cBaEBF2De08d9173bc095c";
@@ -503,7 +574,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     amount: "",
     price: "",
   });
-  const [localOrders, setLocalOrders] = useState([]);
+  const [internalOrders, setInternalOrders] = useState([]);
+  const [orderDetailsById, setOrderDetailsById] = useState({});
+  const [orderOpsBusy, setOrderOpsBusy] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState("");
+  const [internalHistoryLoading, setInternalHistoryLoading] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("phantom_api", apiBase);
@@ -756,6 +831,32 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       clearTimeout(timer);
     };
   }, [base, cfg?.chainId, cfg?.mode, cfg?.assets?.length, intentForm.inputToken, intentForm.outputToken, intentForm.inputAmount, intentForm.swapDataJson, swapSlippageBps, spendable, spendPick]);
+
+  useEffect(() => {
+    if (uiVariant !== "trade" || !wallet?.address) return;
+    let cancelled = false;
+    async function run() {
+      try {
+        await loadInternalOrdersSnapshot();
+        if (!cancelled && selectedOrderId) await loadInternalOrderDetails(selectedOrderId);
+      } catch (e) {
+        if (!cancelled && !orderOpsBusy) setActionError(stringifyErr(e?.message ?? e));
+      }
+    }
+    run();
+    const timer = window.setInterval(run, 6000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [uiVariant, wallet?.address, selectedOrderId]);
+
+  useEffect(() => {
+    if (uiVariant !== "trade" || !selectedOrderId) return;
+    loadInternalOrderDetails(selectedOrderId).catch((e) => {
+      if (!orderOpsBusy) setActionError(stringifyErr(e?.message ?? e));
+    });
+  }, [uiVariant, selectedOrderId]);
 
   async function connect() {
     setConnectError(null);
@@ -1652,29 +1753,187 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setActionSuccess(null);
   }
 
-  function placeInternalOrder() {
+  async function loadInternalOrdersSnapshot() {
+    if (!wallet?.address) return;
+    setInternalHistoryLoading(true);
+    try {
+      const res = await listInternalIntents({ limit: 50, offset: 0 });
+      const rows = Array.isArray(res?.items) ? res.items : Array.isArray(res) ? res : [];
+      const mine = rows.filter((x) => String(x?.owner || "").toLowerCase() === String(wallet.address || "").toLowerCase());
+      setInternalOrders(mine);
+      if (!selectedOrderId && mine.length) setSelectedOrderId(String(mine[0].id || ""));
+    } finally {
+      setInternalHistoryLoading(false);
+    }
+  }
+
+  async function loadInternalOrderDetails(orderId) {
+    if (!orderId) return;
+    const [snapshot, compliance] = await Promise.all([
+      getInternalIntent(orderId),
+      complianceByOrder(orderId).catch(() => ({ decisions: [] })),
+    ]);
+    const snap = snapshot?.order || snapshot;
+    const orderDecisions = Array.isArray(compliance?.decisions) ? compliance.decisions : [];
+    let settlement = null;
+    if (snap?.matchHash) {
+      settlement = await settlementStatus(snap.matchHash).catch(() => null);
+    }
+    setOrderDetailsById((prev) => ({
+      ...prev,
+      [orderId]: {
+        order: snap,
+        complianceDecisions: orderDecisions,
+        settlement,
+      },
+    }));
+  }
+
+  async function placeInternalOrder() {
     const amountNum = Number(orderForm.amount);
     const priceNum = Number(orderForm.price);
     if (!Number.isFinite(amountNum) || amountNum <= 0 || !Number.isFinite(priceNum) || priceNum <= 0) {
       setActionError("Enter a valid order amount and price.");
       return;
     }
+    if (!wallet?.signer || !wallet?.address) {
+      setActionError("Connect wallet to place internal orders.");
+      return;
+    }
+    if (!cfg?.chainId || !cfg?.addresses?.shieldedPool) {
+      setActionError("Backend config not loaded.");
+      return;
+    }
+    setOrderOpsBusy(true);
     setActionError(null);
     setActionSuccess(null);
-    const next = {
-      id: Date.now(),
-      side: orderForm.side,
-      pair: `${orderForm.baseToken}/${orderForm.quoteToken}`,
-      amount: amountNum.toFixed(4),
-      price: priceNum.toFixed(4),
-      total: (amountNum * priceNum).toFixed(4),
-      status: "OPEN",
-    };
-    setLocalOrders((prev) => [next, ...prev].slice(0, 12));
-    setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const nonce = String(nowSec);
+      const expiry = String(nowSec + 60 * 30);
+      const replayKey = ethers.keccak256(ethers.toUtf8Bytes(`${wallet.address.toLowerCase()}:${nonce}:${Date.now()}`));
+      const orderPayload = {
+        owner: wallet.address,
+        signingKey: wallet.address,
+        baseAsset: orderForm.baseToken,
+        quoteAsset: orderForm.quoteToken,
+        side: orderForm.side,
+        amount: ethers.parseUnits(String(amountNum), 18).toString(),
+        limitPrice: ethers.parseUnits(String(priceNum), 18).toString(),
+        expiry,
+        nonce,
+        replayKey,
+      };
+      const domain = {
+        name: "PhantomRelayer",
+        version: "1",
+        chainId: Number(cfg.chainId),
+        verifyingContract: cfg.addresses.shieldedPool,
+      };
+      const signature = await wallet.signer.signTypedData(domain, INTERNAL_ORDER_TYPES, orderPayload);
+      const submitted = await createInternalIntent({ order: orderPayload, signature });
+      const orderId = submitted?.orderId || submitted?.id;
+      setActionSuccess(orderId ? `Internal order submitted: ${orderId}` : "Internal order submitted.");
+      setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
+      await loadInternalOrdersSnapshot();
+      if (orderId) {
+        setSelectedOrderId(orderId);
+        await loadInternalOrderDetails(orderId);
+      }
+    } catch (e) {
+      if (isSeeAuthError(e)) {
+        setActionError("SEE authentication required. Please provide enclave attestation headers/session.");
+      } else {
+        setActionError(stringifyErr(e?.message ?? e));
+      }
+    } finally {
+      setOrderOpsBusy(false);
+    }
+  }
+
+  async function cancelSelectedInternalOrder() {
+    if (!selectedOrderId) return;
+    if (!wallet?.signer || !wallet?.address) {
+      setActionError("Connect wallet to cancel internal orders.");
+      return;
+    }
+    if (!cfg?.chainId || !cfg?.addresses?.shieldedPool) {
+      setActionError("Backend config not loaded.");
+      return;
+    }
+    setOrderOpsBusy(true);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const payload = {
+        orderId: selectedOrderId,
+        owner: wallet.address,
+        reason: "user_cancelled",
+        nonce: String(nowSec),
+        deadline: String(nowSec + 600),
+      };
+      const domain = {
+        name: "PhantomRelayer",
+        version: "1",
+        chainId: Number(cfg.chainId),
+        verifyingContract: cfg.addresses.shieldedPool,
+      };
+      const signature = await wallet.signer.signTypedData(domain, INTERNAL_CANCEL_TYPES, payload);
+      await cancelInternalIntent({ cancel: payload, signature });
+      setActionSuccess("Cancellation request submitted.");
+      await loadInternalOrdersSnapshot();
+      await loadInternalOrderDetails(selectedOrderId);
+    } catch (e) {
+      if (isSeeAuthError(e)) {
+        setActionError("SEE authentication required. Please provide enclave attestation headers/session.");
+      } else {
+        setActionError(stringifyErr(e?.message ?? e));
+      }
+    } finally {
+      setOrderOpsBusy(false);
+    }
+  }
+
+  async function retrySelectedSettlement() {
+    const details = orderDetailsById[selectedOrderId];
+    const matchHash = details?.order?.matchHash;
+    if (!matchHash) return;
+    setOrderOpsBusy(true);
+    setActionError(null);
+    try {
+      await settlementRetry(matchHash, {});
+      await loadInternalOrderDetails(selectedOrderId);
+      setActionSuccess("Settlement retry requested.");
+    } catch (e) {
+      setActionError(stringifyErr(e?.message ?? e));
+    } finally {
+      setOrderOpsBusy(false);
+    }
+  }
+
+  async function startSelectedSettlement() {
+    const details = orderDetailsById[selectedOrderId];
+    const matchHash = details?.order?.matchHash;
+    if (!matchHash) return;
+    setOrderOpsBusy(true);
+    setActionError(null);
+    try {
+      await settlementStart(matchHash, {});
+      await loadInternalOrderDetails(selectedOrderId);
+      setActionSuccess("Settlement start requested.");
+    } catch (e) {
+      setActionError(stringifyErr(e?.message ?? e));
+    } finally {
+      setOrderOpsBusy(false);
+    }
   }
 
   const showSwapPanel = tab === "swap" || (tab === "all" && uiVariant !== "trade");
+  const selectedOrderDetails = selectedOrderId ? orderDetailsById[selectedOrderId] : null;
+  const selectedSettlement = selectedOrderDetails?.settlement;
+  const selectedExecution = selectedSettlement?.execution || {};
+  const selectedSettlementStatus = String(selectedExecution?.status || "").toLowerCase();
   const depthLevels = useMemo(() => ([
     { price: "312.4000", size: "5.2000", side: "sell" },
     { price: "311.9500", size: "3.7000", side: "sell" },
@@ -1898,12 +2157,12 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 <input value={orderForm.amount} onChange={(e) => setOrderForm((prev) => ({ ...prev, amount: e.target.value }))} placeholder="Amount to sell" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
                 <input value={orderForm.price} onChange={(e) => setOrderForm((prev) => ({ ...prev, price: e.target.value }))} placeholder="Limit price" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
               </div>
-              <button type="button" onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "none", background: `linear-gradient(90deg, ${PC.teal}, #7645d9)`, color: "#191326", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: "pointer" }}>
+              <button type="button" disabled={orderOpsBusy} onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "none", background: `linear-gradient(90deg, ${PC.teal}, #7645d9)`, color: "#191326", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: orderOpsBusy ? "not-allowed" : "pointer", opacity: orderOpsBusy ? 0.6 : 1 }}>
                 Place order
               </button>
             </div>
             <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
-              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Orderbook (x, y, z levels)</div>
+              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Live internal orderbook snapshot</div>
               <div style={{ display: "grid", gap: 6 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 11, color: PC.muted }}>
                   <span>Price</span><span>Size</span><span>Side</span>
@@ -1919,22 +2178,59 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             </div>
           </div>
           <div style={{ marginTop: 12, borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
-            <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Placed orders</div>
+            <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Internal orders (API-backed)</div>
             <div style={{ display: "grid", gap: 6 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr 0.8fr", fontSize: 11, color: PC.muted }}>
-                <span>Pair</span><span>Amount</span><span>Price</span><span>Total</span><span>Status</span>
+              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 0.8fr 1fr", fontSize: 11, color: PC.muted }}>
+                <span>Pair</span><span>Amount</span><span>Price</span><span>Status</span><span>Order ID</span>
               </div>
-              {localOrders.length === 0 ? (
-                <div style={{ fontSize: 12, color: PC.muted }}>No orders placed yet.</div>
-              ) : localOrders.map((order) => (
-                <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr 0.8fr", fontSize: 12, color: "#fff" }}>
-                  <span>{order.pair}</span>
+              {internalHistoryLoading ? (
+                <div style={{ fontSize: 12, color: PC.muted }}>Refreshing internal lifecycle…</div>
+              ) : internalOrders.length === 0 ? (
+                <div style={{ fontSize: 12, color: PC.muted }}>No internal orders yet.</div>
+              ) : internalOrders.map((order) => (
+                <button
+                  key={order.id}
+                  type="button"
+                  onClick={() => setSelectedOrderId(String(order.id))}
+                  style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 0.8fr 1fr", fontSize: 12, color: "#fff", border: `1px solid ${String(selectedOrderId) === String(order.id) ? "rgba(0,229,199,0.55)" : PC.border}`, background: "rgba(0,0,0,0.18)", borderRadius: 10, padding: "8px 10px", textAlign: "left", cursor: "pointer" }}
+                >
+                  <span>{order.baseAsset}/{order.quoteAsset}</span>
                   <span>{order.amount}</span>
-                  <span>{order.price}</span>
-                  <span>{order.total}</span>
-                  <span style={{ color: PC.teal }}>{order.status}</span>
-                </div>
+                  <span>{order.limitPrice}</span>
+                  <span style={{ color: PC.teal }}>{ORDER_STATUS_LABEL[String(order.status || "").toLowerCase()] || order.status}</span>
+                  <span style={{ fontFamily: "var(--font-mono, monospace)" }}>{shorten(String(order.id || ""))}</span>
+                </button>
               ))}
+            </div>
+            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" disabled={!selectedOrderId || orderOpsBusy} onClick={cancelSelectedInternalOrder} style={{ borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(248,113,113,0.18)", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: !selectedOrderId || orderOpsBusy ? "not-allowed" : "pointer", opacity: !selectedOrderId || orderOpsBusy ? 0.6 : 1 }}>
+                Cancel order
+              </button>
+              <button type="button" disabled={!selectedOrderDetails?.order?.matchHash || orderOpsBusy} onClick={startSelectedSettlement} style={{ borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(34,197,94,0.2)", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: !selectedOrderDetails?.order?.matchHash || orderOpsBusy ? "not-allowed" : "pointer", opacity: !selectedOrderDetails?.order?.matchHash || orderOpsBusy ? 0.6 : 1 }}>
+                Start settlement
+              </button>
+              <button type="button" disabled={!selectedOrderDetails?.order?.matchHash || orderOpsBusy} onClick={retrySelectedSettlement} style={{ borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(251,191,36,0.2)", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: !selectedOrderDetails?.order?.matchHash || orderOpsBusy ? "not-allowed" : "pointer", opacity: !selectedOrderDetails?.order?.matchHash || orderOpsBusy ? 0.6 : 1 }}>
+                Retry settlement
+              </button>
+            </div>
+            <div style={{ marginTop: 10, borderRadius: 10, border: `1px solid ${PC.border}`, background: "rgba(0,0,0,0.24)", padding: 10 }}>
+              <div style={{ fontSize: 11, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Lifecycle and policy timeline</div>
+              {!selectedOrderDetails ? (
+                <div style={{ fontSize: 12, color: PC.muted }}>Select an order to inspect compliance, events, and settlement outcome.</div>
+              ) : (
+                <div style={{ display: "grid", gap: 6, fontSize: 12, color: "#fff" }}>
+                  <div>Order status: <span style={{ color: PC.teal }}>{ORDER_STATUS_LABEL[String(selectedOrderDetails.order?.status || "").toLowerCase()] || selectedOrderDetails.order?.status || "Unknown"}</span></div>
+                  <div>Settlement: <span style={{ color: "#c7d2fe" }}>{SETTLEMENT_STATUS_LABEL[selectedSettlementStatus] || (selectedSettlementStatus || "N/A")}</span></div>
+                  {selectedExecution?.txHash ? <div>Tx: <span style={{ fontFamily: "var(--font-mono, monospace)" }}>{selectedExecution.txHash}</span></div> : null}
+                  {selectedExecution?.reasonCode ? <div>Reason: {reasonToUi(selectedExecution.reasonCode)}</div> : null}
+                  {(selectedOrderDetails.complianceDecisions || []).slice(0, 3).map((d) => (
+                    <div key={d.id || `${d.phase}-${d.createdAt}`}>Compliance ({d.phase}): {reasonToUi(d.reasonCode || d.action)}</div>
+                  ))}
+                  {(selectedSettlement?.attestationDecisions || []).slice(0, 2).map((d) => (
+                    <div key={d.id || `${d.matchHash}-${d.createdAt}`}>Attestation: {reasonToUi(d.reasonCode || (d.valid ? "ALLOW" : "ATTESTATION_INVALID"))}</div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

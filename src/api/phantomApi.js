@@ -138,3 +138,63 @@ export async function getTokenomicsMetrics() {
 export async function getSeeConfig() {
   return req('/see/config');
 }
+
+export async function createInternalIntent(payload) {
+  return req("/intent/internal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function cancelInternalIntent(payload) {
+  return req("/intent/internal/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getInternalIntent(orderId) {
+  return req(`/intent/internal/${orderId}`);
+}
+
+export async function listInternalIntents({ status, limit = 50, offset = 0 } = {}) {
+  const qs = new URLSearchParams();
+  if (status) qs.set("status", String(status));
+  qs.set("limit", String(limit));
+  qs.set("offset", String(offset));
+  return req(`/intent/internal?${qs.toString()}`);
+}
+
+export async function settlementStart(matchHash, payload = {}) {
+  return req(`/settlement/internal/${matchHash}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function settlementRetry(matchHash, payload = {}) {
+  return req(`/settlement/internal/${matchHash}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function settlementStatus(matchHash) {
+  return req(`/settlement/internal/${matchHash}/status`);
+}
+
+export async function complianceByOrder(orderId) {
+  return req(`/compliance/internal/order/${orderId}/decisions`);
+}
+
+export async function complianceByMatch(matchHash) {
+  return req(`/compliance/internal/match/${matchHash}/decisions`);
+}
+
+export async function complianceByExecution(executionId) {
+  return req(`/compliance/internal/execution/${executionId}/decisions`);
+}
