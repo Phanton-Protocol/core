@@ -12,6 +12,8 @@ const {
   getMatchByHash,
   saveFill,
   listFillsByMatch,
+  saveMatchDecision,
+  listMatchDecisionsByOrder,
 } = require("./db");
 const { ORDER_STATUS, assertLegalTransition } = require("./internalOrderLifecycle");
 const router = express.Router();
@@ -48,11 +50,27 @@ const ORDER_STORE_FILE = process.env.MATCHING_ORDER_STORE || path.join(__dirname
 const orderBook = new Map();
 const MAX_ORDERS_PER_PAIR = 50;
 const DEFAULT_RESERVATION_TTL_MS = Number(process.env.MATCHING_RESERVATION_TTL_MS || 90_000);
+const DEFAULT_FHE_POLICY_MODE = String(process.env.MATCHING_FHE_POLICY_MODE || "degraded").toLowerCase();
+const DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE = process.env.MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE !== "false";
 let matchingContext = {
   db: null,
   reservationTtlMs: DEFAULT_RESERVATION_TTL_MS,
+  fhePolicyMode: DEFAULT_FHE_POLICY_MODE === "strict" ? "strict" : "degraded",
+  degradedAllowUnavailable: DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE,
+  fheCompatibilityEvaluator: null,
 };
 let jsonFallbackLock = Promise.resolve();
+
+const REASON_CODES = Object.freeze({
+  PRICE_MISMATCH: "PRICE_MISMATCH",
+  SIZE_MISMATCH: "SIZE_MISMATCH",
+  FHE_REJECTED: "FHE_REJECTED",
+  FHE_UNAVAILABLE: "FHE_UNAVAILABLE",
+  POLICY_BLOCKED: "POLICY_BLOCKED",
+  POLICY_DEGRADED_ALLOW: "POLICY_DEGRADED_ALLOW",
+  NO_COMPATIBLE_COUNTERPARTY: "NO_COMPATIBLE_COUNTERPARTY",
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+});
 
 function orderBookKey(inputAssetID, outputAssetID) {
   return `${Number(inputAssetID)}-${Number(outputAssetID)}`;
@@ -86,6 +104,35 @@ function computeStableMatchHash(payload) {
         takerOrderId: payload.takerOrderId,
         quantity: payload.quantity,
         executionPrice: payload.executionPrice,
+      })
+    )
+  );
+}
+
+function computeFheResultHash(result) {
+  return ethers.keccak256(
+    ethers.toUtf8Bytes(
+      JSON.stringify({
+        compatible: Boolean(result?.compatible),
+        availability: String(result?.availability || "unknown"),
+        code: String(result?.code || ""),
+        attestationRef: String(result?.attestationRef || ""),
+      })
+    )
+  );
+}
+
+function computeFheDecisionHash(payload) {
+  return ethers.keccak256(
+    ethers.toUtf8Bytes(
+      JSON.stringify({
+        matchHash: payload.matchHash ?? null,
+        executionKey: payload.executionKey ?? null,
+        policyMode: payload.policyMode,
+        degradedAllowUnavailable: Boolean(payload.degradedAllowUnavailable),
+        reasonCode: payload.reasonCode,
+        fheResultHash: payload.fheResultHash ?? null,
+        fheAttestationRef: payload.fheAttestationRef ?? null,
       })
     )
   );
@@ -148,11 +195,23 @@ function configureMatchingEngine(opts = {}) {
   matchingContext = {
     db: opts.db || null,
     reservationTtlMs: Number(opts.reservationTtlMs || DEFAULT_RESERVATION_TTL_MS),
+    fhePolicyMode: String(opts.fhePolicyMode || DEFAULT_FHE_POLICY_MODE).toLowerCase() === "strict" ? "strict" : "degraded",
+    degradedAllowUnavailable: typeof opts.degradedAllowUnavailable === "boolean"
+      ? opts.degradedAllowUnavailable
+      : DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE,
+    fheCompatibilityEvaluator: typeof opts.fheCompatibilityEvaluator === "function" ? opts.fheCompatibilityEvaluator : null,
   };
 }
 
 function getDb() {
   return matchingContext.db || null;
+}
+
+function getFhePolicy() {
+  return {
+    mode: matchingContext.fhePolicyMode,
+    degradedAllowUnavailable: Boolean(matchingContext.degradedAllowUnavailable),
+  };
 }
 
 function computeExecutionKey(orderA, orderB) {
@@ -186,6 +245,32 @@ function selectBestCounterparty(taker, allOrders, nowSec) {
     )
     .sort(buildCounterpartyComparator(taker));
   return candidates[0] || null;
+}
+
+function logStructuredDecision(payload) {
+  try {
+    console.log("[matching.decision]", JSON.stringify(payload));
+  } catch {
+    console.log("[matching.decision]", payload);
+  }
+}
+
+function persistDecision(db, row) {
+  saveMatchDecision(db, {
+    id: crypto.randomUUID(),
+    traceId: row.traceId,
+    takerOrderId: row.takerOrderId,
+    candidateOrderId: row.candidateOrderId ?? null,
+    matchHash: row.matchHash ?? null,
+    executionKey: row.executionKey ?? null,
+    reasonCode: row.reasonCode,
+    policyMode: row.policyMode,
+    fheDecisionHash: row.fheDecisionHash ?? null,
+    fheResultHash: row.fheResultHash ?? null,
+    fheAttestationRef: row.fheAttestationRef ?? null,
+    detailsJson: row.detailsJson || {},
+    createdAt: Date.now(),
+  });
 }
 
 function derivePostFillState(order, fillQty, executionKey, actor) {
@@ -289,8 +374,13 @@ function persistMatchAndFills(db, payload) {
     executionPrice: payload.executionPrice,
     quantity: payload.quantity.toString(),
     status: "finalized",
+    decisionReasonCode: payload.decisionReasonCode ?? null,
+    fheResultHash: payload.fheResultHash ?? null,
+    fheDecisionHash: payload.fheDecisionHash ?? null,
+    fheAttestationRef: payload.fheAttestationRef ?? null,
     metadataJson: {
       reason: "price_time_priority_match",
+      finalDecisionReasonCode: payload.decisionReasonCode ?? null,
       makerRemainingBefore: payload.maker.remainingAmount,
       takerRemainingBefore: payload.taker.remainingAmount,
     },
@@ -323,23 +413,232 @@ function persistMatchAndFills(db, payload) {
   };
 }
 
-function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher") {
+async function evaluateFheCompatibility(taker, maker, traceId) {
+  if (typeof matchingContext.fheCompatibilityEvaluator === "function") {
+    try {
+      const out = await matchingContext.fheCompatibilityEvaluator({ taker, maker, candidate: maker, traceId });
+      return {
+        availability: "available",
+        compatible: Boolean(out?.compatible),
+        code: String(out?.code || (out?.compatible ? "ok" : "reject")),
+        attestationRef: out?.attestationRef ? String(out.attestationRef) : null,
+      };
+    } catch (e) {
+      return { availability: "unavailable", compatible: false, code: "evaluator_error", attestationRef: null, error: e?.message || String(e) };
+    }
+  }
+
+  if (!FHE_SERVICE_URL) {
+    return { availability: "unavailable", compatible: false, code: "service_not_configured", attestationRef: null };
+  }
+
+  try {
+    const body = await fheRemoteFetch("/compatibility", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        traceId,
+        taker: {
+          orderId: taker.id,
+          side: taker.side,
+          pairBase: taker.pairBase,
+          pairQuote: taker.pairQuote,
+          remainingAmount: taker.remainingAmount,
+          limitPrice: taker.limitPrice,
+        },
+        candidate: {
+          orderId: maker.id,
+          side: maker.side,
+          pairBase: maker.pairBase,
+          pairQuote: maker.pairQuote,
+          remainingAmount: maker.remainingAmount,
+          limitPrice: maker.limitPrice,
+        },
+      }),
+    });
+    return {
+      availability: "available",
+      compatible: Boolean(body?.compatible),
+      code: String(body?.code || (body?.compatible ? "ok" : "reject")),
+      attestationRef: body?.attestationRef ? String(body.attestationRef) : null,
+    };
+  } catch (e) {
+    return {
+      availability: "unavailable",
+      compatible: false,
+      code: e?.name === "AbortError" ? "timeout" : "remote_error",
+      attestationRef: null,
+      error: e?.message || String(e),
+    };
+  }
+}
+
+function recordCandidateRejection(db, payload) {
+  persistDecision(db, {
+    traceId: payload.traceId,
+    takerOrderId: payload.taker.id,
+    candidateOrderId: payload.candidate?.id || null,
+    reasonCode: payload.reasonCode,
+    policyMode: payload.policy.mode,
+    fheDecisionHash: payload.fheDecisionHash ?? null,
+    fheResultHash: payload.fheResultHash ?? null,
+    fheAttestationRef: payload.fheAttestationRef ?? null,
+    detailsJson: payload.detailsJson || {},
+  });
+  logStructuredDecision({
+    traceId: payload.traceId,
+    workerId: payload.workerId,
+    takerOrderId: payload.taker.id,
+    candidateOrderId: payload.candidate?.id || null,
+    reasonCode: payload.reasonCode,
+    policyMode: payload.policy.mode,
+    details: payload.detailsJson || {},
+  });
+}
+
+async function pickBestCompatibleCounterparty(db, taker, allOrders, nowSec, policy, traceId, workerId) {
+  const takerPair = toPairKey(taker);
+  const oppositeSide = String(taker.side) === "buy" ? "sell" : "buy";
+  const candidates = allOrders
+    .filter((o) => o.id !== taker.id && toPairKey(o) === takerPair && String(o.side) === oppositeSide && isOrderLiveForMatch(o, nowSec))
+    .sort(buildCounterpartyComparator(taker));
+
+  for (const candidate of candidates) {
+    const candidateQty = parseNum(candidate.remainingAmount, 0n);
+    if (candidateQty <= 0n) {
+      recordCandidateRejection(db, {
+        traceId, workerId, taker, candidate, policy,
+        reasonCode: REASON_CODES.SIZE_MISMATCH,
+        detailsJson: { candidateRemainingAmount: String(candidate.remainingAmount) },
+      });
+      continue;
+    }
+    if (!isPriceCompatible(taker, candidate)) {
+      recordCandidateRejection(db, {
+        traceId, workerId, taker, candidate, policy,
+        reasonCode: REASON_CODES.PRICE_MISMATCH,
+        detailsJson: { takerLimitPrice: taker.limitPrice, candidateLimitPrice: candidate.limitPrice },
+      });
+      continue;
+    }
+
+    const fhe = await evaluateFheCompatibility(taker, candidate, traceId);
+    const fheResultHash = computeFheResultHash(fhe);
+    const unavailable = fhe.availability !== "available";
+    if (unavailable) {
+      if (policy.mode === "strict" || !policy.degradedAllowUnavailable) {
+        const decisionReason = policy.mode === "strict" ? REASON_CODES.FHE_UNAVAILABLE : REASON_CODES.POLICY_BLOCKED;
+        const fheDecisionHash = computeFheDecisionHash({
+          policyMode: policy.mode,
+          degradedAllowUnavailable: policy.degradedAllowUnavailable,
+          reasonCode: decisionReason,
+          fheResultHash,
+          fheAttestationRef: fhe.attestationRef,
+        });
+        recordCandidateRejection(db, {
+          traceId, workerId, taker, candidate, policy,
+          reasonCode: decisionReason,
+          fheDecisionHash,
+          fheResultHash,
+          fheAttestationRef: fhe.attestationRef,
+          detailsJson: { fheCode: fhe.code, fheError: fhe.error || null, policyBlocked: true },
+        });
+        continue;
+      }
+      const decisionReason = REASON_CODES.POLICY_DEGRADED_ALLOW;
+      const fheDecisionHash = computeFheDecisionHash({
+        policyMode: policy.mode,
+        degradedAllowUnavailable: policy.degradedAllowUnavailable,
+        reasonCode: decisionReason,
+        fheResultHash,
+        fheAttestationRef: fhe.attestationRef,
+      });
+      return {
+        candidate,
+        decisionReasonCode: decisionReason,
+        fheResultHash,
+        fheDecisionHash,
+        fheAttestationRef: fhe.attestationRef,
+        fheDetails: fhe,
+      };
+    }
+
+    if (!fhe.compatible) {
+      const decisionReason = REASON_CODES.FHE_REJECTED;
+      const fheDecisionHash = computeFheDecisionHash({
+        policyMode: policy.mode,
+        degradedAllowUnavailable: policy.degradedAllowUnavailable,
+        reasonCode: decisionReason,
+        fheResultHash,
+        fheAttestationRef: fhe.attestationRef,
+      });
+      recordCandidateRejection(db, {
+        traceId, workerId, taker, candidate, policy,
+        reasonCode: decisionReason,
+        fheDecisionHash,
+        fheResultHash,
+        fheAttestationRef: fhe.attestationRef,
+        detailsJson: { fheCode: fhe.code },
+      });
+      continue;
+    }
+
+    const decisionReason = "FHE_ACCEPTED";
+    const fheDecisionHash = computeFheDecisionHash({
+      policyMode: policy.mode,
+      degradedAllowUnavailable: policy.degradedAllowUnavailable,
+      reasonCode: decisionReason,
+      fheResultHash,
+      fheAttestationRef: fhe.attestationRef,
+    });
+    return {
+      candidate,
+      decisionReasonCode: decisionReason,
+      fheResultHash,
+      fheDecisionHash,
+      fheAttestationRef: fhe.attestationRef,
+      fheDetails: fhe,
+    };
+  }
+
+  return null;
+}
+
+async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher") {
   const nowSec = Math.floor(Date.now() / 1000);
+  const traceId = crypto.randomUUID();
+  const policy = getFhePolicy();
   const taker = getInternalOrderById(db, takerOrderId);
   if (!taker || !isOrderLiveForMatch(taker, nowSec)) {
-    return { matched: false, reason: "taker_not_matchable" };
+    return { matched: false, reason: "taker_not_matchable", reasonCode: REASON_CODES.SIZE_MISMATCH, traceId };
   }
 
   const universe = listInternalOrdersForMatching(db);
-  const maker = selectBestCounterparty(taker, universe, nowSec);
-  if (!maker) {
-    return { matched: false, reason: "no_compatible_counterparty" };
+  const selected = await pickBestCompatibleCounterparty(db, taker, universe, nowSec, policy, traceId, workerId);
+  if (!selected) {
+    persistDecision(db, {
+      traceId,
+      takerOrderId: taker.id,
+      candidateOrderId: null,
+      reasonCode: REASON_CODES.NO_COMPATIBLE_COUNTERPARTY,
+      policyMode: policy.mode,
+      detailsJson: {},
+    });
+    return { matched: false, reason: "no_compatible_counterparty", reasonCode: REASON_CODES.NO_COMPATIBLE_COUNTERPARTY, traceId };
   }
+  const maker = selected.candidate;
 
   const fillQty = parseNum(taker.remainingAmount, 0n) < parseNum(maker.remainingAmount, 0n)
     ? parseNum(taker.remainingAmount, 0n)
     : parseNum(maker.remainingAmount, 0n);
-  if (fillQty <= 0n) return { matched: false, reason: "non_positive_fill_qty" };
+  if (fillQty <= 0n) {
+    recordCandidateRejection(db, {
+      traceId, workerId, taker, candidate: maker, policy,
+      reasonCode: REASON_CODES.SIZE_MISMATCH,
+      detailsJson: { takerRemainingAmount: taker.remainingAmount, candidateRemainingAmount: maker.remainingAmount },
+    });
+    return { matched: false, reason: "non_positive_fill_qty", reasonCode: REASON_CODES.SIZE_MISMATCH, traceId };
+  }
 
   const executionKey = computeExecutionKey(taker, maker);
   const actor = `matcher:${workerId}`;
@@ -347,18 +646,18 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
   const makerBeforeStatus = maker.status;
 
   const takerReserved = reserveOrder(db, taker, fillQty, executionKey, actor);
-  if (!takerReserved) return { matched: false, reason: "taker_reservation_conflict" };
+  if (!takerReserved) return { matched: false, reason: "taker_reservation_conflict", reasonCode: REASON_CODES.INTERNAL_ERROR, traceId };
 
   const makerFresh = getInternalOrderById(db, maker.id);
   if (!makerFresh || !isOrderLiveForMatch(makerFresh, nowSec)) {
     releaseReservation(db, getInternalOrderById(db, taker.id), takerBeforeStatus, executionKey, actor, "maker_unavailable");
-    return { matched: false, reason: "maker_unavailable_after_taker_reserve" };
+    return { matched: false, reason: "maker_unavailable_after_taker_reserve", reasonCode: REASON_CODES.INTERNAL_ERROR, traceId };
   }
 
   const makerReserved = reserveOrder(db, makerFresh, fillQty, executionKey, actor);
   if (!makerReserved) {
     releaseReservation(db, getInternalOrderById(db, taker.id), takerBeforeStatus, executionKey, actor, "maker_reservation_conflict");
-    return { matched: false, reason: "maker_reservation_conflict" };
+    return { matched: false, reason: "maker_reservation_conflict", reasonCode: REASON_CODES.INTERNAL_ERROR, traceId };
   }
 
   const takerReservedRow = getInternalOrderById(db, taker.id);
@@ -383,6 +682,18 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
       taker: takerReservedRow,
       executionPrice,
       quantity: fillQty,
+      decisionReasonCode: selected.decisionReasonCode,
+      fheResultHash: selected.fheResultHash,
+      fheDecisionHash: computeFheDecisionHash({
+        matchHash,
+        executionKey,
+        policyMode: policy.mode,
+        degradedAllowUnavailable: policy.degradedAllowUnavailable,
+        reasonCode: selected.decisionReasonCode,
+        fheResultHash: selected.fheResultHash,
+        fheAttestationRef: selected.fheAttestationRef,
+      }),
+      fheAttestationRef: selected.fheAttestationRef,
     });
 
     const takerAfter = derivePostFillState(takerReservedRow, fillQty, executionKey, actor);
@@ -409,7 +720,16 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
       toStatus: takerAfter.status,
       reason: "deterministic_match_finalize",
       actor,
-      metadataJson: { executionKey, matchHash, quantity: fillQty.toString(), price: executionPrice, role: "taker" },
+      metadataJson: {
+        executionKey,
+        matchHash,
+        quantity: fillQty.toString(),
+        price: executionPrice,
+        role: "taker",
+        fheDecisionHash: persisted.match?.fheDecisionHash || null,
+        fheResultHash: persisted.match?.fheResultHash || null,
+        decisionReasonCode: persisted.match?.decisionReasonCode || selected.decisionReasonCode
+      },
       createdAt: now,
     });
     saveOrderEvent(db, {
@@ -420,8 +740,31 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
       toStatus: makerAfter.status,
       reason: "deterministic_match_finalize",
       actor,
-      metadataJson: { executionKey, matchHash, quantity: fillQty.toString(), price: executionPrice, role: "maker" },
+      metadataJson: {
+        executionKey,
+        matchHash,
+        quantity: fillQty.toString(),
+        price: executionPrice,
+        role: "maker",
+        fheDecisionHash: persisted.match?.fheDecisionHash || null,
+        fheResultHash: persisted.match?.fheResultHash || null,
+        decisionReasonCode: persisted.match?.decisionReasonCode || selected.decisionReasonCode
+      },
       createdAt: now,
+    });
+
+    persistDecision(db, {
+      traceId,
+      takerOrderId: taker.id,
+      candidateOrderId: maker.id,
+      matchHash,
+      executionKey,
+      reasonCode: selected.decisionReasonCode,
+      policyMode: policy.mode,
+      fheDecisionHash: persisted.match?.fheDecisionHash || null,
+      fheResultHash: persisted.match?.fheResultHash || null,
+      fheAttestationRef: persisted.match?.fheAttestationRef || null,
+      detailsJson: { matched: true, workerId, fheCode: selected.fheDetails?.code || null },
     });
 
     return {
@@ -432,8 +775,13 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
       matchHash,
       quantity: fillQty.toString(),
       executionPrice,
+      traceId,
+      reasonCode: selected.decisionReasonCode,
       makerOrderId: maker.id,
       takerOrderId: taker.id,
+      fheResultHash: persisted.match?.fheResultHash || null,
+      fheDecisionHash: persisted.match?.fheDecisionHash || null,
+      fheAttestationRef: persisted.match?.fheAttestationRef || null,
       fills: persisted.fills,
     };
   };
@@ -452,7 +800,15 @@ function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher
     if (mRow?.status === ORDER_STATUS.RESERVED) {
       releaseReservation(db, mRow, makerBeforeStatus, executionKey, actor, "finalization_failed");
     }
-    return { matched: false, reason: "finalization_failed", error: e.message || String(e) };
+    persistDecision(db, {
+      traceId,
+      takerOrderId: taker.id,
+      candidateOrderId: maker.id,
+      reasonCode: REASON_CODES.INTERNAL_ERROR,
+      policyMode: policy.mode,
+      detailsJson: { error: e.message || String(e), stage: "finalization" },
+    });
+    return { matched: false, reason: "finalization_failed", reasonCode: REASON_CODES.INTERNAL_ERROR, error: e.message || String(e), traceId };
   }
 }
 
@@ -674,6 +1030,35 @@ router.post("/internal/reconcile", async (req, res) => {
   }
 });
 
+router.get("/internal/order/:orderId/decisions", (req, res) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ error: "db_not_configured" });
+    const orderId = String(req.params.orderId || "");
+    if (!ethers.isHexString(orderId, 32)) return res.status(400).json({ error: "invalid_order_id" });
+    const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
+    const items = listMatchDecisionsByOrder(db, orderId, limit);
+    return res.json({ orderId, items, count: items.length, policy: getFhePolicy() });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "decision_query_failed" });
+  }
+});
+
+router.get("/internal/match/:matchHash", (req, res) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ error: "db_not_configured" });
+    const matchHash = String(req.params.matchHash || "");
+    if (!ethers.isHexString(matchHash, 32)) return res.status(400).json({ error: "invalid_match_hash" });
+    const match = getMatchByHash(db, matchHash);
+    if (!match) return res.status(404).json({ error: "match_not_found" });
+    const fills = listFillsByMatch(db, match.id);
+    return res.json({ match, fills });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "match_query_failed" });
+  }
+});
+
 router.get('/health', (req, res) => {
   const openOrders = Array.from(orderBook.values()).reduce((sum, arr) => sum + arr.length, 0);
   res.json({
@@ -685,6 +1070,7 @@ router.get('/health', (req, res) => {
     fheMode: FHE_SERVICE_URL ? 'remote' : 'mock',
     fheLibrary: FHE_SERVICE_URL ? 'remote-service' : 'deterministic-mock',
     fheServiceConfigured: Boolean(FHE_SERVICE_URL),
+    fhePolicy: getFhePolicy(),
   });
 });
 
@@ -816,4 +1202,7 @@ module.exports.normalizeFheOrder = normalizeFheOrder;
 module.exports.configureMatchingEngine = configureMatchingEngine;
 module.exports.runDeterministicMatchForOrder = runDeterministicMatchForOrder;
 module.exports.reconcileStaleReservations = reconcileStaleReservations;
+module.exports.computeStableMatchHash = computeStableMatchHash;
+module.exports.computeFheDecisionHash = computeFheDecisionHash;
+module.exports.REASON_CODES = REASON_CODES;
 loadOrderBook();

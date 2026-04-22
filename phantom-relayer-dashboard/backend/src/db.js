@@ -24,7 +24,8 @@ function initDbJson(dbPath) {
     "order_events",
     "cancellations",
     "matches",
-    "fills"
+    "fills",
+    "match_decisions"
   ];
   const keyCol = {
     intents: "intentId",
@@ -39,6 +40,7 @@ function initDbJson(dbPath) {
     cancellations: "id",
     matches: "id",
     fills: "id",
+    match_decisions: "id",
   };
 
   function loadTable(name) {
@@ -214,6 +216,10 @@ function initDbJson(dbPath) {
           executionPrice,
           quantity,
           status,
+          decisionReasonCode,
+          fheResultHash,
+          fheDecisionHash,
+          fheAttestationRef,
           metadataJson,
           createdAt
         ] = args;
@@ -231,6 +237,10 @@ function initDbJson(dbPath) {
           executionPrice,
           quantity,
           status,
+          decisionReasonCode,
+          fheResultHash,
+          fheDecisionHash,
+          fheAttestationRef,
           metadataJson,
           createdAt,
         });
@@ -240,6 +250,39 @@ function initDbJson(dbPath) {
         const rows = loadTable("fills").filter((r) => r.id !== id);
         rows.push({ id, matchId, orderId, side, quantity, price, isMaker, createdAt });
         saveTable("fills", rows);
+      } else if (sqlLower.includes("insert into match_decisions")) {
+        const [
+          id,
+          traceId,
+          takerOrderId,
+          candidateOrderId,
+          matchHash,
+          executionKey,
+          reasonCode,
+          policyMode,
+          fheDecisionHash,
+          fheResultHash,
+          fheAttestationRef,
+          detailsJson,
+          createdAt
+        ] = args;
+        const rows = loadTable("match_decisions").filter((r) => r.id !== id);
+        rows.push({
+          id,
+          traceId,
+          takerOrderId,
+          candidateOrderId,
+          matchHash,
+          executionKey,
+          reasonCode,
+          policyMode,
+          fheDecisionHash,
+          fheResultHash,
+          fheAttestationRef,
+          detailsJson,
+          createdAt,
+        });
+        saveTable("match_decisions", rows);
       }
     };
     const get = (...args) => {
@@ -355,6 +398,13 @@ function initDbJson(dbPath) {
         return loadTable("fills")
           .filter((r) => r.matchId === matchId)
           .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+      }
+      if (sqlLower.includes("from match_decisions where takerorderid") || sqlLower.includes("from match_decisions where candidateorderid")) {
+        const [orderId, limit] = args;
+        return loadTable("match_decisions")
+          .filter((r) => r.takerOrderId === orderId || r.candidateOrderId === orderId)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 100);
       }
       return [];
     };
@@ -496,6 +546,10 @@ function initDb(dbPath) {
         executionPrice TEXT NOT NULL,
         quantity TEXT NOT NULL,
         status TEXT NOT NULL,
+        decisionReasonCode TEXT,
+        fheResultHash TEXT,
+        fheDecisionHash TEXT,
+        fheAttestationRef TEXT,
         metadataJson TEXT,
         createdAt INTEGER NOT NULL
       );
@@ -514,6 +568,24 @@ function initDb(dbPath) {
       );
       CREATE INDEX IF NOT EXISTS idx_fills_match ON fills(matchId, createdAt);
       CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(orderId, createdAt);
+
+      CREATE TABLE IF NOT EXISTS match_decisions (
+        id TEXT PRIMARY KEY,
+        traceId TEXT NOT NULL,
+        takerOrderId TEXT NOT NULL,
+        candidateOrderId TEXT,
+        matchHash TEXT,
+        executionKey TEXT,
+        reasonCode TEXT NOT NULL,
+        policyMode TEXT NOT NULL,
+        fheDecisionHash TEXT,
+        fheResultHash TEXT,
+        fheAttestationRef TEXT,
+        detailsJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_match_decisions_taker_created ON match_decisions(takerOrderId, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_match_decisions_candidate_created ON match_decisions(candidateOrderId, createdAt DESC);
     `);
     return db;
   } catch (e) {
@@ -855,8 +927,8 @@ function saveMatch(db, row) {
   const stmt = db.prepare(
     `INSERT INTO matches(
       id, matchHash, executionKey, pairBase, pairQuote, makerOrderId, takerOrderId,
-      makerSide, takerSide, executionPrice, quantity, status, metadataJson, createdAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      makerSide, takerSide, executionPrice, quantity, status, decisionReasonCode, fheResultHash, fheDecisionHash, fheAttestationRef, metadataJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   stmt.run(
     row.id,
@@ -871,6 +943,10 @@ function saveMatch(db, row) {
     row.executionPrice,
     row.quantity,
     row.status,
+    row.decisionReasonCode ?? null,
+    row.fheResultHash ?? null,
+    row.fheDecisionHash ?? null,
+    row.fheAttestationRef ?? null,
     typeof row.metadataJson === "string" ? row.metadataJson : JSON.stringify(row.metadataJson || {}),
     row.createdAt
   );
@@ -881,7 +957,7 @@ function getMatchByHash(db, matchHash) {
   if (!row) return null;
   return {
     ...row,
-    metadataJson: JSON.parse(row.metadataJson || "{}"),
+    metadataJson: typeof row.metadataJson === "string" ? JSON.parse(row.metadataJson || "{}") : (row.metadataJson || {}),
   };
 }
 
@@ -908,6 +984,42 @@ function listFillsByMatch(db, matchId) {
   return rows.map((row) => ({
     ...row,
     isMaker: Boolean(row.isMaker),
+  }));
+}
+
+function saveMatchDecision(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO match_decisions(
+      id, traceId, takerOrderId, candidateOrderId, matchHash, executionKey, reasonCode, policyMode,
+      fheDecisionHash, fheResultHash, fheAttestationRef, detailsJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.traceId,
+    row.takerOrderId,
+    row.candidateOrderId ?? null,
+    row.matchHash ?? null,
+    row.executionKey ?? null,
+    row.reasonCode,
+    row.policyMode,
+    row.fheDecisionHash ?? null,
+    row.fheResultHash ?? null,
+    row.fheAttestationRef ?? null,
+    typeof row.detailsJson === "string" ? row.detailsJson : JSON.stringify(row.detailsJson || {}),
+    row.createdAt
+  );
+}
+
+function listMatchDecisionsByOrder(db, orderId, limit = 100) {
+  const rows = db
+    .prepare(
+      "SELECT id, traceId, takerOrderId, candidateOrderId, matchHash, executionKey, reasonCode, policyMode, fheDecisionHash, fheResultHash, fheAttestationRef, detailsJson, createdAt FROM match_decisions WHERE takerOrderId = ? OR candidateOrderId = ? ORDER BY createdAt DESC, id DESC LIMIT ?"
+    )
+    .all(orderId, orderId, limit);
+  return rows.map((row) => ({
+    ...row,
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
   }));
 }
 
@@ -946,5 +1058,7 @@ module.exports = {
   saveMatch,
   getMatchByHash,
   saveFill,
-  listFillsByMatch
+  listFillsByMatch,
+  saveMatchDecision,
+  listMatchDecisionsByOrder
 };

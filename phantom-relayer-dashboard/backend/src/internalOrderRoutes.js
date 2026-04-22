@@ -13,6 +13,7 @@ const {
   saveOrderEvent,
   listOrderEvents,
   saveCancellation,
+  listMatchDecisionsByOrder,
 } = require("./db");
 const { ORDER_STATUS, canCancel, assertLegalTransition } = require("./internalOrderLifecycle");
 
@@ -336,7 +337,8 @@ function createInternalOrderRouter({ db, chainId, verifyingContract }) {
     const order = getInternalOrderById(db, req.params.id);
     if (!order) return res.status(404).json({ error: "internal_order_not_found" });
     const events = listOrderEvents(db, order.id);
-    return res.json({ order: asSafeOrder(order), events });
+    const decisions = listMatchDecisionsByOrder(db, order.id, 100);
+    return res.json({ order: asSafeOrder(order), events, decisions });
   });
 
   router.get("/", (req, res) => {
