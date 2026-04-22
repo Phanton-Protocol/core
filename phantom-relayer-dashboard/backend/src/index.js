@@ -26,7 +26,12 @@ const {
   saveDepositSession,
   getDepositSessionByIdempotencyKey,
   getDepositSessionBySessionId,
-  saveDepositTxReceipt
+  saveDepositTxReceipt,
+  listComplianceDecisionsByOrder,
+  listComplianceDecisionsByMatch,
+  listComplianceDecisionsByExecutionId,
+  listAttestationDecisionsByMatch,
+  listAttestationDecisionsByExecutionId,
 } = require("./db");
 const { mimc7 } = require("./mimc7");
 const { canonicalizeNote, noteIdFromCanonical, normalizeHex32 } = require("./noteModel");
@@ -34,6 +39,7 @@ const { encryptJsonAtRest, decryptJsonAtRest, getNotesEncryptionKey } = require(
 const { buildMerklePath: buildMerklePath10, verifyMerklePath: verifyMerklePath10 } = require("./merkle10");
 const { toBigInt, toBigIntString } = require("./utils/bigint");
 const ValidatorNetwork = require("./validatorNetwork");
+const { createComplianceEngine } = require("./complianceEngine");
 const { generateSwapProof, generateWithdrawProof, generatePortfolioProof, getProofStats } = require("./zkProofs");
 const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
@@ -80,6 +86,7 @@ app.use(cors({
   },
   credentials: true
 }));
+app.use("/fhe/internal", requireSeeForSensitiveFlow);
 app.use("/fhe", fheMatchingRouter);
 const enterpriseRouter = createEnterpriseRouter();
 app.use("/enterprise", enterpriseRouter);
@@ -298,14 +305,11 @@ const internalOrderRouter = createInternalOrderRouter({
   db,
   chainId: CHAIN_ID,
   verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
+  complianceEngine: createComplianceEngine({ db }),
 });
-app.use("/intent/internal", internalOrderRouter);
+app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
 configureMatchingEngine({ db });
-const settlementCoordinatorSubmitter =
-  String(process.env.SETTLEMENT_SUBMISSION_MODE || "dry_run") === "live_internal_match"
-    ? createOnchainInternalMatchSubmitter()
-    : undefined;
-const settlementCoordinator = createSettlementCoordinator({ db, submitter: settlementCoordinatorSubmitter });
+let settlementCoordinator = null;
 
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;
@@ -353,6 +357,16 @@ const VALIDATOR_URLS = process.env.VALIDATOR_URLS
 const RELAYER_REQUIRE_VALIDATOR_QUORUM = process.env.RELAYER_REQUIRE_VALIDATOR_QUORUM === "true"; 
 
 const validatorNetwork = new ValidatorNetwork(VALIDATOR_URLS, 6600); 
+const settlementCoordinatorSubmitter =
+  String(process.env.SETTLEMENT_SUBMISSION_MODE || "dry_run") === "live_internal_match"
+    ? createOnchainInternalMatchSubmitter()
+    : undefined;
+settlementCoordinator = createSettlementCoordinator({
+  db,
+  submitter: settlementCoordinatorSubmitter,
+  complianceEngine: createComplianceEngine({ db }),
+  validatorNetwork,
+});
 
 const INTENT_DOMAIN = {
   name: "ShadowDeFiRelayer",
@@ -3153,7 +3167,7 @@ app.get("/export", (req, res) => {
   res.json(data);
 });
 
-app.post("/settlement/internal/:matchHash/start", async (req, res) => {
+app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, async (req, res) => {
   try {
     const matchHash = String(req.params.matchHash || "");
     if (!ethers.isHexString(matchHash, 32)) {
@@ -3169,7 +3183,7 @@ app.post("/settlement/internal/:matchHash/start", async (req, res) => {
   }
 });
 
-app.post("/settlement/internal/:matchHash/retry", async (req, res) => {
+app.post("/settlement/internal/:matchHash/retry", requireSeeForSensitiveFlow, async (req, res) => {
   try {
     const matchHash = String(req.params.matchHash || "");
     if (!ethers.isHexString(matchHash, 32)) {
@@ -3185,7 +3199,7 @@ app.post("/settlement/internal/:matchHash/retry", async (req, res) => {
   }
 });
 
-app.get("/settlement/internal/:matchHash/status", (req, res) => {
+app.get("/settlement/internal/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
   try {
     const matchHash = String(req.params.matchHash || "");
     if (!ethers.isHexString(matchHash, 32)) {
@@ -3196,6 +3210,47 @@ app.get("/settlement/internal/:matchHash/status", (req, res) => {
     return res.json(status);
   } catch (e) {
     return res.status(500).json({ error: e.message || "settlement_status_failed" });
+  }
+});
+
+app.get("/compliance/internal/order/:orderId/decisions", requireSeeForSensitiveFlow, (req, res) => {
+  try {
+    const orderId = String(req.params.orderId || "");
+    if (!ethers.isHexString(orderId, 32)) {
+      return res.status(400).json({ error: "invalid_order_id" });
+    }
+    const compliance = listComplianceDecisionsByOrder(db, orderId, 200);
+    return res.json({ orderId, compliance });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "compliance_order_lookup_failed" });
+  }
+});
+
+app.get("/compliance/internal/match/:matchHash/decisions", requireSeeForSensitiveFlow, (req, res) => {
+  try {
+    const matchHash = String(req.params.matchHash || "");
+    if (!ethers.isHexString(matchHash, 32)) {
+      return res.status(400).json({ error: "invalid_match_hash" });
+    }
+    const compliance = listComplianceDecisionsByMatch(db, matchHash, 200);
+    const attestation = listAttestationDecisionsByMatch(db, matchHash, 100);
+    return res.json({ matchHash, compliance, attestation });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "compliance_match_lookup_failed" });
+  }
+});
+
+app.get("/compliance/internal/execution/:executionId/decisions", requireSeeForSensitiveFlow, (req, res) => {
+  try {
+    const executionId = String(req.params.executionId || "");
+    if (!executionId) {
+      return res.status(400).json({ error: "invalid_execution_id" });
+    }
+    const compliance = listComplianceDecisionsByExecutionId(db, executionId, 200);
+    const attestation = listAttestationDecisionsByExecutionId(db, executionId, 100);
+    return res.json({ executionId, compliance, attestation });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "compliance_execution_lookup_failed" });
   }
 });
 

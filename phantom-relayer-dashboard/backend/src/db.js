@@ -27,7 +27,9 @@ function initDbJson(dbPath) {
     "fills",
     "match_decisions",
     "settlement_executions",
-    "settlement_events"
+    "settlement_events",
+    "compliance_decisions",
+    "attestation_decisions"
   ];
   const keyCol = {
     intents: "intentId",
@@ -45,6 +47,8 @@ function initDbJson(dbPath) {
     match_decisions: "id",
     settlement_executions: "executionId",
     settlement_events: "id",
+    compliance_decisions: "id",
+    attestation_decisions: "id",
   };
 
   function loadTable(name) {
@@ -366,6 +370,28 @@ function initDbJson(dbPath) {
         const rows = loadTable("settlement_events");
         rows.push({ id, executionId, matchHash, traceId, eventType, reasonCode, detailsJson, createdAt });
         saveTable("settlement_events", rows);
+      } else if (sqlLower.includes("insert into compliance_decisions")) {
+        const [
+          id, phase, action, orderId, actorRef, counterpartyRef, matchHash, executionKey, executionId,
+          traceId, reasonCode, policyMode, policyVersion, evidenceRef, providerResponseHash, detailsJson, createdAt
+        ] = args;
+        const rows = loadTable("compliance_decisions").filter((r) => r.id !== id);
+        rows.push({
+          id, phase, action, orderId, actorRef, counterpartyRef, matchHash, executionKey, executionId,
+          traceId, reasonCode, policyMode, policyVersion, evidenceRef, providerResponseHash, detailsJson, createdAt
+        });
+        saveTable("compliance_decisions", rows);
+      } else if (sqlLower.includes("insert into attestation_decisions")) {
+        const [
+          id, matchHash, executionKey, executionId, traceId, policyVersion, requiredQuorumBps, valid,
+          reasonCode, signerCount, signerSetHash, detailsJson, createdAt
+        ] = args;
+        const rows = loadTable("attestation_decisions").filter((r) => r.id !== id);
+        rows.push({
+          id, matchHash, executionKey, executionId, traceId, policyVersion, requiredQuorumBps, valid,
+          reasonCode, signerCount, signerSetHash, detailsJson, createdAt
+        });
+        saveTable("attestation_decisions", rows);
       }
     };
     const get = (...args) => {
@@ -505,6 +531,41 @@ function initDbJson(dbPath) {
           .filter((r) => r.executionId === executionId)
           .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
           .slice(0, limit || 200);
+      }
+      if (sqlLower.includes("from compliance_decisions where orderid =")) {
+        const [orderId, limit] = args;
+        return loadTable("compliance_decisions")
+          .filter((r) => r.orderId === orderId)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 200);
+      }
+      if (sqlLower.includes("from compliance_decisions where matchhash =")) {
+        const [matchHash, limit] = args;
+        return loadTable("compliance_decisions")
+          .filter((r) => r.matchHash === matchHash)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 200);
+      }
+      if (sqlLower.includes("from compliance_decisions where executionid =")) {
+        const [executionId, limit] = args;
+        return loadTable("compliance_decisions")
+          .filter((r) => r.executionId === executionId)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 200);
+      }
+      if (sqlLower.includes("from attestation_decisions where matchhash =")) {
+        const [matchHash, limit] = args;
+        return loadTable("attestation_decisions")
+          .filter((r) => r.matchHash === matchHash)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 100);
+      }
+      if (sqlLower.includes("from attestation_decisions where executionid =")) {
+        const [executionId, limit] = args;
+        return loadTable("attestation_decisions")
+          .filter((r) => r.executionId === executionId)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(0, limit || 100);
       }
       return [];
     };
@@ -718,6 +779,47 @@ function initDb(dbPath) {
       );
       CREATE INDEX IF NOT EXISTS idx_settlement_events_execution_created ON settlement_events(executionId, createdAt);
       CREATE INDEX IF NOT EXISTS idx_settlement_events_match_created ON settlement_events(matchHash, createdAt);
+
+      CREATE TABLE IF NOT EXISTS compliance_decisions (
+        id TEXT PRIMARY KEY,
+        phase TEXT NOT NULL,
+        action TEXT NOT NULL,
+        orderId TEXT,
+        actorRef TEXT,
+        counterpartyRef TEXT,
+        matchHash TEXT,
+        executionKey TEXT,
+        executionId TEXT,
+        traceId TEXT NOT NULL,
+        reasonCode TEXT NOT NULL,
+        policyMode TEXT NOT NULL,
+        policyVersion TEXT NOT NULL,
+        evidenceRef TEXT,
+        providerResponseHash TEXT,
+        detailsJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_compliance_decisions_order_created ON compliance_decisions(orderId, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_compliance_decisions_match_created ON compliance_decisions(matchHash, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_compliance_decisions_execution_created ON compliance_decisions(executionId, createdAt DESC);
+
+      CREATE TABLE IF NOT EXISTS attestation_decisions (
+        id TEXT PRIMARY KEY,
+        matchHash TEXT NOT NULL,
+        executionKey TEXT NOT NULL,
+        executionId TEXT,
+        traceId TEXT NOT NULL,
+        policyVersion TEXT NOT NULL,
+        requiredQuorumBps INTEGER NOT NULL,
+        valid INTEGER NOT NULL,
+        reasonCode TEXT,
+        signerCount INTEGER NOT NULL,
+        signerSetHash TEXT,
+        detailsJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_attestation_decisions_match_created ON attestation_decisions(matchHash, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_attestation_decisions_execution_created ON attestation_decisions(executionId, createdAt DESC);
     `);
     return db;
   } catch (e) {
@@ -1251,6 +1353,116 @@ function listSettlementEventsByExecutionId(db, executionId, limit = 200) {
   }));
 }
 
+function saveComplianceDecision(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO compliance_decisions(
+      id, phase, action, orderId, actorRef, counterpartyRef, matchHash, executionKey, executionId,
+      traceId, reasonCode, policyMode, policyVersion, evidenceRef, providerResponseHash, detailsJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.phase,
+    row.action,
+    row.orderId ?? null,
+    row.actorRef ?? null,
+    row.counterpartyRef ?? null,
+    row.matchHash ?? null,
+    row.executionKey ?? null,
+    row.executionId ?? null,
+    row.traceId,
+    row.reasonCode,
+    row.policyMode,
+    row.policyVersion,
+    row.evidenceRef ?? null,
+    row.providerResponseHash ?? null,
+    typeof row.detailsJson === "string" ? row.detailsJson : JSON.stringify(row.detailsJson || {}),
+    row.createdAt
+  );
+}
+
+function listComplianceDecisionsByOrder(db, orderId, limit = 200) {
+  const rows = db
+    .prepare(
+      "SELECT * FROM compliance_decisions WHERE orderId = ? ORDER BY createdAt DESC, id DESC LIMIT ?"
+    )
+    .all(orderId, limit);
+  return rows.map((row) => ({
+    ...row,
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
+function listComplianceDecisionsByMatch(db, matchHash, limit = 200) {
+  const rows = db
+    .prepare(
+      "SELECT * FROM compliance_decisions WHERE matchHash = ? ORDER BY createdAt DESC, id DESC LIMIT ?"
+    )
+    .all(matchHash, limit);
+  return rows.map((row) => ({
+    ...row,
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
+function listComplianceDecisionsByExecutionId(db, executionId, limit = 200) {
+  const rows = db
+    .prepare(
+      "SELECT * FROM compliance_decisions WHERE executionId = ? ORDER BY createdAt DESC, id DESC LIMIT ?"
+    )
+    .all(executionId, limit);
+  return rows.map((row) => ({
+    ...row,
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
+function saveAttestationDecision(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO attestation_decisions(
+      id, matchHash, executionKey, executionId, traceId, policyVersion, requiredQuorumBps, valid,
+      reasonCode, signerCount, signerSetHash, detailsJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.matchHash,
+    row.executionKey,
+    row.executionId ?? null,
+    row.traceId,
+    row.policyVersion,
+    row.requiredQuorumBps,
+    row.valid ? 1 : 0,
+    row.reasonCode ?? null,
+    row.signerCount ?? 0,
+    row.signerSetHash ?? null,
+    typeof row.detailsJson === "string" ? row.detailsJson : JSON.stringify(row.detailsJson || {}),
+    row.createdAt
+  );
+}
+
+function listAttestationDecisionsByMatch(db, matchHash, limit = 100) {
+  const rows = db
+    .prepare("SELECT * FROM attestation_decisions WHERE matchHash = ? ORDER BY createdAt DESC, id DESC LIMIT ?")
+    .all(matchHash, limit);
+  return rows.map((row) => ({
+    ...row,
+    valid: Boolean(row.valid),
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
+function listAttestationDecisionsByExecutionId(db, executionId, limit = 100) {
+  const rows = db
+    .prepare("SELECT * FROM attestation_decisions WHERE executionId = ? ORDER BY createdAt DESC, id DESC LIMIT ?")
+    .all(executionId, limit);
+  return rows.map((row) => ({
+    ...row,
+    valid: Boolean(row.valid),
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
 module.exports = {
   initDb,
   saveIntent,
@@ -1294,5 +1506,12 @@ module.exports = {
   getSettlementExecutionByMatchHash,
   getSettlementExecutionById,
   saveSettlementEvent,
-  listSettlementEventsByExecutionId
+  listSettlementEventsByExecutionId,
+  saveComplianceDecision,
+  listComplianceDecisionsByOrder,
+  listComplianceDecisionsByMatch,
+  listComplianceDecisionsByExecutionId,
+  saveAttestationDecision,
+  listAttestationDecisionsByMatch,
+  listAttestationDecisionsByExecutionId
 };

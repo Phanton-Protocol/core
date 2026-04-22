@@ -8,6 +8,9 @@ const {
   getSettlementExecutionByMatchHash,
   saveSettlementEvent,
   listSettlementEventsByExecutionId,
+  saveAttestationDecision,
+  listComplianceDecisionsByMatch,
+  listAttestationDecisionsByMatch,
 } = require("./db");
 
 const SETTLEMENT_STATUS = Object.freeze({
@@ -30,6 +33,12 @@ const PRECHECK_REASON = Object.freeze({
   FALLBACK_ROUTED: "FALLBACK_ROUTED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
   ONCHAIN_DATA_MISSING: "ONCHAIN_DATA_MISSING",
+  COMPLIANCE_BLOCKED: "COMPLIANCE_BLOCKED",
+  COMPLIANCE_HOLD: "COMPLIANCE_HOLD",
+  COMPLIANCE_ESCALATED: "COMPLIANCE_ESCALATED",
+  ATTESTATION_MISSING: "ATTESTATION_MISSING",
+  ATTESTATION_INVALID: "ATTESTATION_INVALID",
+  ATTESTATION_QUORUM_INSUFFICIENT: "ATTESTATION_QUORUM_INSUFFICIENT",
 });
 
 function b(v) {
@@ -48,6 +57,10 @@ function normalizePolicy(opts = {}) {
     fallbackMode: String(opts.fallbackMode ?? process.env.SETTLEMENT_FALLBACK_MODE ?? "none"),
     allowFallback: opts.allowFallback ?? (process.env.SETTLEMENT_ALLOW_FALLBACK === "true"),
     submissionMode: String(opts.submissionMode ?? process.env.SETTLEMENT_SUBMISSION_MODE ?? "dry_run"),
+    compliancePolicyMode: String(opts.compliancePolicyMode ?? process.env.COMPLIANCE_POLICY_MODE ?? "enforced"),
+    compliancePolicyVersion: String(opts.compliancePolicyVersion ?? process.env.COMPLIANCE_POLICY_VERSION ?? "v1"),
+    requireAttestation: opts.requireAttestation ?? (process.env.ATTESTATION_REQUIRED === "true"),
+    attestationQuorumBps: Number(opts.attestationQuorumBps ?? process.env.ATTESTATION_REQUIRED_QUORUM_BPS ?? 6600),
   };
 }
 
@@ -160,7 +173,7 @@ function runPrechecks(payload, policy) {
   return { ok: true };
 }
 
-function createSettlementCoordinator({ db, submitter } = {}) {
+function createSettlementCoordinator({ db, submitter, complianceEngine, validatorNetwork } = {}) {
   function persistEvent(exec, traceId, eventType, reasonCode, detailsJson) {
     saveSettlementEvent(db, {
       id: crypto.randomUUID(),
@@ -178,7 +191,18 @@ function createSettlementCoordinator({ db, submitter } = {}) {
     const exec = getSettlementExecutionByMatchHash(db, matchHash);
     if (!exec) return null;
     const events = listSettlementEventsByExecutionId(db, exec.executionId, 200);
-    return { execution: exec, events };
+    const compliance = listComplianceDecisionsByMatch(db, matchHash, 50);
+    const attestations = listAttestationDecisionsByMatch(db, matchHash, 20);
+    return {
+      execution: exec,
+      events,
+      latestGateOutcome: {
+        compliance: compliance[0] || null,
+        attestation: attestations[0] || null,
+      },
+      complianceDecisions: compliance,
+      attestationDecisions: attestations,
+    };
   }
 
   async function start(matchHash, options = {}) {
@@ -238,6 +262,147 @@ function createSettlementCoordinator({ db, submitter } = {}) {
 
     const fills = listFillsByMatch(db, match.id);
     const payload = buildSettlementPayload(match, fills, policy);
+
+    if (complianceEngine) {
+      const gate = await complianceEngine.checkExecution({
+        traceId,
+        executionId: existing.executionId,
+        match,
+        policy: {
+          mode: policy.compliancePolicyMode,
+          version: policy.compliancePolicyVersion,
+        },
+      });
+      persistEvent(existing, traceId, "settlement_compliance_gate_evaluated", null, {
+        action: gate.action,
+        reasonCode: gate.reasonCode,
+        drift: !!gate.drift,
+        policyVersion: policy.compliancePolicyVersion,
+      });
+      if (!gate.allowed) {
+        const reasonCode = gate.reasonCode || PRECHECK_REASON.COMPLIANCE_ESCALATED;
+        const nextStatus = reasonCode === PRECHECK_REASON.COMPLIANCE_HOLD ? SETTLEMENT_STATUS.RETRIABLE : SETTLEMENT_STATUS.FAILED;
+        const updated = {
+          ...existing,
+          executionKey: match.executionKey,
+          status: nextStatus,
+          traceId,
+          errorCode: reasonCode,
+          errorMessage: reasonCode,
+          payloadJson: {
+            ...payload,
+            gate: {
+              complianceAction: gate.action,
+              complianceReasonCode: reasonCode,
+              policyVersion: policy.compliancePolicyVersion,
+            },
+          },
+          updatedAt: now,
+        };
+        updateSettlementExecution(db, updated);
+        persistEvent(updated, traceId, "settlement_compliance_gate_blocked", reasonCode, {
+          action: gate.action,
+          drift: !!gate.drift,
+        });
+        return {
+          traceId,
+          matchHash,
+          executionKey: match.executionKey,
+          settlementStatus: nextStatus,
+          txHash: null,
+          decisionReasonCode: reasonCode,
+        };
+      }
+    }
+
+    if (policy.requireAttestation) {
+      const attestation = payload?.onchain?.attestation || null;
+      let verdict = null;
+      if (validatorNetwork?.verifyAttestationQuorum) {
+        verdict = await validatorNetwork.verifyAttestationQuorum(
+          attestation,
+          {
+            matchHash: payload.matchHash,
+            executionKey: payload.executionKey,
+            fheDecisionHash: payload?.fheBinding?.fheDecisionHash || "",
+          },
+          {
+            requiredQuorumBps: policy.attestationQuorumBps,
+            policyVersion: policy.compliancePolicyVersion,
+          }
+        );
+      } else {
+        verdict = {
+          valid: false,
+          reasonCode: PRECHECK_REASON.ATTESTATION_MISSING,
+          requiredQuorumBps: policy.attestationQuorumBps,
+          signerCount: 0,
+          signerSetHash: null,
+        };
+      }
+      const reasonCode = verdict.valid ? null : (
+        verdict.reasonCode === "ATTESTATION_QUORUM_INSUFFICIENT"
+          ? PRECHECK_REASON.ATTESTATION_QUORUM_INSUFFICIENT
+          : verdict.reasonCode === "ATTESTATION_INVALID"
+            ? PRECHECK_REASON.ATTESTATION_INVALID
+            : PRECHECK_REASON.ATTESTATION_MISSING
+      );
+      saveAttestationDecision(db, {
+        id: crypto.randomUUID(),
+        matchHash,
+        executionKey: match.executionKey,
+        executionId: existing.executionId,
+        traceId,
+        policyVersion: policy.compliancePolicyVersion,
+        requiredQuorumBps: verdict.requiredQuorumBps || policy.attestationQuorumBps,
+        valid: !!verdict.valid,
+        reasonCode,
+        signerCount: Number(verdict.signerCount || 0),
+        signerSetHash: verdict.signerSetHash || null,
+        detailsJson: {
+          validVotingPowerBps: verdict.validVotingPowerBps ?? null,
+        },
+        createdAt: Date.now(),
+      });
+      persistEvent(existing, traceId, "settlement_attestation_gate_evaluated", reasonCode, {
+        valid: !!verdict.valid,
+        requiredQuorumBps: verdict.requiredQuorumBps || policy.attestationQuorumBps,
+        signerCount: verdict.signerCount || 0,
+      });
+      if (!verdict.valid) {
+        const updated = {
+          ...existing,
+          executionKey: match.executionKey,
+          status: SETTLEMENT_STATUS.FAILED,
+          traceId,
+          errorCode: reasonCode,
+          errorMessage: reasonCode,
+          payloadJson: {
+            ...payload,
+            gate: {
+              attestationValid: false,
+              attestationReasonCode: reasonCode,
+              policyVersion: policy.compliancePolicyVersion,
+            },
+          },
+          updatedAt: now,
+        };
+        updateSettlementExecution(db, updated);
+        persistEvent(updated, traceId, "settlement_attestation_gate_blocked", reasonCode, {
+          requiredQuorumBps: verdict.requiredQuorumBps || policy.attestationQuorumBps,
+          signerCount: verdict.signerCount || 0,
+        });
+        return {
+          traceId,
+          matchHash,
+          executionKey: match.executionKey,
+          settlementStatus: updated.status,
+          txHash: null,
+          decisionReasonCode: reasonCode,
+        };
+      }
+    }
+
     const pre = runPrechecks(payload, policy);
     if (!pre.ok) {
       const fallbackConfigured = policy.allowFallback && policy.fallbackMode === "shieldedSwapJoinSplit";

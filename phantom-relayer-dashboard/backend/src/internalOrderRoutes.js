@@ -14,6 +14,7 @@ const {
   listOrderEvents,
   saveCancellation,
   listMatchDecisionsByOrder,
+  listComplianceDecisionsByOrder,
 } = require("./db");
 const { ORDER_STATUS, canCancel, assertLegalTransition } = require("./internalOrderLifecycle");
 
@@ -125,7 +126,7 @@ function asSafeOrder(order) {
   };
 }
 
-function createInternalOrderRouter({ db, chainId, verifyingContract }) {
+function createInternalOrderRouter({ db, chainId, verifyingContract, complianceEngine }) {
   const router = express.Router();
   const domain = {
     name: "PhantomInternalOrder",
@@ -202,6 +203,27 @@ function createInternalOrderRouter({ db, chainId, verifyingContract }) {
     }
 
     const now = Date.now();
+    const traceId = crypto.randomUUID();
+    if (complianceEngine) {
+      const intakeGate = await complianceEngine.checkIntake({
+        traceId,
+        orderId,
+        ownerAddress: normalizedIntent.owner,
+        policy: {
+          mode: process.env.COMPLIANCE_POLICY_MODE || "enforced",
+          version: process.env.COMPLIANCE_POLICY_VERSION || "v1",
+        },
+      });
+      if (!intakeGate.allowed) {
+        return res.status(409).json({
+          error: "compliance_intake_blocked",
+          action: intakeGate.action,
+          reasonCode: intakeGate.reasonCode,
+          traceId,
+        });
+      }
+    }
+
     const row = {
       id: orderId,
       ownerAddress: normalizedIntent.owner.toLowerCase(),
@@ -338,7 +360,8 @@ function createInternalOrderRouter({ db, chainId, verifyingContract }) {
     if (!order) return res.status(404).json({ error: "internal_order_not_found" });
     const events = listOrderEvents(db, order.id);
     const decisions = listMatchDecisionsByOrder(db, order.id, 100);
-    return res.json({ order: asSafeOrder(order), events, decisions });
+    const complianceDecisions = listComplianceDecisionsByOrder(db, order.id, 100);
+    return res.json({ order: asSafeOrder(order), events, decisions, complianceDecisions });
   });
 
   router.get("/", (req, res) => {
