@@ -1,7 +1,19 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require("crypto");
 const { ethers } = require('ethers');
+const {
+  getInternalOrderById,
+  listInternalOrdersForMatching,
+  compareAndSetInternalOrderState,
+  saveOrderEvent,
+  saveMatch,
+  getMatchByHash,
+  saveFill,
+  listFillsByMatch,
+} = require("./db");
+const { ORDER_STATUS, assertLegalTransition } = require("./internalOrderLifecycle");
 const router = express.Router();
 
 const FHE_SERVICE_URL = (process.env.FHE_SERVICE_URL || '').replace(/\/$/, '');
@@ -35,6 +47,12 @@ async function fheRemoteFetch(relPath, init) {
 const ORDER_STORE_FILE = process.env.MATCHING_ORDER_STORE || path.join(__dirname, '..', 'data', 'matching-orders.json');
 const orderBook = new Map();
 const MAX_ORDERS_PER_PAIR = 50;
+const DEFAULT_RESERVATION_TTL_MS = Number(process.env.MATCHING_RESERVATION_TTL_MS || 90_000);
+let matchingContext = {
+  db: null,
+  reservationTtlMs: DEFAULT_RESERVATION_TTL_MS,
+};
+let jsonFallbackLock = Promise.resolve();
 
 function orderBookKey(inputAssetID, outputAssetID) {
   return `${Number(inputAssetID)}-${Number(outputAssetID)}`;
@@ -52,6 +70,426 @@ function normalizeFheOrder(order) {
     fheEncryptedInputAmount: order.fheEncryptedInputAmount,
     fheEncryptedMinOutput: order.fheEncryptedMinOutput,
   };
+}
+
+function normalizeBigIntString(v) {
+  return BigInt(v == null ? "0" : String(v)).toString();
+}
+
+function computeStableMatchHash(payload) {
+  return ethers.keccak256(
+    ethers.toUtf8Bytes(
+      JSON.stringify({
+        pairBase: payload.pairBase,
+        pairQuote: payload.pairQuote,
+        makerOrderId: payload.makerOrderId,
+        takerOrderId: payload.takerOrderId,
+        quantity: payload.quantity,
+        executionPrice: payload.executionPrice,
+      })
+    )
+  );
+}
+
+function parseNum(v, fallback = 0n) {
+  try {
+    return BigInt(String(v));
+  } catch {
+    return fallback;
+  }
+}
+
+function sortByTimeNonceIdAsc(a, b) {
+  if (Number(a.createdAt || 0) !== Number(b.createdAt || 0)) return Number(a.createdAt || 0) - Number(b.createdAt || 0);
+  const an = parseNum(a.nonce, 0n);
+  const bn = parseNum(b.nonce, 0n);
+  if (an !== bn) return an < bn ? -1 : 1;
+  return String(a.id).localeCompare(String(b.id));
+}
+
+function isPriceCompatible(taker, maker) {
+  const takerPrice = parseNum(taker.limitPrice, 0n);
+  const makerPrice = parseNum(maker.limitPrice, 0n);
+  if (String(taker.side) === "buy") return takerPrice >= makerPrice;
+  return makerPrice >= takerPrice;
+}
+
+function getExecutionPrice(taker, maker) {
+  return normalizeBigIntString(maker.limitPrice);
+}
+
+function toPairKey(order) {
+  return `${String(order.pairBase)}::${String(order.pairQuote)}`;
+}
+
+function isOrderLiveForMatch(order, nowSec) {
+  if (!order) return false;
+  if (order.status !== ORDER_STATUS.OPEN && order.status !== ORDER_STATUS.PARTIALLY_FILLED) return false;
+  if (parseNum(order.remainingAmount, 0n) <= 0n) return false;
+  if (Number(order.expiryTs || 0) <= Number(nowSec)) return false;
+  return true;
+}
+
+async function withJsonLock(task) {
+  const prev = jsonFallbackLock;
+  let release;
+  jsonFallbackLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+function configureMatchingEngine(opts = {}) {
+  matchingContext = {
+    db: opts.db || null,
+    reservationTtlMs: Number(opts.reservationTtlMs || DEFAULT_RESERVATION_TTL_MS),
+  };
+}
+
+function getDb() {
+  return matchingContext.db || null;
+}
+
+function computeExecutionKey(orderA, orderB) {
+  const [left, right] = [String(orderA.id), String(orderB.id)].sort();
+  return ethers.keccak256(ethers.toUtf8Bytes(`${left}:${right}`));
+}
+
+function buildCounterpartyComparator(taker) {
+  const takerIsBuy = String(taker.side) === "buy";
+  return (a, b) => {
+    const ap = parseNum(a.limitPrice, 0n);
+    const bp = parseNum(b.limitPrice, 0n);
+    if (ap !== bp) {
+      if (takerIsBuy) return ap < bp ? -1 : 1; // lower asks first
+      return ap > bp ? -1 : 1; // higher bids first
+    }
+    return sortByTimeNonceIdAsc(a, b);
+  };
+}
+
+function selectBestCounterparty(taker, allOrders, nowSec) {
+  const takerPair = toPairKey(taker);
+  const oppositeSide = String(taker.side) === "buy" ? "sell" : "buy";
+  const candidates = allOrders
+    .filter((o) =>
+      o.id !== taker.id &&
+      toPairKey(o) === takerPair &&
+      String(o.side) === oppositeSide &&
+      isOrderLiveForMatch(o, nowSec) &&
+      isPriceCompatible(taker, o)
+    )
+    .sort(buildCounterpartyComparator(taker));
+  return candidates[0] || null;
+}
+
+function derivePostFillState(order, fillQty, executionKey, actor) {
+  const remainingBefore = parseNum(order.remainingAmount, 0n);
+  const filledBefore = parseNum(order.filledAmount, 0n);
+  const nextRemaining = remainingBefore - fillQty;
+  const nextFilled = filledBefore + fillQty;
+  const toStatus = nextRemaining <= 0n ? ORDER_STATUS.FILLED : ORDER_STATUS.PARTIALLY_FILLED;
+  return {
+    id: order.id,
+    status: toStatus,
+    remainingAmount: nextRemaining < 0n ? "0" : nextRemaining.toString(),
+    filledAmount: nextFilled.toString(),
+    reservedAmount: "0",
+    matchRef: executionKey,
+    updatedBy: actor,
+    updatedAt: Date.now(),
+  };
+}
+
+function reserveOrder(db, order, quantity, executionKey, actor) {
+  assertLegalTransition(order.status, ORDER_STATUS.RESERVED);
+  const now = Date.now();
+  const reservedRow = {
+    id: order.id,
+    status: ORDER_STATUS.RESERVED,
+    remainingAmount: normalizeBigIntString(order.remainingAmount),
+    filledAmount: normalizeBigIntString(order.filledAmount),
+    reservedAmount: normalizeBigIntString(quantity),
+    matchRef: executionKey,
+    updatedBy: actor,
+    updatedAt: now,
+    fromStatuses: [order.status],
+  };
+  const ok = compareAndSetInternalOrderState(db, reservedRow);
+  if (!ok) return false;
+  saveOrderEvent(db, {
+    id: crypto.randomUUID(),
+    orderId: order.id,
+    eventType: "order_reserved",
+    fromStatus: order.status,
+    toStatus: ORDER_STATUS.RESERVED,
+    reason: "deterministic_match_reservation",
+    actor,
+    metadataJson: { executionKey, reservedAmount: String(quantity) },
+    createdAt: now,
+  });
+  return true;
+}
+
+function releaseReservation(db, reservedOrder, restoreStatus, executionKey, actor, reason) {
+  const now = Date.now();
+  const ok = compareAndSetInternalOrderState(db, {
+    id: reservedOrder.id,
+    status: restoreStatus,
+    remainingAmount: normalizeBigIntString(reservedOrder.remainingAmount),
+    filledAmount: normalizeBigIntString(reservedOrder.filledAmount),
+    reservedAmount: "0",
+    matchRef: null,
+    updatedBy: actor,
+    updatedAt: now,
+    fromStatuses: [ORDER_STATUS.RESERVED],
+  });
+  if (!ok) return false;
+  saveOrderEvent(db, {
+    id: crypto.randomUUID(),
+    orderId: reservedOrder.id,
+    eventType: "order_unreserved",
+    fromStatus: ORDER_STATUS.RESERVED,
+    toStatus: restoreStatus,
+    reason: reason || "reservation_released",
+    actor,
+    metadataJson: { executionKey },
+    createdAt: now,
+  });
+  return true;
+}
+
+function persistMatchAndFills(db, payload) {
+  const existing = getMatchByHash(db, payload.matchHash);
+  if (existing) {
+    return {
+      idempotent: true,
+      match: existing,
+      fills: listFillsByMatch(db, existing.id),
+    };
+  }
+
+  const now = Date.now();
+  const matchId = crypto.randomUUID();
+  saveMatch(db, {
+    id: matchId,
+    matchHash: payload.matchHash,
+    executionKey: payload.executionKey,
+    pairBase: payload.pairBase,
+    pairQuote: payload.pairQuote,
+    makerOrderId: payload.maker.id,
+    takerOrderId: payload.taker.id,
+    makerSide: payload.maker.side,
+    takerSide: payload.taker.side,
+    executionPrice: payload.executionPrice,
+    quantity: payload.quantity.toString(),
+    status: "finalized",
+    metadataJson: {
+      reason: "price_time_priority_match",
+      makerRemainingBefore: payload.maker.remainingAmount,
+      takerRemainingBefore: payload.taker.remainingAmount,
+    },
+    createdAt: now,
+  });
+  saveFill(db, {
+    id: crypto.randomUUID(),
+    matchId,
+    orderId: payload.maker.id,
+    side: payload.maker.side,
+    quantity: payload.quantity.toString(),
+    price: payload.executionPrice,
+    isMaker: true,
+    createdAt: now,
+  });
+  saveFill(db, {
+    id: crypto.randomUUID(),
+    matchId,
+    orderId: payload.taker.id,
+    side: payload.taker.side,
+    quantity: payload.quantity.toString(),
+    price: payload.executionPrice,
+    isMaker: false,
+    createdAt: now,
+  });
+  return {
+    idempotent: false,
+    match: getMatchByHash(db, payload.matchHash),
+    fills: listFillsByMatch(db, matchId),
+  };
+}
+
+function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "matcher") {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const taker = getInternalOrderById(db, takerOrderId);
+  if (!taker || !isOrderLiveForMatch(taker, nowSec)) {
+    return { matched: false, reason: "taker_not_matchable" };
+  }
+
+  const universe = listInternalOrdersForMatching(db);
+  const maker = selectBestCounterparty(taker, universe, nowSec);
+  if (!maker) {
+    return { matched: false, reason: "no_compatible_counterparty" };
+  }
+
+  const fillQty = parseNum(taker.remainingAmount, 0n) < parseNum(maker.remainingAmount, 0n)
+    ? parseNum(taker.remainingAmount, 0n)
+    : parseNum(maker.remainingAmount, 0n);
+  if (fillQty <= 0n) return { matched: false, reason: "non_positive_fill_qty" };
+
+  const executionKey = computeExecutionKey(taker, maker);
+  const actor = `matcher:${workerId}`;
+  const takerBeforeStatus = taker.status;
+  const makerBeforeStatus = maker.status;
+
+  const takerReserved = reserveOrder(db, taker, fillQty, executionKey, actor);
+  if (!takerReserved) return { matched: false, reason: "taker_reservation_conflict" };
+
+  const makerFresh = getInternalOrderById(db, maker.id);
+  if (!makerFresh || !isOrderLiveForMatch(makerFresh, nowSec)) {
+    releaseReservation(db, getInternalOrderById(db, taker.id), takerBeforeStatus, executionKey, actor, "maker_unavailable");
+    return { matched: false, reason: "maker_unavailable_after_taker_reserve" };
+  }
+
+  const makerReserved = reserveOrder(db, makerFresh, fillQty, executionKey, actor);
+  if (!makerReserved) {
+    releaseReservation(db, getInternalOrderById(db, taker.id), takerBeforeStatus, executionKey, actor, "maker_reservation_conflict");
+    return { matched: false, reason: "maker_reservation_conflict" };
+  }
+
+  const takerReservedRow = getInternalOrderById(db, taker.id);
+  const makerReservedRow = getInternalOrderById(db, maker.id);
+  const executionPrice = getExecutionPrice(takerReservedRow, makerReservedRow);
+  const matchHash = computeStableMatchHash({
+    pairBase: taker.pairBase,
+    pairQuote: taker.pairQuote,
+    makerOrderId: maker.id,
+    takerOrderId: taker.id,
+    quantity: fillQty.toString(),
+    executionPrice,
+  });
+
+  const tx = () => {
+    const persisted = persistMatchAndFills(db, {
+      matchHash,
+      executionKey,
+      pairBase: taker.pairBase,
+      pairQuote: taker.pairQuote,
+      maker: makerReservedRow,
+      taker: takerReservedRow,
+      executionPrice,
+      quantity: fillQty,
+    });
+
+    const takerAfter = derivePostFillState(takerReservedRow, fillQty, executionKey, actor);
+    const makerAfter = derivePostFillState(makerReservedRow, fillQty, executionKey, actor);
+    assertLegalTransition(ORDER_STATUS.RESERVED, takerAfter.status);
+    assertLegalTransition(ORDER_STATUS.RESERVED, makerAfter.status);
+
+    const takerOk = compareAndSetInternalOrderState(db, {
+      ...takerAfter,
+      fromStatuses: [ORDER_STATUS.RESERVED],
+    });
+    const makerOk = compareAndSetInternalOrderState(db, {
+      ...makerAfter,
+      fromStatuses: [ORDER_STATUS.RESERVED],
+    });
+    if (!takerOk || !makerOk) throw new Error("finalize_reservation_cas_failed");
+
+    const now = Date.now();
+    saveOrderEvent(db, {
+      id: crypto.randomUUID(),
+      orderId: taker.id,
+      eventType: "order_matched_fill",
+      fromStatus: ORDER_STATUS.RESERVED,
+      toStatus: takerAfter.status,
+      reason: "deterministic_match_finalize",
+      actor,
+      metadataJson: { executionKey, matchHash, quantity: fillQty.toString(), price: executionPrice, role: "taker" },
+      createdAt: now,
+    });
+    saveOrderEvent(db, {
+      id: crypto.randomUUID(),
+      orderId: maker.id,
+      eventType: "order_matched_fill",
+      fromStatus: ORDER_STATUS.RESERVED,
+      toStatus: makerAfter.status,
+      reason: "deterministic_match_finalize",
+      actor,
+      metadataJson: { executionKey, matchHash, quantity: fillQty.toString(), price: executionPrice, role: "maker" },
+      createdAt: now,
+    });
+
+    return {
+      matched: true,
+      idempotent: persisted.idempotent,
+      reason: "matched",
+      executionKey,
+      matchHash,
+      quantity: fillQty.toString(),
+      executionPrice,
+      makerOrderId: maker.id,
+      takerOrderId: taker.id,
+      fills: persisted.fills,
+    };
+  };
+
+  try {
+    if (typeof db.transaction === "function") {
+      return db.transaction(tx)();
+    }
+    return tx();
+  } catch (e) {
+    const tRow = getInternalOrderById(db, taker.id);
+    const mRow = getInternalOrderById(db, maker.id);
+    if (tRow?.status === ORDER_STATUS.RESERVED) {
+      releaseReservation(db, tRow, takerBeforeStatus, executionKey, actor, "finalization_failed");
+    }
+    if (mRow?.status === ORDER_STATUS.RESERVED) {
+      releaseReservation(db, mRow, makerBeforeStatus, executionKey, actor, "finalization_failed");
+    }
+    return { matched: false, reason: "finalization_failed", error: e.message || String(e) };
+  }
+}
+
+async function runDeterministicMatchForOrder(orderId, workerId = "matcher") {
+  const db = getDb();
+  if (!db) return { matched: false, reason: "db_not_configured" };
+  if (typeof db.transaction === "function") {
+    return runDeterministicMatchForOrderCore(db, orderId, workerId);
+  }
+  return withJsonLock(async () => runDeterministicMatchForOrderCore(db, orderId, workerId));
+}
+
+async function reconcileStaleReservations(workerId = "matcher") {
+  const db = getDb();
+  if (!db) return { scanned: 0, released: 0 };
+  const now = Date.now();
+  const cutoff = now - Number(matchingContext.reservationTtlMs || DEFAULT_RESERVATION_TTL_MS);
+  const run = () => {
+    const orders = listInternalOrdersForMatching(db);
+    let released = 0;
+    for (const order of orders) {
+      if (order.status !== ORDER_STATUS.RESERVED) continue;
+      if (Number(order.updatedAt || 0) > cutoff) continue;
+      const restore = parseNum(order.filledAmount, 0n) > 0n ? ORDER_STATUS.PARTIALLY_FILLED : ORDER_STATUS.OPEN;
+      if (!assertLegalTransition) continue;
+      try {
+        assertLegalTransition(ORDER_STATUS.RESERVED, restore);
+      } catch {
+        continue;
+      }
+      const ok = releaseReservation(db, order, restore, order.matchRef || null, `matcher:${workerId}`, "reservation_ttl_recovery");
+      if (ok) released += 1;
+    }
+    return { scanned: orders.length, released };
+  };
+  if (typeof db.transaction === "function") return db.transaction(run)();
+  return withJsonLock(async () => run());
 }
 
 function loadOrderBook() {
@@ -77,6 +515,11 @@ function persistOrderBook() {
 }
 
 async function registerOrderAndTryMatch(order) {
+  const db = getDb();
+  if (db && order?.orderId && typeof order.orderId === "string") {
+    await reconcileStaleReservations("register");
+    return runDeterministicMatchForOrder(order.orderId, order.workerId || "register");
+  }
   const normalized = normalizeFheOrder(order);
   if (!normalized) {
     return { matched: false, error: "invalid_order_asset_ids" };
@@ -203,6 +646,31 @@ router.post('/register', async (req, res) => {
   } catch (error) {
     console.error('❌ FHE register error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.post("/internal/match", async (req, res) => {
+  try {
+    const orderId = String(req.body?.orderId || "");
+    const workerId = String(req.body?.workerId || "api");
+    if (!ethers.isHexString(orderId, 32)) {
+      return res.status(400).json({ error: "invalid_order_id" });
+    }
+    await reconcileStaleReservations(workerId);
+    const out = await runDeterministicMatchForOrder(orderId, workerId);
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "internal_match_failed" });
+  }
+});
+
+router.post("/internal/reconcile", async (req, res) => {
+  try {
+    const workerId = String(req.body?.workerId || "api");
+    const out = await reconcileStaleReservations(workerId);
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "reconcile_failed" });
   }
 });
 
@@ -345,4 +813,7 @@ module.exports = router;
 module.exports.registerOrderAndTryMatch = registerOrderAndTryMatch;
 module.exports.getFheMatchMode = getFheMatchMode;
 module.exports.normalizeFheOrder = normalizeFheOrder;
+module.exports.configureMatchingEngine = configureMatchingEngine;
+module.exports.runDeterministicMatchForOrder = runDeterministicMatchForOrder;
+module.exports.reconcileStaleReservations = reconcileStaleReservations;
 loadOrderBook();

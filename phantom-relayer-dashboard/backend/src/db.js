@@ -22,7 +22,9 @@ function initDbJson(dbPath) {
     "deposit_tx_receipts",
     "orders",
     "order_events",
-    "cancellations"
+    "cancellations",
+    "matches",
+    "fills"
   ];
   const keyCol = {
     intents: "intentId",
@@ -35,6 +37,8 @@ function initDbJson(dbPath) {
     orders: "id",
     order_events: "id",
     cancellations: "id",
+    matches: "id",
+    fills: "id",
   };
 
   function loadTable(name) {
@@ -196,6 +200,46 @@ function initDbJson(dbPath) {
         const rows = loadTable("cancellations").filter((r) => r.orderId !== orderId);
         rows.push({ id, orderId, reason, actor, signatureHash, payloadJson, createdAt });
         saveTable("cancellations", rows);
+      } else if (sqlLower.includes("insert into matches")) {
+        const [
+          id,
+          matchHash,
+          executionKey,
+          pairBase,
+          pairQuote,
+          makerOrderId,
+          takerOrderId,
+          makerSide,
+          takerSide,
+          executionPrice,
+          quantity,
+          status,
+          metadataJson,
+          createdAt
+        ] = args;
+        const rows = loadTable("matches").filter((r) => r.id !== id && r.matchHash !== matchHash);
+        rows.push({
+          id,
+          matchHash,
+          executionKey,
+          pairBase,
+          pairQuote,
+          makerOrderId,
+          takerOrderId,
+          makerSide,
+          takerSide,
+          executionPrice,
+          quantity,
+          status,
+          metadataJson,
+          createdAt,
+        });
+        saveTable("matches", rows);
+      } else if (sqlLower.includes("insert into fills")) {
+        const [id, matchId, orderId, side, quantity, price, isMaker, createdAt] = args;
+        const rows = loadTable("fills").filter((r) => r.id !== id);
+        rows.push({ id, matchId, orderId, side, quantity, price, isMaker, createdAt });
+        saveTable("fills", rows);
       }
     };
     const get = (...args) => {
@@ -249,6 +293,11 @@ function initDbJson(dbPath) {
         const row = loadTable("orders").find((r) => r.ownerAddress === ownerAddress && r.nonce === nonce);
         return row ? { ...row } : undefined;
       }
+      if (sqlLower.includes("from matches where matchhash")) {
+        const [matchHash] = args;
+        const row = loadTable("matches").find((r) => r.matchHash === matchHash);
+        return row ? { ...row } : undefined;
+      }
       return undefined;
     };
     const all = (...args) => {
@@ -299,6 +348,12 @@ function initDbJson(dbPath) {
         const [orderId] = args;
         return loadTable("order_events")
           .filter((r) => r.orderId === orderId)
+          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+      }
+      if (sqlLower.includes("from fills where matchid")) {
+        const [matchId] = args;
+        return loadTable("fills")
+          .filter((r) => r.matchId === matchId)
           .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
       }
       return [];
@@ -427,6 +482,38 @@ function initDb(dbPath) {
         createdAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_cancellations_order ON cancellations(orderId);
+
+      CREATE TABLE IF NOT EXISTS matches (
+        id TEXT PRIMARY KEY,
+        matchHash TEXT NOT NULL UNIQUE,
+        executionKey TEXT NOT NULL,
+        pairBase TEXT NOT NULL,
+        pairQuote TEXT NOT NULL,
+        makerOrderId TEXT NOT NULL,
+        takerOrderId TEXT NOT NULL,
+        makerSide TEXT NOT NULL,
+        takerSide TEXT NOT NULL,
+        executionPrice TEXT NOT NULL,
+        quantity TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadataJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_matches_execution_key ON matches(executionKey);
+      CREATE INDEX IF NOT EXISTS idx_matches_pair_created ON matches(pairBase, pairQuote, createdAt DESC);
+
+      CREATE TABLE IF NOT EXISTS fills (
+        id TEXT PRIMARY KEY,
+        matchId TEXT NOT NULL,
+        orderId TEXT NOT NULL,
+        side TEXT NOT NULL,
+        quantity TEXT NOT NULL,
+        price TEXT NOT NULL,
+        isMaker INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_fills_match ON fills(matchId, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(orderId, createdAt);
     `);
     return db;
   } catch (e) {
@@ -722,6 +809,108 @@ function saveCancellation(db, row) {
   );
 }
 
+function isSqliteDb(db) {
+  return typeof db?.transaction === "function";
+}
+
+function listInternalOrdersForMatching(db) {
+  const rows = db.prepare("SELECT * FROM orders ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?").all(1000000, 0);
+  return rows.map((row) => ({
+    ...row,
+    normalizedPayload: typeof row.normalizedPayload === "string" ? JSON.parse(row.normalizedPayload) : row.normalizedPayload,
+  }));
+}
+
+function compareAndSetInternalOrderState(db, row) {
+  const fromStatuses = Array.isArray(row.fromStatuses) ? row.fromStatuses : [];
+  if (fromStatuses.length === 0) return false;
+  if (isSqliteDb(db)) {
+    const placeholders = fromStatuses.map(() => "?").join(", ");
+    const sql =
+      `UPDATE orders
+       SET status = ?, remainingAmount = ?, filledAmount = ?, reservedAmount = ?, matchRef = ?, updatedBy = ?, updatedAt = ?
+       WHERE id = ? AND status IN (${placeholders})`;
+    const params = [
+      row.status,
+      row.remainingAmount,
+      row.filledAmount,
+      row.reservedAmount,
+      row.matchRef ?? null,
+      row.updatedBy ?? null,
+      row.updatedAt,
+      row.id,
+      ...fromStatuses,
+    ];
+    const result = db.prepare(sql).run(...params);
+    return Number(result?.changes || 0) > 0;
+  }
+
+  const existing = getInternalOrderById(db, row.id);
+  if (!existing || !fromStatuses.includes(existing.status)) return false;
+  updateInternalOrderState(db, row);
+  return true;
+}
+
+function saveMatch(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO matches(
+      id, matchHash, executionKey, pairBase, pairQuote, makerOrderId, takerOrderId,
+      makerSide, takerSide, executionPrice, quantity, status, metadataJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.matchHash,
+    row.executionKey,
+    row.pairBase,
+    row.pairQuote,
+    row.makerOrderId,
+    row.takerOrderId,
+    row.makerSide,
+    row.takerSide,
+    row.executionPrice,
+    row.quantity,
+    row.status,
+    typeof row.metadataJson === "string" ? row.metadataJson : JSON.stringify(row.metadataJson || {}),
+    row.createdAt
+  );
+}
+
+function getMatchByHash(db, matchHash) {
+  const row = db.prepare("SELECT * FROM matches WHERE matchHash = ?").get(matchHash);
+  if (!row) return null;
+  return {
+    ...row,
+    metadataJson: JSON.parse(row.metadataJson || "{}"),
+  };
+}
+
+function saveFill(db, row) {
+  const stmt = db.prepare(
+    "INSERT INTO fills(id, matchId, orderId, side, quantity, price, isMaker, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  stmt.run(
+    row.id,
+    row.matchId,
+    row.orderId,
+    row.side,
+    row.quantity,
+    row.price,
+    row.isMaker ? 1 : 0,
+    row.createdAt
+  );
+}
+
+function listFillsByMatch(db, matchId) {
+  const rows = db
+    .prepare("SELECT id, matchId, orderId, side, quantity, price, isMaker, createdAt FROM fills WHERE matchId = ? ORDER BY createdAt ASC, id ASC")
+    .all(matchId);
+  return rows.map((row) => ({
+    ...row,
+    isMaker: Boolean(row.isMaker),
+  }));
+}
+
 module.exports = {
   initDb,
   saveIntent,
@@ -751,5 +940,11 @@ module.exports = {
   listInternalOrders,
   saveOrderEvent,
   listOrderEvents,
-  saveCancellation
+  saveCancellation,
+  listInternalOrdersForMatching,
+  compareAndSetInternalOrderState,
+  saveMatch,
+  getMatchByHash,
+  saveFill,
+  listFillsByMatch
 };

@@ -37,7 +37,7 @@ const ValidatorNetwork = require("./validatorNetwork");
 const { generateSwapProof, generateWithdrawProof, generatePortfolioProof, getProofStats } = require("./zkProofs");
 const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
-const { registerOrderAndTryMatch, getFheMatchMode } = require("./fheMatchingService");
+const { registerOrderAndTryMatch, getFheMatchMode, configureMatchingEngine } = require("./fheMatchingService");
 const { createEnterpriseRouter } = require("./enterpriseRoutes");
 const { createInternalOrderRouter } = require("./internalOrderRoutes");
 const { getSeeConfig, verifyAttestation, requireSeeForSensitiveFlow } = require("./seeGuard");
@@ -299,6 +299,7 @@ const internalOrderRouter = createInternalOrderRouter({
   verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
 });
 app.use("/intent/internal", internalOrderRouter);
+configureMatchingEngine({ db });
 
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;
