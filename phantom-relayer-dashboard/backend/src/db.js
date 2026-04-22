@@ -25,7 +25,9 @@ function initDbJson(dbPath) {
     "cancellations",
     "matches",
     "fills",
-    "match_decisions"
+    "match_decisions",
+    "settlement_executions",
+    "settlement_events"
   ];
   const keyCol = {
     intents: "intentId",
@@ -41,6 +43,8 @@ function initDbJson(dbPath) {
     matches: "id",
     fills: "id",
     match_decisions: "id",
+    settlement_executions: "executionId",
+    settlement_events: "id",
   };
 
   function loadTable(name) {
@@ -283,6 +287,85 @@ function initDbJson(dbPath) {
           createdAt,
         });
         saveTable("match_decisions", rows);
+      } else if (sqlLower.includes("insert or ignore into settlement_executions")) {
+        const [
+          executionId,
+          matchHash,
+          executionKey,
+          status,
+          attemptCount,
+          txHash,
+          traceId,
+          fallbackMode,
+          fallbackReasonCode,
+          errorCode,
+          errorMessage,
+          payloadJson,
+          createdAt,
+          updatedAt,
+          lastAttemptAt
+        ] = args;
+        const rows = loadTable("settlement_executions");
+        const existing = rows.find((r) => r.matchHash === matchHash);
+        if (!existing) {
+          rows.push({
+            executionId,
+            matchHash,
+            executionKey,
+            status,
+            attemptCount,
+            txHash,
+            traceId,
+            fallbackMode,
+            fallbackReasonCode,
+            errorCode,
+            errorMessage,
+            payloadJson,
+            createdAt,
+            updatedAt,
+            lastAttemptAt,
+          });
+          saveTable("settlement_executions", rows);
+        }
+      } else if (sqlLower.includes("update settlement_executions") && sqlLower.includes("set status")) {
+        const [
+          status,
+          attemptCount,
+          txHash,
+          traceId,
+          fallbackMode,
+          fallbackReasonCode,
+          errorCode,
+          errorMessage,
+          payloadJson,
+          updatedAt,
+          lastAttemptAt,
+          executionId
+        ] = args;
+        const rows = loadTable("settlement_executions");
+        const idx = rows.findIndex((r) => r.executionId === executionId);
+        if (idx >= 0) {
+          rows[idx] = {
+            ...rows[idx],
+            status,
+            attemptCount,
+            txHash,
+            traceId,
+            fallbackMode,
+            fallbackReasonCode,
+            errorCode,
+            errorMessage,
+            payloadJson,
+            updatedAt,
+            lastAttemptAt,
+          };
+          saveTable("settlement_executions", rows);
+        }
+      } else if (sqlLower.includes("insert into settlement_events")) {
+        const [id, executionId, matchHash, traceId, eventType, reasonCode, detailsJson, createdAt] = args;
+        const rows = loadTable("settlement_events");
+        rows.push({ id, executionId, matchHash, traceId, eventType, reasonCode, detailsJson, createdAt });
+        saveTable("settlement_events", rows);
       }
     };
     const get = (...args) => {
@@ -339,6 +422,16 @@ function initDbJson(dbPath) {
       if (sqlLower.includes("from matches where matchhash")) {
         const [matchHash] = args;
         const row = loadTable("matches").find((r) => r.matchHash === matchHash);
+        return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from settlement_executions where matchhash")) {
+        const [matchHash] = args;
+        const row = loadTable("settlement_executions").find((r) => r.matchHash === matchHash);
+        return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from settlement_executions where executionid")) {
+        const [executionId] = args;
+        const row = loadTable("settlement_executions").find((r) => r.executionId === executionId);
         return row ? { ...row } : undefined;
       }
       return undefined;
@@ -405,6 +498,13 @@ function initDbJson(dbPath) {
           .filter((r) => r.takerOrderId === orderId || r.candidateOrderId === orderId)
           .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
           .slice(0, limit || 100);
+      }
+      if (sqlLower.includes("from settlement_events where executionid")) {
+        const [executionId, limit] = args;
+        return loadTable("settlement_events")
+          .filter((r) => r.executionId === executionId)
+          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
+          .slice(0, limit || 200);
       }
       return [];
     };
@@ -586,6 +686,38 @@ function initDb(dbPath) {
       );
       CREATE INDEX IF NOT EXISTS idx_match_decisions_taker_created ON match_decisions(takerOrderId, createdAt DESC);
       CREATE INDEX IF NOT EXISTS idx_match_decisions_candidate_created ON match_decisions(candidateOrderId, createdAt DESC);
+
+      CREATE TABLE IF NOT EXISTS settlement_executions (
+        executionId TEXT PRIMARY KEY,
+        matchHash TEXT NOT NULL UNIQUE,
+        executionKey TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attemptCount INTEGER NOT NULL,
+        txHash TEXT,
+        traceId TEXT NOT NULL,
+        fallbackMode TEXT,
+        fallbackReasonCode TEXT,
+        errorCode TEXT,
+        errorMessage TEXT,
+        payloadJson TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        lastAttemptAt INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlement_exec_status_updated ON settlement_executions(status, updatedAt DESC);
+
+      CREATE TABLE IF NOT EXISTS settlement_events (
+        id TEXT PRIMARY KEY,
+        executionId TEXT NOT NULL,
+        matchHash TEXT NOT NULL,
+        traceId TEXT NOT NULL,
+        eventType TEXT NOT NULL,
+        reasonCode TEXT,
+        detailsJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlement_events_execution_created ON settlement_events(executionId, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_settlement_events_match_created ON settlement_events(matchHash, createdAt);
     `);
     return db;
   } catch (e) {
@@ -1023,6 +1155,102 @@ function listMatchDecisionsByOrder(db, orderId, limit = 100) {
   }));
 }
 
+function createSettlementExecutionIfAbsent(db, row) {
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO settlement_executions(
+      executionId, matchHash, executionKey, status, attemptCount, txHash, traceId, fallbackMode,
+      fallbackReasonCode, errorCode, errorMessage, payloadJson, createdAt, updatedAt, lastAttemptAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.executionId,
+    row.matchHash,
+    row.executionKey,
+    row.status,
+    row.attemptCount,
+    row.txHash ?? null,
+    row.traceId,
+    row.fallbackMode ?? null,
+    row.fallbackReasonCode ?? null,
+    row.errorCode ?? null,
+    row.errorMessage ?? null,
+    typeof row.payloadJson === "string" ? row.payloadJson : JSON.stringify(row.payloadJson || {}),
+    row.createdAt,
+    row.updatedAt,
+    row.lastAttemptAt ?? null
+  );
+}
+
+function updateSettlementExecution(db, row) {
+  const stmt = db.prepare(
+    `UPDATE settlement_executions
+     SET status = ?, attemptCount = ?, txHash = ?, traceId = ?, fallbackMode = ?, fallbackReasonCode = ?, errorCode = ?, errorMessage = ?, payloadJson = ?, updatedAt = ?, lastAttemptAt = ?
+     WHERE executionId = ?`
+  );
+  stmt.run(
+    row.status,
+    row.attemptCount,
+    row.txHash ?? null,
+    row.traceId,
+    row.fallbackMode ?? null,
+    row.fallbackReasonCode ?? null,
+    row.errorCode ?? null,
+    row.errorMessage ?? null,
+    typeof row.payloadJson === "string" ? row.payloadJson : JSON.stringify(row.payloadJson || {}),
+    row.updatedAt,
+    row.lastAttemptAt ?? null,
+    row.executionId
+  );
+}
+
+function getSettlementExecutionByMatchHash(db, matchHash) {
+  const row = db.prepare("SELECT * FROM settlement_executions WHERE matchHash = ?").get(matchHash);
+  if (!row) return null;
+  return {
+    ...row,
+    payloadJson: typeof row.payloadJson === "string" ? JSON.parse(row.payloadJson || "{}") : (row.payloadJson || {}),
+  };
+}
+
+function getSettlementExecutionById(db, executionId) {
+  const row = db.prepare("SELECT * FROM settlement_executions WHERE executionId = ?").get(executionId);
+  if (!row) return null;
+  return {
+    ...row,
+    payloadJson: typeof row.payloadJson === "string" ? JSON.parse(row.payloadJson || "{}") : (row.payloadJson || {}),
+  };
+}
+
+function saveSettlementEvent(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO settlement_events(
+      id, executionId, matchHash, traceId, eventType, reasonCode, detailsJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.executionId,
+    row.matchHash,
+    row.traceId,
+    row.eventType,
+    row.reasonCode ?? null,
+    typeof row.detailsJson === "string" ? row.detailsJson : JSON.stringify(row.detailsJson || {}),
+    row.createdAt
+  );
+}
+
+function listSettlementEventsByExecutionId(db, executionId, limit = 200) {
+  const rows = db
+    .prepare(
+      "SELECT id, executionId, matchHash, traceId, eventType, reasonCode, detailsJson, createdAt FROM settlement_events WHERE executionId = ? ORDER BY createdAt ASC, id ASC LIMIT ?"
+    )
+    .all(executionId, limit);
+  return rows.map((row) => ({
+    ...row,
+    detailsJson: typeof row.detailsJson === "string" ? JSON.parse(row.detailsJson || "{}") : (row.detailsJson || {}),
+  }));
+}
+
 module.exports = {
   initDb,
   saveIntent,
@@ -1060,5 +1288,11 @@ module.exports = {
   saveFill,
   listFillsByMatch,
   saveMatchDecision,
-  listMatchDecisionsByOrder
+  listMatchDecisionsByOrder,
+  createSettlementExecutionIfAbsent,
+  updateSettlementExecution,
+  getSettlementExecutionByMatchHash,
+  getSettlementExecutionById,
+  saveSettlementEvent,
+  listSettlementEventsByExecutionId
 };

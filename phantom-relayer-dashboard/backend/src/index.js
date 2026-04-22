@@ -52,6 +52,7 @@ const {
   logModule4
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs } = require("./swapIntentBinding");
+const { createSettlementCoordinator } = require("./settlementCoordinator");
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
@@ -300,6 +301,7 @@ const internalOrderRouter = createInternalOrderRouter({
 });
 app.use("/intent/internal", internalOrderRouter);
 configureMatchingEngine({ db });
+const settlementCoordinator = createSettlementCoordinator({ db });
 
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;
@@ -3145,6 +3147,52 @@ app.get("/history/:address", (req, res) => {
 app.get("/export", (req, res) => {
   const data = exportAll(db);
   res.json(data);
+});
+
+app.post("/settlement/internal/:matchHash/start", (req, res) => {
+  try {
+    const matchHash = String(req.params.matchHash || "");
+    if (!ethers.isHexString(matchHash, 32)) {
+      return res.status(400).json({ error: "invalid_match_hash" });
+    }
+    const out = settlementCoordinator.start(matchHash, {
+      policy: req.body?.policy || {},
+      executionKey: req.body?.executionKey,
+    });
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "settlement_start_failed" });
+  }
+});
+
+app.post("/settlement/internal/:matchHash/retry", (req, res) => {
+  try {
+    const matchHash = String(req.params.matchHash || "");
+    if (!ethers.isHexString(matchHash, 32)) {
+      return res.status(400).json({ error: "invalid_match_hash" });
+    }
+    const out = settlementCoordinator.retry(matchHash, {
+      policy: req.body?.policy || {},
+      executionKey: req.body?.executionKey,
+    });
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "settlement_retry_failed" });
+  }
+});
+
+app.get("/settlement/internal/:matchHash/status", (req, res) => {
+  try {
+    const matchHash = String(req.params.matchHash || "");
+    if (!ethers.isHexString(matchHash, 32)) {
+      return res.status(400).json({ error: "invalid_match_hash" });
+    }
+    const status = settlementCoordinator.getStatus(matchHash);
+    if (!status) return res.status(404).json({ error: "settlement_not_found" });
+    return res.json(status);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "settlement_status_failed" });
+  }
 });
 
 app.get("/merkle/:commitment", async (req, res) => {
