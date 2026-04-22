@@ -39,6 +39,7 @@ const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
 const { registerOrderAndTryMatch, getFheMatchMode } = require("./fheMatchingService");
 const { createEnterpriseRouter } = require("./enterpriseRoutes");
+const { createInternalOrderRouter } = require("./internalOrderRoutes");
 const { getSeeConfig, verifyAttestation, requireSeeForSensitiveFlow } = require("./seeGuard");
 const { logRelayerOnchainFailure, logProofFailure } = require("./relayerLog");
 const { assertNoMockRuntimeGate } = require("./noMockRuntimeGate");
@@ -291,6 +292,13 @@ try {
     process.exit(1);
   }
 }
+
+const internalOrderRouter = createInternalOrderRouter({
+  db,
+  chainId: CHAIN_ID,
+  verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
+});
+app.use("/intent/internal", internalOrderRouter);
 
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;

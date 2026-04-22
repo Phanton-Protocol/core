@@ -12,7 +12,18 @@ function initDbJson(dbPath) {
   const dataDir = path.join(dir, base + "_data");
   ensureDir(dataDir);
 
-  const tables = ["intents", "receipts", "quotes", "commitments", "notes", "deposit_sessions", "deposit_tx_receipts"];
+  const tables = [
+    "intents",
+    "receipts",
+    "quotes",
+    "commitments",
+    "notes",
+    "deposit_sessions",
+    "deposit_tx_receipts",
+    "orders",
+    "order_events",
+    "cancellations"
+  ];
   const keyCol = {
     intents: "intentId",
     receipts: "intentId",
@@ -21,6 +32,9 @@ function initDbJson(dbPath) {
     notes: "noteId",
     deposit_sessions: "sessionId",
     deposit_tx_receipts: "id",
+    orders: "id",
+    order_events: "id",
+    cancellations: "id",
   };
 
   function loadTable(name) {
@@ -102,6 +116,86 @@ function initDbJson(dbPath) {
         const rows = loadTable("deposit_tx_receipts");
         rows.push({ id, sessionId, txHash, receiptJson, createdAt });
         saveTable("deposit_tx_receipts", rows);
+      } else if (sqlLower.includes("insert into orders")) {
+        const [
+          id,
+          ownerAddress,
+          signingKey,
+          pairBase,
+          pairQuote,
+          side,
+          status,
+          amount,
+          limitPrice,
+          remainingAmount,
+          filledAmount,
+          reservedAmount,
+          nonce,
+          replayKey,
+          signatureHash,
+          expiryTs,
+          encryptedPayload,
+          normalizedPayload,
+          matchRef,
+          createdBy,
+          updatedBy,
+          createdAt,
+          updatedAt
+        ] = args;
+        const rows = loadTable("orders").filter((r) => r.id !== id);
+        rows.push({
+          id,
+          ownerAddress,
+          signingKey,
+          pairBase,
+          pairQuote,
+          side,
+          status,
+          amount,
+          limitPrice,
+          remainingAmount,
+          filledAmount,
+          reservedAmount,
+          nonce,
+          replayKey,
+          signatureHash,
+          expiryTs,
+          encryptedPayload,
+          normalizedPayload,
+          matchRef,
+          createdBy,
+          updatedBy,
+          createdAt,
+          updatedAt,
+        });
+        saveTable("orders", rows);
+      } else if (sqlLower.includes("update orders") && sqlLower.includes("set status")) {
+        const [status, remainingAmount, filledAmount, reservedAmount, matchRef, updatedBy, updatedAt, id] = args;
+        const rows = loadTable("orders");
+        const idx = rows.findIndex((r) => r.id === id);
+        if (idx >= 0) {
+          rows[idx] = {
+            ...rows[idx],
+            status,
+            remainingAmount,
+            filledAmount,
+            reservedAmount,
+            matchRef,
+            updatedBy,
+            updatedAt,
+          };
+          saveTable("orders", rows);
+        }
+      } else if (sqlLower.includes("insert into order_events")) {
+        const [id, orderId, eventType, fromStatus, toStatus, reason, actor, metadataJson, createdAt] = args;
+        const rows = loadTable("order_events");
+        rows.push({ id, orderId, eventType, fromStatus, toStatus, reason, actor, metadataJson, createdAt });
+        saveTable("order_events", rows);
+      } else if (sqlLower.includes("insert into cancellations")) {
+        const [id, orderId, reason, actor, signatureHash, payloadJson, createdAt] = args;
+        const rows = loadTable("cancellations").filter((r) => r.orderId !== orderId);
+        rows.push({ id, orderId, reason, actor, signatureHash, payloadJson, createdAt });
+        saveTable("cancellations", rows);
       }
     };
     const get = (...args) => {
@@ -140,6 +234,21 @@ function initDbJson(dbPath) {
         const [sessionId] = args;
         return loadTable("deposit_sessions").find((r) => r.sessionId === sessionId);
       }
+      if (sqlLower.includes("from orders where id")) {
+        const [id] = args;
+        const row = loadTable("orders").find((r) => r.id === id);
+        return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from orders where replaykey")) {
+        const [replayKey] = args;
+        const row = loadTable("orders").find((r) => r.replayKey === replayKey);
+        return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from orders where owneraddress") && sqlLower.includes("nonce")) {
+        const [ownerAddress, nonce] = args;
+        const row = loadTable("orders").find((r) => r.ownerAddress === ownerAddress && r.nonce === nonce);
+        return row ? { ...row } : undefined;
+      }
       return undefined;
     };
     const all = (...args) => {
@@ -172,6 +281,25 @@ function initDbJson(dbPath) {
           .filter((r) => String(r.ownerAddress).toLowerCase() === String(ownerAddress).toLowerCase())
           .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
           .slice(0, limit || 50);
+      }
+      if (sqlLower.includes("from orders where status =")) {
+        const [status, limit, offset] = args;
+        return loadTable("orders")
+          .filter((r) => r.status === status)
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(offset || 0, (offset || 0) + (limit || 50));
+      }
+      if (sqlLower.includes("from orders order by")) {
+        const [limit, offset] = args;
+        return loadTable("orders")
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
+          .slice(offset || 0, (offset || 0) + (limit || 50));
+      }
+      if (sqlLower.includes("from order_events where orderid")) {
+        const [orderId] = args;
+        return loadTable("order_events")
+          .filter((r) => r.orderId === orderId)
+          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
       }
       return [];
     };
@@ -243,6 +371,62 @@ function initDb(dbPath) {
         receiptJson TEXT NOT NULL,
         createdAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS orders (
+        id TEXT PRIMARY KEY,
+        ownerAddress TEXT NOT NULL,
+        signingKey TEXT NOT NULL,
+        pairBase TEXT NOT NULL,
+        pairQuote TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        limitPrice TEXT,
+        remainingAmount TEXT NOT NULL,
+        filledAmount TEXT NOT NULL,
+        reservedAmount TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        replayKey TEXT NOT NULL,
+        signatureHash TEXT NOT NULL,
+        expiryTs INTEGER NOT NULL,
+        encryptedPayload TEXT NOT NULL,
+        normalizedPayload TEXT NOT NULL,
+        matchRef TEXT,
+        createdBy TEXT,
+        updatedBy TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        UNIQUE(ownerAddress, nonce),
+        UNIQUE(replayKey),
+        UNIQUE(signatureHash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+      CREATE INDEX IF NOT EXISTS idx_orders_pair_side ON orders(pairBase, pairQuote, side);
+      CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_orders_owner_signing ON orders(ownerAddress, signingKey);
+
+      CREATE TABLE IF NOT EXISTS order_events (
+        id TEXT PRIMARY KEY,
+        orderId TEXT NOT NULL,
+        eventType TEXT NOT NULL,
+        fromStatus TEXT,
+        toStatus TEXT,
+        reason TEXT,
+        actor TEXT,
+        metadataJson TEXT,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_order_events_order_created ON order_events(orderId, createdAt);
+
+      CREATE TABLE IF NOT EXISTS cancellations (
+        id TEXT PRIMARY KEY,
+        orderId TEXT NOT NULL UNIQUE,
+        reason TEXT,
+        actor TEXT NOT NULL,
+        signatureHash TEXT NOT NULL,
+        payloadJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cancellations_order ON cancellations(orderId);
     `);
     return db;
   } catch (e) {
@@ -396,6 +580,148 @@ function saveDepositTxReceipt(db, { id, sessionId, txHash, receiptJson }) {
   stmt.run(id, sessionId, txHash, receiptJson, Date.now());
 }
 
+function saveInternalOrder(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO orders(
+      id, ownerAddress, signingKey, pairBase, pairQuote, side, status, amount, limitPrice, remainingAmount,
+      filledAmount, reservedAmount, nonce, replayKey, signatureHash, expiryTs, encryptedPayload, normalizedPayload,
+      matchRef, createdBy, updatedBy, createdAt, updatedAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.ownerAddress,
+    row.signingKey,
+    row.pairBase,
+    row.pairQuote,
+    row.side,
+    row.status,
+    row.amount,
+    row.limitPrice ?? null,
+    row.remainingAmount,
+    row.filledAmount,
+    row.reservedAmount,
+    row.nonce,
+    row.replayKey,
+    row.signatureHash,
+    row.expiryTs,
+    row.encryptedPayload,
+    typeof row.normalizedPayload === "string" ? row.normalizedPayload : JSON.stringify(row.normalizedPayload || {}),
+    row.matchRef ?? null,
+    row.createdBy ?? null,
+    row.updatedBy ?? null,
+    row.createdAt,
+    row.updatedAt
+  );
+}
+
+function updateInternalOrderState(db, row) {
+  const stmt = db.prepare(
+    `UPDATE orders
+     SET status = ?, remainingAmount = ?, filledAmount = ?, reservedAmount = ?, matchRef = ?, updatedBy = ?, updatedAt = ?
+     WHERE id = ?`
+  );
+  stmt.run(
+    row.status,
+    row.remainingAmount,
+    row.filledAmount,
+    row.reservedAmount,
+    row.matchRef ?? null,
+    row.updatedBy ?? null,
+    row.updatedAt,
+    row.id
+  );
+}
+
+function getInternalOrderById(db, id) {
+  const row = db.prepare("SELECT * FROM orders WHERE id = ?").get(id);
+  if (!row) return null;
+  return {
+    ...row,
+    normalizedPayload: JSON.parse(row.normalizedPayload),
+  };
+}
+
+function getInternalOrderByReplayKey(db, replayKey) {
+  const row = db.prepare("SELECT * FROM orders WHERE replayKey = ?").get(replayKey);
+  if (!row) return null;
+  return {
+    ...row,
+    normalizedPayload: JSON.parse(row.normalizedPayload),
+  };
+}
+
+function getInternalOrderByOwnerNonce(db, ownerAddress, nonce) {
+  const row = db.prepare("SELECT * FROM orders WHERE ownerAddress = ? AND nonce = ?").get(ownerAddress, nonce);
+  if (!row) return null;
+  return {
+    ...row,
+    normalizedPayload: JSON.parse(row.normalizedPayload),
+  };
+}
+
+function listInternalOrders(db, { status, limit = 50, offset = 0 } = {}) {
+  const rows = status
+    ? db
+      .prepare(
+        "SELECT * FROM orders WHERE status = ? ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?"
+      )
+      .all(status, limit, offset)
+    : db
+      .prepare("SELECT * FROM orders ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?")
+      .all(limit, offset);
+  return rows.map((row) => ({
+    ...row,
+    normalizedPayload: JSON.parse(row.normalizedPayload),
+  }));
+}
+
+function saveOrderEvent(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO order_events(
+      id, orderId, eventType, fromStatus, toStatus, reason, actor, metadataJson, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.orderId,
+    row.eventType,
+    row.fromStatus ?? null,
+    row.toStatus ?? null,
+    row.reason ?? null,
+    row.actor ?? null,
+    typeof row.metadataJson === "string" ? row.metadataJson : JSON.stringify(row.metadataJson || {}),
+    row.createdAt
+  );
+}
+
+function listOrderEvents(db, orderId) {
+  const rows = db
+    .prepare(
+      "SELECT id, orderId, eventType, fromStatus, toStatus, reason, actor, metadataJson, createdAt FROM order_events WHERE orderId = ? ORDER BY createdAt ASC, id ASC"
+    )
+    .all(orderId);
+  return rows.map((row) => ({
+    ...row,
+    metadataJson: JSON.parse(row.metadataJson || "{}"),
+  }));
+}
+
+function saveCancellation(db, row) {
+  const stmt = db.prepare(
+    "INSERT INTO cancellations(id, orderId, reason, actor, signatureHash, payloadJson, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  );
+  stmt.run(
+    row.id,
+    row.orderId,
+    row.reason ?? null,
+    row.actor,
+    row.signatureHash,
+    typeof row.payloadJson === "string" ? row.payloadJson : JSON.stringify(row.payloadJson || {}),
+    row.createdAt
+  );
+}
+
 module.exports = {
   initDb,
   saveIntent,
@@ -416,4 +742,14 @@ module.exports = {
   getDepositSessionByIdempotencyKey,
   getDepositSessionBySessionId,
   saveDepositTxReceipt
+  ,
+  saveInternalOrder,
+  updateInternalOrderState,
+  getInternalOrderById,
+  getInternalOrderByReplayKey,
+  getInternalOrderByOwnerNonce,
+  listInternalOrders,
+  saveOrderEvent,
+  listOrderEvents,
+  saveCancellation
 };
