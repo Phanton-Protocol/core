@@ -7,9 +7,11 @@ You do **not** need to buy an AWS instance or a “node” to test FHE-style flo
 ## Option A — Separate microservice (recommended for clarity)
 
 1. Run a small HTTP service (Python or Rust) in **Docker on your PC** that:
-   - exposes `POST /encrypt`, `POST /match` (or your chosen API)
+   - exposes `POST /encrypt`, `POST /match`, `POST /compatibility` (plus optional `/compute`, `/public-key`)
    - uses a real HE library internally
-2. Point Phantom backend at it with `FHE_SERVICE_URL=http://localhost:PORT`.
+2. Point Phantom backend at it with:
+   - `FHE_MODE=remote`
+   - `FHE_SERVICE_URL=http://localhost:PORT`
 3. Backend keeps the same routes; only the implementation behind them changes from mock to HTTP client.
 
 **Pros:** language choice matches library (Python: Concrete / PySEAL; C++: OpenFHE). **Cons:** you maintain two processes.
@@ -41,9 +43,11 @@ Full “order book on FHE” is hard: you start with a **narrow circuit** (e.g. 
 
 ## What is wired in this repo
 
-1. **`FHE_SERVICE_URL`** (optional): when set, the relayer’s `/fhe` routes **`/match`**, **`/compute`**, **`/encrypt`**, and **`GET /public-key`** forward to that base URL (same paths on the remote).
-2. **Unset:** existing deterministic mock stays the default.
-3. **`GET /fhe/health`** reports `fheMode: "mock" | "remote"` and `fheServiceConfigured`.
+1. **`FHE_MODE`** controls behavior:
+   - `mock` (default/safe): deterministic local fallback, no remote dependency
+   - `remote`: use HTTP forwarding to FHE service
+2. **`FHE_SERVICE_URL`** is used in `remote` mode for `/fhe` route forwarding (`/match`, `/compute`, `/encrypt`, `/public-key`).
+3. **`GET /fhe/health`** reports `fheMode`, `fheEffectiveMode`, `fheServiceConfigured`, and `fheServiceReachable`.
 
 ## Verify the proxy without real FHE (stand-in)
 
@@ -56,10 +60,11 @@ node fhe-dev/standin-server.js
 In another shell, start the relayer backend with:
 
 ```bash
+set FHE_MODE=remote
 set FHE_SERVICE_URL=http://127.0.0.1:9100
 ```
 
-(or export on Unix). Hit `GET /fhe/health` on the relayer — you should see `fheMode: "remote"`. Order registration still uses the relayer order book; matching calls the stand-in’s `/match`.
+(or export on Unix). Hit `GET /fhe/health` on the relayer — you should see `fheMode: "remote"` and `fheServiceReachable: true` when stand-in is up. Order registration still uses the relayer order book; matching calls the stand-in’s `/match`.
 
 ## TenSEAL demo (real CKKS, local Docker)
 
@@ -72,6 +77,7 @@ docker compose -f fhe-dev/docker-compose.yml up --build
 Service listens on **http://127.0.0.1:9101**. Point the relayer at it:
 
 ```bash
+FHE_MODE=remote
 FHE_SERVICE_URL=http://127.0.0.1:9101
 ```
 

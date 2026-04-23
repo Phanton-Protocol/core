@@ -1,6 +1,7 @@
 
 
 const axios = require('axios');
+const crypto = require("crypto");
 
 class ValidatorNetwork {
   constructor(validatorUrls, thresholdBps = 6600) {
@@ -158,6 +159,71 @@ class ValidatorNetwork {
     });
 
     return await Promise.all(checks);
+  }
+
+  async verifyAttestationQuorum(attestation, binding, opts = {}) {
+    const requiredQuorumBps = Number(opts.requiredQuorumBps || process.env.ATTESTATION_REQUIRED_QUORUM_BPS || 6600);
+    const policyVersion = String(opts.policyVersion || process.env.ATTESTATION_POLICY_VERSION || "v1");
+    if (!attestation || typeof attestation !== "object") {
+      return {
+        valid: false,
+        reasonCode: "ATTESTATION_MISSING",
+        requiredQuorumBps,
+        signerCount: 0,
+        signerSetHash: null,
+      };
+    }
+    const expectedBinding = {
+      matchHash: String(binding?.matchHash || ""),
+      executionKey: String(binding?.executionKey || ""),
+      fheDecisionHash: String(binding?.fheDecisionHash || ""),
+      policyVersion,
+    };
+    const providedBinding = attestation.binding || {};
+    if (
+      String(providedBinding.matchHash || "") !== expectedBinding.matchHash ||
+      String(providedBinding.executionKey || "") !== expectedBinding.executionKey ||
+      String(providedBinding.fheDecisionHash || "") !== expectedBinding.fheDecisionHash ||
+      String(providedBinding.policyVersion || "") !== expectedBinding.policyVersion
+    ) {
+      return {
+        valid: false,
+        reasonCode: "ATTESTATION_INVALID",
+        requiredQuorumBps,
+        signerCount: 0,
+        signerSetHash: null,
+      };
+    }
+    const signers = Array.isArray(attestation.signers) ? attestation.signers : [];
+    const normalized = signers
+      .map((s) => ({
+        id: String(s?.id || "").trim(),
+        votingPowerBps: Number(s?.votingPowerBps || 0),
+        valid: Boolean(s?.valid),
+      }))
+      .filter((s) => s.id && Number.isFinite(s.votingPowerBps) && s.votingPowerBps > 0);
+    const validVotingPower = normalized.filter((s) => s.valid).reduce((a, s) => a + s.votingPowerBps, 0);
+    const signerSetHash = normalized.length
+      ? crypto.createHash("sha256").update(normalized.map((s) => `${s.id}:${s.votingPowerBps}:${s.valid ? 1 : 0}`).sort().join("|")).digest("hex")
+      : null;
+    if (validVotingPower < requiredQuorumBps) {
+      return {
+        valid: false,
+        reasonCode: "ATTESTATION_QUORUM_INSUFFICIENT",
+        requiredQuorumBps,
+        signerCount: normalized.length,
+        signerSetHash,
+        validVotingPowerBps: validVotingPower,
+      };
+    }
+    return {
+      valid: true,
+      reasonCode: null,
+      requiredQuorumBps,
+      signerCount: normalized.length,
+      signerSetHash,
+      validVotingPowerBps: validVotingPower,
+    };
   }
 }
 
