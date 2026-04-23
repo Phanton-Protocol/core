@@ -3,7 +3,7 @@
  * Same routes as phantom-relayer-dashboard backend /fhe expects when proxying.
  *
  * Run: node fhe-dev/standin-server.js
- * Then: FHE_SERVICE_URL=http://127.0.0.1:9100 (or set in .env for backend)
+ * Then: FHE_MODE=remote and FHE_SERVICE_URL=http://127.0.0.1:9100
  */
 
 const http = require('http');
@@ -58,6 +58,22 @@ function matchOrders(order1, order2) {
   return { matched: true, fheEncryptedResult, executionId };
 }
 
+function compatibility(taker, candidate) {
+  if (!taker || !candidate) {
+    return { compatible: false, code: "invalid_payload", attestationRef: null };
+  }
+  const sidesOpposite = String(taker.side || "") !== String(candidate.side || "");
+  const pairMatch =
+    String(taker.pairBase || "") === String(candidate.pairBase || "") &&
+    String(taker.pairQuote || "") === String(candidate.pairQuote || "");
+  const compatible = sidesOpposite && pairMatch;
+  return {
+    compatible,
+    code: compatible ? "ok" : "reject_pair_or_side",
+    attestationRef: `standin:${Date.now()}`,
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
   const path = url.pathname;
@@ -90,6 +106,11 @@ const server = http.createServer(async (req, res) => {
         executionId: ethers.keccak256(ethers.toUtf8Bytes(Date.now().toString())),
         standin: true,
       });
+    }
+
+    if (req.method === 'POST' && path === '/compatibility') {
+      const body = await readBody(req);
+      return json(res, 200, compatibility(body?.taker, body?.candidate));
     }
 
     if (req.method === 'GET' && path === '/health') {

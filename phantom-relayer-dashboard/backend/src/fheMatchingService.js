@@ -18,13 +18,36 @@ const {
 const { ORDER_STATUS, assertLegalTransition } = require("./internalOrderLifecycle");
 const router = express.Router();
 
+const FHE_MODE_RAW = String(process.env.FHE_MODE || "mock").trim().toLowerCase();
+const FHE_MODE = FHE_MODE_RAW === "remote" ? "remote" : "mock";
 const FHE_SERVICE_URL = (process.env.FHE_SERVICE_URL || '').replace(/\/$/, '');
+const FHE_SERVICE_TIMEOUT_MS = Number(process.env.FHE_SERVICE_TIMEOUT_MS || 30000);
+const FHE_REMOTE_CONFIGURED = Boolean(FHE_SERVICE_URL);
+const FHE_REMOTE_ENABLED = FHE_MODE === "remote" && FHE_REMOTE_CONFIGURED;
+
+let lastRemoteHealth = {
+  checkedAt: 0,
+  reachable: false,
+  error: null,
+};
+
+function isRemoteMode() {
+  return FHE_MODE === "remote";
+}
+
+function isRemoteConfigured() {
+  return FHE_REMOTE_CONFIGURED;
+}
+
+function isRemoteEnabled() {
+  return FHE_REMOTE_ENABLED;
+}
 
 async function fheRemoteFetch(relPath, init) {
-  if (!FHE_SERVICE_URL) return null;
+  if (!isRemoteEnabled()) return null;
   const url = `${FHE_SERVICE_URL}${relPath.startsWith('/') ? '' : '/'}${relPath}`;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), Number(process.env.FHE_SERVICE_TIMEOUT_MS || 30000));
+  const t = setTimeout(() => ctrl.abort(), FHE_SERVICE_TIMEOUT_MS);
   try {
     const r = await fetch(url, { ...init, signal: ctrl.signal });
     const text = await r.text();
@@ -44,6 +67,26 @@ async function fheRemoteFetch(relPath, init) {
   } finally {
     clearTimeout(t);
   }
+}
+
+async function getRemoteHealthSnapshot() {
+  if (!isRemoteMode()) {
+    return { reachable: false, configured: isRemoteConfigured(), error: null, checkedAt: Date.now() };
+  }
+  if (!isRemoteConfigured()) {
+    return { reachable: false, configured: false, error: "FHE_SERVICE_URL missing", checkedAt: Date.now() };
+  }
+  const now = Date.now();
+  if (now - Number(lastRemoteHealth.checkedAt || 0) < 5000) {
+    return { ...lastRemoteHealth, configured: true };
+  }
+  try {
+    await fheRemoteFetch("/health", { method: "GET" });
+    lastRemoteHealth = { checkedAt: now, reachable: true, error: null };
+  } catch (e) {
+    lastRemoteHealth = { checkedAt: now, reachable: false, error: e?.message || "unreachable" };
+  }
+  return { ...lastRemoteHealth, configured: true };
 }
 
 const ORDER_STORE_FILE = process.env.MATCHING_ORDER_STORE || path.join(__dirname, '..', 'data', 'matching-orders.json');
@@ -428,7 +471,7 @@ async function evaluateFheCompatibility(taker, maker, traceId) {
     }
   }
 
-  if (!FHE_SERVICE_URL) {
+  if (!isRemoteEnabled()) {
     return { availability: "unavailable", compatible: false, code: "service_not_configured", attestationRef: null };
   }
 
@@ -905,7 +948,7 @@ async function registerOrderAndTryMatch(order) {
 async function matchOrdersFHE(order1, order2) {
   console.log('🔄 Matching FHE-encrypted orders...');
 
-  if (FHE_SERVICE_URL) {
+  if (isRemoteEnabled()) {
     try {
       const remote = await fheRemoteFetch('/match', {
         method: 'POST',
@@ -968,7 +1011,7 @@ router.post('/match', async (req, res) => {
       return res.status(400).json({ error: 'Invalid order asset IDs' });
     }
 
-    if (FHE_SERVICE_URL) {
+    if (isRemoteEnabled()) {
       try {
         const remote = await fheRemoteFetch('/match', {
           method: 'POST',
@@ -1059,17 +1102,22 @@ router.get("/internal/match/:matchHash", (req, res) => {
   }
 });
 
-router.get('/health', (req, res) => {
+router.get('/health', async (req, res) => {
   const openOrders = Array.from(orderBook.values()).reduce((sum, arr) => sum + arr.length, 0);
+  const remoteHealth = await getRemoteHealthSnapshot();
   res.json({
     status: 'healthy',
     service: 'FHE Matching Service',
     fheEnabled: true,
     orderPairs: orderBook.size,
     openOrders,
-    fheMode: FHE_SERVICE_URL ? 'remote' : 'mock',
-    fheLibrary: FHE_SERVICE_URL ? 'remote-service' : 'deterministic-mock',
-    fheServiceConfigured: Boolean(FHE_SERVICE_URL),
+    fheMode: FHE_MODE,
+    fheEffectiveMode: isRemoteEnabled() ? 'remote' : 'mock',
+    fheLibrary: isRemoteEnabled() ? 'remote-service' : 'deterministic-mock',
+    fheServiceConfigured: isRemoteConfigured(),
+    fheServiceReachable: remoteHealth.reachable,
+    fheServiceError: remoteHealth.error,
+    fheServiceCheckedAt: remoteHealth.checkedAt,
     fhePolicy: getFhePolicy(),
   });
 });
@@ -1082,7 +1130,7 @@ router.post('/compute', async (req, res) => {
       return res.status(400).json({ error: 'Missing operation or inputs' });
     }
 
-    if (FHE_SERVICE_URL) {
+    if (isRemoteEnabled()) {
       try {
         const remote = await fheRemoteFetch('/compute', {
           method: 'POST',
@@ -1112,7 +1160,7 @@ router.post('/compute', async (req, res) => {
 });
 
 router.get('/public-key', async (req, res) => {
-  if (FHE_SERVICE_URL) {
+  if (isRemoteEnabled()) {
     try {
       const remote = await fheRemoteFetch('/public-key', { method: 'GET' });
       return res.json(remote);
@@ -1126,7 +1174,7 @@ router.get('/public-key', async (req, res) => {
 
 router.post('/encrypt', async (req, res) => {
   try {
-    if (FHE_SERVICE_URL) {
+    if (isRemoteEnabled()) {
       try {
         const remote = await fheRemoteFetch('/encrypt', {
           method: 'POST',
@@ -1192,7 +1240,7 @@ router.post('/order', async (req, res) => {
 });
 
 function getFheMatchMode() {
-  return FHE_SERVICE_URL ? 'remote' : 'mock';
+  return FHE_MODE;
 }
 
 module.exports = router;

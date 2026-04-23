@@ -129,6 +129,28 @@ def compute():
     )
 
 
+@app.post("/compatibility")
+def compatibility():
+    body = request.get_json(silent=True) or {}
+    taker = body.get("taker") or {}
+    candidate = body.get("candidate") or {}
+    if not taker or not candidate:
+        return jsonify({"compatible": False, "code": "invalid_payload", "attestationRef": None}), 200
+    sides_opposite = str(taker.get("side", "")) != str(candidate.get("side", ""))
+    pair_match = (
+        str(taker.get("pairBase", "")) == str(candidate.get("pairBase", ""))
+        and str(taker.get("pairQuote", "")) == str(candidate.get("pairQuote", ""))
+    )
+    compatible = bool(sides_opposite and pair_match)
+    return jsonify(
+        {
+            "compatible": compatible,
+            "code": "ok" if compatible else "reject_pair_or_side",
+            "attestationRef": f"tenseal-demo:{_now_ms()}",
+        }
+    )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "9101"))
     app.run(host="0.0.0.0", port=port, threaded=True)
