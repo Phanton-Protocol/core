@@ -107,14 +107,6 @@ interface IShieldedPool {
     ) external;
 
     /**
-     * @notice Atomically settles a matched taker/maker pair fully on-chain.
-     * @dev Additive to legacy swap/withdraw flows; does not replace them.
-     */
-    function internalMatchSettle(
-        InternalMatchSettlementData calldata data
-    ) external;
-
-    /**
      * @notice Portfolio-note deposit (single note per wallet)
      */
     function portfolioDeposit(

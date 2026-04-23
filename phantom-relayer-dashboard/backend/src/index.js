@@ -26,12 +26,7 @@ const {
   saveDepositSession,
   getDepositSessionByIdempotencyKey,
   getDepositSessionBySessionId,
-  saveDepositTxReceipt,
-  listComplianceDecisionsByOrder,
-  listComplianceDecisionsByMatch,
-  listComplianceDecisionsByExecutionId,
-  listAttestationDecisionsByMatch,
-  listAttestationDecisionsByExecutionId,
+  saveDepositTxReceipt
 } = require("./db");
 const { mimc7 } = require("./mimc7");
 const { canonicalizeNote, noteIdFromCanonical, normalizeHex32 } = require("./noteModel");
@@ -39,13 +34,11 @@ const { encryptJsonAtRest, decryptJsonAtRest, getNotesEncryptionKey } = require(
 const { buildMerklePath: buildMerklePath10, verifyMerklePath: verifyMerklePath10 } = require("./merkle10");
 const { toBigInt, toBigIntString } = require("./utils/bigint");
 const ValidatorNetwork = require("./validatorNetwork");
-const { createComplianceEngine } = require("./complianceEngine");
 const { generateSwapProof, generateWithdrawProof, generatePortfolioProof, getProofStats } = require("./zkProofs");
 const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
-const { registerOrderAndTryMatch, getFheMatchMode, configureMatchingEngine } = require("./fheMatchingService");
+const { registerOrderAndTryMatch, getFheMatchMode } = require("./fheMatchingService");
 const { createEnterpriseRouter } = require("./enterpriseRoutes");
-const { createInternalOrderRouter } = require("./internalOrderRoutes");
 const { getSeeConfig, verifyAttestation, requireSeeForSensitiveFlow } = require("./seeGuard");
 const { logRelayerOnchainFailure, logProofFailure } = require("./relayerLog");
 const { assertNoMockRuntimeGate } = require("./noMockRuntimeGate");
@@ -58,7 +51,6 @@ const {
   logModule4
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs } = require("./swapIntentBinding");
-const { createSettlementCoordinator, createOnchainInternalMatchSubmitter } = require("./settlementCoordinator");
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
@@ -86,7 +78,6 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use("/fhe/internal", requireSeeForSensitiveFlow);
 app.use("/fhe", fheMatchingRouter);
 const enterpriseRouter = createEnterpriseRouter();
 app.use("/enterprise", enterpriseRouter);
@@ -301,16 +292,6 @@ try {
   }
 }
 
-const internalOrderRouter = createInternalOrderRouter({
-  db,
-  chainId: CHAIN_ID,
-  verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
-  complianceEngine: createComplianceEngine({ db }),
-});
-app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
-configureMatchingEngine({ db });
-let settlementCoordinator = null;
-
 function assertStagingProductionBypassPolicy() {
   if (PHANTOM_DEPLOYMENT_TIER_RAW !== "staging" && PHANTOM_DEPLOYMENT_TIER_RAW !== "production") return;
   if (PHANTOM_EMERGENCY_BYPASS_DEV_FLAGS) {
@@ -357,16 +338,6 @@ const VALIDATOR_URLS = process.env.VALIDATOR_URLS
 const RELAYER_REQUIRE_VALIDATOR_QUORUM = process.env.RELAYER_REQUIRE_VALIDATOR_QUORUM === "true"; 
 
 const validatorNetwork = new ValidatorNetwork(VALIDATOR_URLS, 6600); 
-const settlementCoordinatorSubmitter =
-  String(process.env.SETTLEMENT_SUBMISSION_MODE || "dry_run") === "live_internal_match"
-    ? createOnchainInternalMatchSubmitter()
-    : undefined;
-settlementCoordinator = createSettlementCoordinator({
-  db,
-  submitter: settlementCoordinatorSubmitter,
-  complianceEngine: createComplianceEngine({ db }),
-  validatorNetwork,
-});
 
 const INTENT_DOMAIN = {
   name: "ShadowDeFiRelayer",
@@ -3165,93 +3136,6 @@ app.get("/history/:address", (req, res) => {
 app.get("/export", (req, res) => {
   const data = exportAll(db);
   res.json(data);
-});
-
-app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, async (req, res) => {
-  try {
-    const matchHash = String(req.params.matchHash || "");
-    if (!ethers.isHexString(matchHash, 32)) {
-      return res.status(400).json({ error: "invalid_match_hash" });
-    }
-    const out = await settlementCoordinator.start(matchHash, {
-      policy: req.body?.policy || {},
-      executionKey: req.body?.executionKey,
-    });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "settlement_start_failed" });
-  }
-});
-
-app.post("/settlement/internal/:matchHash/retry", requireSeeForSensitiveFlow, async (req, res) => {
-  try {
-    const matchHash = String(req.params.matchHash || "");
-    if (!ethers.isHexString(matchHash, 32)) {
-      return res.status(400).json({ error: "invalid_match_hash" });
-    }
-    const out = await settlementCoordinator.retry(matchHash, {
-      policy: req.body?.policy || {},
-      executionKey: req.body?.executionKey,
-    });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "settlement_retry_failed" });
-  }
-});
-
-app.get("/settlement/internal/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
-  try {
-    const matchHash = String(req.params.matchHash || "");
-    if (!ethers.isHexString(matchHash, 32)) {
-      return res.status(400).json({ error: "invalid_match_hash" });
-    }
-    const status = settlementCoordinator.getStatus(matchHash);
-    if (!status) return res.status(404).json({ error: "settlement_not_found" });
-    return res.json(status);
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "settlement_status_failed" });
-  }
-});
-
-app.get("/compliance/internal/order/:orderId/decisions", requireSeeForSensitiveFlow, (req, res) => {
-  try {
-    const orderId = String(req.params.orderId || "");
-    if (!ethers.isHexString(orderId, 32)) {
-      return res.status(400).json({ error: "invalid_order_id" });
-    }
-    const compliance = listComplianceDecisionsByOrder(db, orderId, 200);
-    return res.json({ orderId, compliance });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "compliance_order_lookup_failed" });
-  }
-});
-
-app.get("/compliance/internal/match/:matchHash/decisions", requireSeeForSensitiveFlow, (req, res) => {
-  try {
-    const matchHash = String(req.params.matchHash || "");
-    if (!ethers.isHexString(matchHash, 32)) {
-      return res.status(400).json({ error: "invalid_match_hash" });
-    }
-    const compliance = listComplianceDecisionsByMatch(db, matchHash, 200);
-    const attestation = listAttestationDecisionsByMatch(db, matchHash, 100);
-    return res.json({ matchHash, compliance, attestation });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "compliance_match_lookup_failed" });
-  }
-});
-
-app.get("/compliance/internal/execution/:executionId/decisions", requireSeeForSensitiveFlow, (req, res) => {
-  try {
-    const executionId = String(req.params.executionId || "");
-    if (!executionId) {
-      return res.status(400).json({ error: "invalid_execution_id" });
-    }
-    const compliance = listComplianceDecisionsByExecutionId(db, executionId, 200);
-    const attestation = listAttestationDecisionsByExecutionId(db, executionId, 100);
-    return res.json({ executionId, compliance, attestation });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "compliance_execution_lookup_failed" });
-  }
 });
 
 app.get("/merkle/:commitment", async (req, res) => {
