@@ -171,19 +171,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const INTENT_TYPES = {
-  SwapIntent: [
-    { name: "user", type: "address" },
-    { name: "inputAssetID", type: "uint256" },
-    { name: "outputAssetID", type: "uint256" },
-    { name: "amountIn", type: "uint256" },
-    { name: "minAmountOut", type: "uint256" },
-    { name: "deadline", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "nullifier", type: "bytes32" },
-  ],
-};
-
 const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const WBNB_BSC_MAINNET = "0xbb4CdB9Cbd36B01bD1cBaEBF2De08d9173bc095c";
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
@@ -1363,39 +1350,24 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       }
       const nullifierHex = nullifierToBytes32Hex(swapData.publicInputs.nullifier);
 
-      const intentReq = {
-        userAddress: wallet.address,
-        inputAssetID: Number(swapData.publicInputs.inputAssetID),
-        outputAssetID: Number(swapData.publicInputs.outputAssetIDSwap),
-        amountIn: String(swapData.publicInputs.swapAmount ?? "0"),
-        minAmountOut: String(swapData.publicInputs.minOutputAmountSwap ?? intentForm.minOutputAmount ?? "0"),
-        nonce: String(noteNonce),
-        nullifier: nullifierHex,
-        deadline,
-      };
-
-      const intentRes = await fetchJson(`${base}/intent`, {
-        method: "POST",
-        body: JSON.stringify(intentReq),
-      });
-
-      const { intentId, intent, domain, types } = intentRes;
-      const typed = types || INTENT_TYPES;
-      const signPayload = {
-        user: intent.userAddress,
-        inputAssetID: intent.inputAssetID,
-        outputAssetID: intent.outputAssetID,
-        amountIn: intent.amountIn,
-        minAmountOut: intent.minAmountOut,
-        deadline: intent.deadline,
-        nonce: intent.nonce,
-        nullifier: intent.nullifier,
-      };
-      const intentSig = await wallet.signer.signTypedData(domain, typed, signPayload);
+      const minOutForAuth = String(
+        swapData.publicInputs.minOutputAmountSwap ??
+          swapData.swapParams?.minAmountOut ??
+          intentForm.minOutputAmount ??
+          "0"
+      );
 
       const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
       const envelope = await encryptForRelayer(
-        { intentId, intent, intentSig, swapData },
+        {
+          swapData,
+          zkAuthorization: {
+            nullifier: nullifierHex,
+            deadline,
+            nonce: String(noteNonce),
+            minAmountOut: minOutForAuth,
+          },
+        },
         keyInfo?.publicKeyPem
       );
       const out = await fetchJson(`${base}/swap/encrypted`, {

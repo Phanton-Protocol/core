@@ -50,7 +50,7 @@ const {
   sendDepositForBnb,
   logModule4
 } = require("./module4Deposit");
-const { assertIntentNullifierMatchesSwapPublicInputs } = require("./swapIntentBinding");
+const { assertIntentNullifierMatchesSwapPublicInputs, canonicalNullifierHex } = require("./swapIntentBinding");
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
@@ -1086,9 +1086,19 @@ const proofShape = z.object({
 }).passthrough();
 
 const swapSchema = z.object({
-  intentId: z.string(),
-  intent: intentSchema,
-  intentSig: z.string(),
+  intentId: z.string().optional(),
+  intent: intentSchema.optional(),
+  intentSig: z.string().optional(),
+  /**
+   * Privacy-preserving auth path: no wallet address/signature.
+   * Authorization relies on valid join-split proof + nullifier replay protection.
+   */
+  zkAuthorization: z.object({
+    nullifier: z.union([z.string(), z.number()]).optional(),
+    deadline: z.union([z.string(), z.number()]).optional(),
+    nonce: z.union([z.string(), z.number()]).optional(),
+    minAmountOut: z.union([z.string(), z.number()]).optional(),
+  }).optional(),
   swapData: z.object({
     proof: proofShape,
     publicInputs: z.any(),
@@ -2497,51 +2507,102 @@ async function processSwapRequestBody(body) {
     throw err;
   }
 
-  const { intentId, intent, intentSig, swapData } = parsed.data;
-  if (Number(intent.deadline) < Math.floor(Date.now() / 1000)) {
-    const err = new Error("Intent expired");
-    err.status = 400;
-    throw err;
-  }
-  if (!consumeReplayKey(`swap_intent:${String(intent.nullifier).toLowerCase()}:${String(intent.nonce)}`)) {
-    const err = new Error("Intent already processed or replay detected");
-    err.status = 409;
-    throw err;
-  }
-  const cached = intents.get(intentId) || getIntent(db, intentId)?.payload;
-  if (!cached) {
-    const err = new Error("Unknown intentId");
-    err.status = 404;
-    throw err;
-  }
-
-  const typedIntent = {
-    user: ethers.getAddress(intent.userAddress),
-    inputAssetID: BigInt(intent.inputAssetID),
-    outputAssetID: BigInt(intent.outputAssetID),
-    amountIn: BigInt(intent.amountIn),
-    minAmountOut: BigInt(intent.minAmountOut),
-    deadline: BigInt(intent.deadline),
-    nonce: BigInt(intent.nonce),
-    nullifier: intent.nullifier,
-  };
-  const signerAddr = ethers.verifyTypedData(INTENT_DOMAIN, INTENT_TYPES, typedIntent, intentSig);
-  if (signerAddr.toLowerCase() !== String(intent.userAddress).toLowerCase()) {
-    const err = new Error("Invalid intent signature");
-    err.status = 400;
-    throw err;
-  }
+  const { intentId: incomingIntentId, intent: incomingIntent, intentSig, swapData, zkAuthorization } = parsed.data;
   const pi = swapData?.publicInputs || {};
-  assertIntentNullifierMatchesSwapPublicInputs(intent, swapData?.publicInputs);
-  try {
-    await screenDepositDepositor(ethers.getAddress(intent.userAddress), "swap");
-  } catch (e) {
-    if (e?.status) {
-      const err = new Error(e.message || "chainalysis_depositor_not_allowed");
-      err.status = e.status;
+  const usingLegacyIntent = !!(incomingIntentId && incomingIntent && intentSig);
+  let intentId = incomingIntentId || "";
+  let intent = null;
+  let ownerAddress = null;
+
+  if (usingLegacyIntent) {
+    intent = incomingIntent;
+    if (Number(intent.deadline) < Math.floor(Date.now() / 1000)) {
+      const err = new Error("Intent expired");
+      err.status = 400;
       throw err;
     }
-    throw e;
+    if (!consumeReplayKey(`swap_intent:${String(intent.nullifier).toLowerCase()}:${String(intent.nonce)}`)) {
+      const err = new Error("Intent already processed or replay detected");
+      err.status = 409;
+      throw err;
+    }
+    const cached = intents.get(intentId) || getIntent(db, intentId)?.payload;
+    if (!cached) {
+      const err = new Error("Unknown intentId");
+      err.status = 404;
+      throw err;
+    }
+
+    const typedIntent = {
+      user: ethers.getAddress(intent.userAddress),
+      inputAssetID: BigInt(intent.inputAssetID),
+      outputAssetID: BigInt(intent.outputAssetID),
+      amountIn: BigInt(intent.amountIn),
+      minAmountOut: BigInt(intent.minAmountOut),
+      deadline: BigInt(intent.deadline),
+      nonce: BigInt(intent.nonce),
+      nullifier: intent.nullifier,
+    };
+    const signerAddr = ethers.verifyTypedData(INTENT_DOMAIN, INTENT_TYPES, typedIntent, intentSig);
+    if (signerAddr.toLowerCase() !== String(intent.userAddress).toLowerCase()) {
+      const err = new Error("Invalid intent signature");
+      err.status = 400;
+      throw err;
+    }
+    ownerAddress = intent.userAddress;
+  } else {
+    const nullifierHex = canonicalNullifierHex(zkAuthorization?.nullifier ?? pi?.nullifier);
+    if (!nullifierHex) {
+      const err = new Error("swap publicInputs.nullifier is required");
+      err.status = 400;
+      throw err;
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const deadline = Number(zkAuthorization?.deadline ?? (nowSec + 900));
+    if (!Number.isFinite(deadline) || deadline < nowSec) {
+      const err = new Error("ZK authorization expired");
+      err.status = 400;
+      throw err;
+    }
+    const nonce = String(zkAuthorization?.nonce ?? "0");
+    const minAmountOut = String(zkAuthorization?.minAmountOut ?? pi?.minOutputAmountSwap ?? swapData?.swapParams?.minAmountOut ?? "0");
+    if (!consumeReplayKey(`swap_zk:${nullifierHex}`)) {
+      const err = new Error("Swap already processed or replay detected");
+      err.status = 409;
+      throw err;
+    }
+    intent = {
+      userAddress: ethers.ZeroAddress,
+      inputAssetID: String(pi?.inputAssetID ?? 0),
+      outputAssetID: String(pi?.outputAssetIDSwap ?? 0),
+      amountIn: String(pi?.swapAmount ?? 0),
+      minAmountOut,
+      nonce,
+      nullifier: nullifierHex,
+      deadline,
+    };
+    intentId = incomingIntentId || ethers.keccak256(
+      ethers.toUtf8Bytes(JSON.stringify({
+        nullifier: intent.nullifier,
+        deadline: intent.deadline,
+        nonce: intent.nonce,
+        amountIn: intent.amountIn,
+        outputAssetID: intent.outputAssetID,
+      }))
+    );
+  }
+  assertIntentNullifierMatchesSwapPublicInputs(intent, swapData?.publicInputs);
+  if (ownerAddress && ownerAddress !== ethers.ZeroAddress) {
+    try {
+      await screenDepositDepositor(ethers.getAddress(ownerAddress), "swap");
+    } catch (e) {
+      if (e?.status) {
+        const err = new Error(e.message || "chainalysis_depositor_not_allowed");
+        err.status = e.status;
+        throw err;
+      }
+      throw e;
+    }
   }
   if (String(pi.outputAssetIDSwap) !== String(intent.outputAssetID) || String(pi.inputAssetID) !== String(intent.inputAssetID)) {
     const err = new Error("Intent asset IDs do not match swap public inputs");
@@ -2601,11 +2662,11 @@ async function processSwapRequestBody(body) {
     ? await simulateSwap(intentId)
     : await submitSwap(swapData);
   if (internalFheMatch) txResult.internalFheMatch = internalFheMatch;
-  if (!RELAYER_DRY_RUN && txResult?.txHash) {
+  if (!RELAYER_DRY_RUN && txResult?.txHash && ownerAddress && ownerAddress !== ethers.ZeroAddress) {
     try {
       const persisted = await persistSwapOutputNotes({
         txHash: txResult.txHash,
-        ownerAddress: intent.userAddress,
+        ownerAddress,
         noteHints: swapData.noteHints,
         publicInputs: swapData.publicInputs,
       });
@@ -2617,7 +2678,7 @@ async function processSwapRequestBody(body) {
 
   const receipt = buildReceipt(intentId, swapData, txResult);
   receipts.set(intentId, receipt);
-  saveReceipt(db, intentId, intent.userAddress, receipt);
+  saveReceipt(db, intentId, ownerAddress || ethers.ZeroAddress, receipt);
 
   return {
     version: "1.0",
