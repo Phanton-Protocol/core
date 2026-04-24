@@ -5,7 +5,8 @@ import SeoHead from './SeoHead';
 import Navbar from './Navbar';
 import { useLocation } from 'react-router-dom';
 import { Shield } from 'lucide-react';
-import { MasterPhantomDiagram, CommitmentFormulaDiagram, NullifierFormulaDiagram, PhantomBankSystemDiagram, RelayerSystemDiagram } from './WhitepaperDiagrams';
+import { MasterPhantomDiagram, CommitmentFormulaDiagram, NullifierFormulaDiagram, RelayerSystemDiagram } from './WhitepaperDiagrams';
+import BankingFlowChart from './BankingFlowChart';
 
 const parseTextToBlocks = (text) => {
     const rawLines = text.split(/\r?\n/);
@@ -96,7 +97,7 @@ const HighTechBlock = ({ block, idx, enableDiagrams, isMobile }) => {
                             {block.content}
                         </h2>
                     </motion.div>
-                    {enableDiagrams && block.content.includes('Phantom 3.0') && <PhantomBankSystemDiagram />}
+                    {enableDiagrams && block.content.includes('Phantom 3.0') && <BankingFlowChart />}
                 </React.Fragment>
             );
         case 'h3':

@@ -27,8 +27,9 @@ import WhitepaperPage from './components/WhitepaperPage';
 import OnePagerPage from './components/OnePagerPage';
 import PrivacyVisibilityPage from './components/PrivacyVisibilityPage';
 import PitchDeckPage from './components/PitchDeckPage';
+import BankingSystemPage from './components/BankingSystemPage';
 import { blogPosts } from './data/blogPosts';
-import logoUrl from './assets/logo.svg';
+import logoUrl from './assets/logo-pro.svg';
 import { SOCIAL_LINKS, RUNBOOK_URL } from './config';
 import { HOME_SCROLL_SECTION_IDS } from './seo/homeScrollSections';
 import GhostChainVisualizer from './components/GhostChainVisualizer';
@@ -61,7 +62,7 @@ function UserDappPage() {
         <AppPageShell
           label="Protocol console"
           title="User console"
-          subtitle="Deposit to the shielded pool, swap with relayer-submitted transactions, and withdraw. Connect MetaMask on the same chain as the relayer (BSC or testnet)."
+          subtitle="Deposit to the shielded pool, swap with relayer-submitted transactions, and withdraw. Connect MetaMask on the same chain as the relayer."
           maxWidth={800}
         >
           <ProtocolUserDapp />
@@ -88,13 +89,8 @@ function TradePage() {
           label="Trade console"
           title="Trade"
           subtitle="Deposit to the shielded pool, swap privately, and withdraw from one console."
-          belowTheFold={
-            <div style={{ marginTop: 'clamp(2rem, 4vw, 3rem)' }}>
-              <DAppSection embedded />
-            </div>
-          }
         >
-          <ProtocolUserDapp />
+          <ProtocolUserDapp uiVariant="trade" />
         </AppPageShell>
       </Suspense>
     </div>
@@ -107,6 +103,7 @@ function RelayerStakerPage() {
   const [stakingStats, setStakingStats] = useState(null);
   const [relayerStatus, setRelayerStatus] = useState(null);
   const [loadErr, setLoadErr] = useState('');
+  const isLocalEnv = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
   useEffect(() => {
     localStorage.setItem('phantom_api', apiBase);
@@ -201,7 +198,9 @@ function RelayerStakerPage() {
 
           <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap', marginTop: '1.25rem' }}>
             <Link to="/relayer" className="btn-outline btn-outline-cyan">Relayer onboarding</Link>
-            <a className="btn-outline" href="http://localhost:5177/" target="_blank" rel="noreferrer">Open local node dashboard</a>
+            {isLocalEnv && (
+              <a className="btn-outline" href="http://localhost:5177/" target="_blank" rel="noreferrer">Open local node dashboard</a>
+            )}
             <a className="btn-outline" href={`${String(apiBase || '').replace(/\/$/, '')}/health`} target="_blank" rel="noreferrer">Open relayer API health</a>
             <a className="btn-outline" href={`${String(apiBase || '').replace(/\/$/, '')}/relayer/dashboard`} target="_blank" rel="noreferrer">Relayer dashboard JSON</a>
             <Link to="/privacy-visibility" className="btn-outline">Privacy & visibility</Link>
@@ -563,6 +562,7 @@ function App() {
           />
         }
       />
+      <Route path="/banking-system" element={<BankingSystemPage />} />
       <Route path="/pitchdeck" element={<PitchDeckPage />} />
       <Route path="*" element={<UnknownRoutePage />} />
     </Routes>

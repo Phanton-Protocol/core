@@ -7,7 +7,7 @@ const Roadmap = () => {
             completed: true,
             title: "Confidentiality Engine",
             desc: "",
-            items: ["Shielded Pool Architectural Flow Design", "ZK Circuit Development", "Mock FHE Design", "Relayer Architecture Build on BNB Testnet"]
+            items: ["Shielded Pool Architectural Flow Design", "ZK Circuit Development", "FHE Architecture Design", "Relayer Architecture Build on BNB Chain"]
         },
         {
             num: "Phase 2",
@@ -18,8 +18,8 @@ const Roadmap = () => {
                 "Production FHE Matching Implementation",
                 "Merkle Tree Growth Under Live Load",
                 "Fully On-Chain Deposit / Withdraw / Swap Execution",
-                "Mock Payroll System",
-                "Mock Bank Architecture",
+                "Payroll System Architecture",
+                "Bank Integration Architecture",
                 "Integration Rails for Launch Readiness"
             ]
         },
@@ -28,7 +28,7 @@ const Roadmap = () => {
             current: true,
             title: "Confidentiality Activation",
             desc: "",
-            items: ["Testnet Campaigns", "Protocol Stress Testing", "Real Payroll System on Testnet", "Base Chain Addition"]
+            items: ["Launch Campaigns", "Protocol Stress Testing", "Real Payroll System Rollout", "Base Chain Addition"]
         },
         {
             num: "Phase 4",
