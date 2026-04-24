@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ethers } from "ethers";
 import { loadVault, saveVault } from "../lib/noteVault";
 import { relayerFetchJson, setRuntimeRelayerBases } from "../lib/relayerHttp";
 import { canUseClientProver, generateSwapProofClient } from "../lib/clientProver";
 import { encryptForRelayer } from "../lib/relayEnvelope";
-import { CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../config";
+import { API_URLS, CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../config";
+import { nullifierToBytes32Hex, SHADOW_SWEEP_GAS_BUFFER_WEI_DEFAULT } from "../lib/relayerDefaults.js";
 import {
   addressToOwnerPublicKey,
   commitmentToBytes32,
@@ -32,9 +33,120 @@ function stringifyErr(x) {
   return String(x);
 }
 
+/** Build a v1 vault note payload from swap hints + on-chain commitment (decimal string or bytes32 hex). */
+function buildVaultNoteFromSwapHint({ assetId, amountStr, blindingFactor, ownerPublicKey, commitmentStr }) {
+  const raw = String(commitmentStr || "").trim();
+  if (!raw) throw new Error("Missing commitment for vault note");
+  let cDec;
+  if (/^0x[0-9a-fA-F]{64}$/.test(raw)) {
+    cDec = ethers.toBigInt(raw).toString();
+  } else {
+    cDec = raw;
+  }
+  const commitmentHex = commitmentToBytes32(cDec);
+  const recomputed = noteCommitment(assetId, amountStr, blindingFactor, ownerPublicKey).toString();
+  if (recomputed !== cDec) {
+    throw new Error("Vault note commitment mismatch — swap hints do not match on-chain commitment");
+  }
+  return {
+    version: 1,
+    assetID: assetId,
+    amount: String(amountStr),
+    blindingFactor: String(blindingFactor),
+    ownerPublicKey: String(ownerPublicKey),
+    commitmentDecimal: cDec,
+    commitmentHex,
+  };
+}
+
+function isNonZeroCommitmentStr(c) {
+  const s = String(c ?? "").trim();
+  if (!s) return false;
+  if (/^0x[0-9a-fA-F]{64}$/i.test(s)) {
+    try {
+      return ethers.toBigInt(s) !== 0n;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return BigInt(s) !== 0n;
+  } catch {
+    return false;
+  }
+}
+
+/** Prefer API `out.commitments`, else fall back to proof public inputs (decimal or bytes32). */
+function resolveSwapOutputCommitments(out, publicInputs) {
+  const fromApiSwap = out?.commitments?.swap;
+  const fromApiChange = out?.commitments?.change;
+  const piSwap = publicInputs?.outputCommitmentSwap;
+  const piChange = publicInputs?.outputCommitmentChange;
+  const swap = isNonZeroCommitmentStr(fromApiSwap) ? fromApiSwap : piSwap;
+  const change = isNonZeroCommitmentStr(fromApiChange) ? fromApiChange : piChange;
+  return { swap, change };
+}
+
+/** Normalize circuit public-input commitment (decimal string or 0x hex) to vault `commitmentHex` form. */
+function publicInputCommitmentToVaultHex(c) {
+  const raw = String(c ?? "").trim();
+  if (!raw) return "";
+  try {
+    if (/^0x[0-9a-fA-F]{64}$/i.test(raw)) {
+      return String(ethers.zeroPadValue(raw, 32)).toLowerCase();
+    }
+    return String(commitmentToBytes32(raw)).toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Convert relayer `/notes` canonical `note.v1` into the local vault payload shape used by Swap/Withdraw. */
+function relayerCanonicalNoteToVaultPayload(note) {
+  if (!note || typeof note !== "object") return null;
+  if (Number(note.version) === 1 && note.commitmentHex && note.commitmentDecimal) {
+    return note;
+  }
+  const schema = String(note.schema || "");
+  const commitmentHexRaw = String(note.commitment || "").trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(commitmentHexRaw)) return null;
+  if (schema && schema !== "note.v1") return null;
+
+  const assetIDRaw = note.assetID ?? note.assetId;
+  if (assetIDRaw == null) return null;
+  const assetID = Number(assetIDRaw);
+  if (!Number.isFinite(assetID)) return null;
+
+  const amount = String(note.amount ?? "");
+  const blindingFactor = String(note.blindingFactor ?? "");
+  const ownerPublicKey = String(note.ownerPublicKey ?? "");
+  if (!amount || !blindingFactor || !ownerPublicKey) return null;
+
+  const commitmentHex = commitmentToBytes32(ethers.toBigInt(commitmentHexRaw).toString());
+  const commitmentDecimal = ethers.toBigInt(commitmentHexRaw).toString();
+  const recomputed = noteCommitment(assetID, amount, blindingFactor, ownerPublicKey).toString();
+  if (recomputed !== commitmentDecimal) return null;
+
+  return {
+    version: 1,
+    assetID,
+    amount,
+    blindingFactor,
+    ownerPublicKey,
+    commitmentDecimal,
+    commitmentHex,
+  };
+}
+
 async function fetchJson(url, opts) {
-  const headers = { "content-type": "application/json", ...(opts?.headers || {}) };
-  const fetchOpts = { ...opts, headers };
+  const ownerAddress = opts?.ownerAddress;
+  const { ownerAddress: _dropOwner, ...restOpts } = opts || {};
+  const headers = {
+    "content-type": "application/json",
+    ...(restOpts?.headers || {}),
+    ...(ownerAddress ? { "x-owner-address": String(ownerAddress).trim().toLowerCase() } : {}),
+  };
+  const fetchOpts = { ...restOpts, headers };
   let path = String(url || "");
   try {
     if (/^https?:\/\//i.test(path)) {
@@ -63,12 +175,16 @@ const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const WBNB_BSC_MAINNET = "0xbb4CdB9Cbd36B01bD1cBaEBF2De08d9173bc095c";
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 const FALLBACK_GAS_REFUND_WEI = ethers.parseEther("0.002").toString();
+/** ShieldedPool requires changeAmount != 0 (PoolErr 19): note = swap + change + protocolFee + gasRefund */
+const MIN_SWAP_CHANGE_WEI = 1n;
 const SLIPPAGE_PRESETS_BPS = [50, 100, 250, 500];
+/** Pending deposit note when auto-save failed (vault locked or save error). Cleared after successful vault write. */
+const PENDING_VAULT_NOTE_KEY = "phantom_pending_vault_note";
 const PC = {
   bg: "#14141c",
   card: "#18181f",
   border: "rgba(255,255,255,0.12)",
-  teal: "#00e5c7",
+  teal: "#9ea4aa",
   text: "#ffffff",
   muted: "rgba(255,255,255,0.68)",
 };
@@ -91,48 +207,73 @@ const DEPOSIT_TYPES = {
   ],
 };
 
-const DEFAULT_TOKEN_LIST = [
-  { symbol: "tBNB", address: ethers.ZeroAddress },
-  { symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-  { symbol: "USDT", address: "0x7EF95A0Fe8A5F4f9C1824fBf6656e2f95fA6Bf13" },
-];
+/** Must match `ethers.getAddress` / pool config (EIP-55). Wrong checksum breaks quotes in the relayer. */
+const USDT_BSC_TESTNET = "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13";
 
-const TESTNET_MOCK_TOKENS = [
-  { symbol: "tBUSD (mock)", address: "0x5A8309a15DB141777Fc39e7AB1E16D09939D8B27" },
-  { symbol: "tUSDT (mock)", address: "0xafA7006bD42F70509BD3102C6f22232b79240201" },
-  { symbol: "tUSDC (mock)", address: "0x5808F19EEc7328De5B9d5a6cFdaE45a726B77800" },
-  { symbol: "tCAKE (mock)", address: "0xC6FC0c39C9e998182c90D0F4be41c4561Dd21967" },
+const DEFAULT_TOKEN_LIST = [
+  { symbol: "BNB", address: ethers.ZeroAddress },
+  { symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
+  { symbol: "USDT", address: USDT_BSC_TESTNET },
+];
+const ERC20_BALANCE_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function decimals() view returns (uint8)",
 ];
 
 const TOKEN_OPTIONS = [
-  { label: "tBNB (native placeholder)", value: ethers.ZeroAddress },
-  { label: "BUSD (test)", value: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-  { label: "USDT (test)", value: "0x7EF95A0Fe8A5F4f9C1824fBf6656e2f95fA6Bf13" },
+  { label: "BNB (native)", value: ethers.ZeroAddress },
+  { label: "BUSD", value: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
+  { label: "USDT", value: USDT_BSC_TESTNET },
   { label: "Custom address", value: "__custom__" },
 ];
-const SHADOW_SWEEP_GAS_BUFFER_WEI = ethers.parseEther("0.001");
 
-function getAssetIdForToken(tokenAddress) {
+/** Resolve asset ID from relayer `/config` `assets` (on-chain registry via deploy config). Never guess (no silent BUSD). */
+function getAssetIdForToken(tokenAddress, relayerConfig) {
   const normalized = String(tokenAddress || "").toLowerCase();
   if (normalized === ethers.ZeroAddress.toLowerCase()) return 0;
-  if (normalized === "0x78867bbeeef44f2326bf8ddd1941a4439382ef2a7") return 1;
-  if (normalized === "0x7ef95a0fe8a5f4f9c1824fbf6656e2f95fa6bf13") return 2;
-  return 1;
+  const assets = Array.isArray(relayerConfig?.assets) ? relayerConfig.assets : [];
+  if (assets.length === 0) {
+    throw new Error(
+      "Relayer /config has no assets[] — cannot map token to asset ID. Ensure the relayer loads chain config."
+    );
+  }
+  const hit = assets.find((a) => a?.address && String(a.address).toLowerCase() === normalized);
+  if (hit != null && hit.assetId != null && !Number.isNaN(Number(hit.assetId))) {
+    return Number(hit.assetId);
+  }
+  throw new Error(
+    `Unknown token for asset ID (not listed in relayer /config assets): ${tokenAddress}. Use a configured asset or add this token to the pool config.`
+  );
 }
 
-function spendableNoteEntries(vaultData, inputToken) {
-  const aid = getAssetIdForToken(inputToken);
+function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
+  if (!relayerConfig?.assets?.length) return [];
+  let aid;
+  try {
+    aid = getAssetIdForToken(inputToken, relayerConfig);
+  } catch {
+    return [];
+  }
   const notes = vaultData?.notes || [];
   const out = [];
   notes.forEach((n, vaultIdx) => {
     const raw = n.payload ?? n;
-    if (raw?.version === 1 && Number(raw.assetID) === aid) out.push({ vaultIdx, note: raw });
+    const verOk = Number(raw?.version) === 1;
+    if (verOk && Number(raw.assetID) === aid) out.push({ vaultIdx, note: raw });
   });
   return out;
 }
 
 function canonicalWbnb(chainId) {
   return Number(chainId) === 56 ? WBNB_BSC_MAINNET : WBNB_BSC_TESTNET;
+}
+
+function formatTokenAmount(value, maxFrac = 6) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  if (n === 0) return "0";
+  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
 }
 
 function mergeSwapData(base, overlay) {
@@ -150,7 +291,7 @@ function mergeSwapData(base, overlay) {
   return out;
 }
 
-function buildDefaultSwapData(intentForm, chainId) {
+function buildDefaultSwapData(intentForm, chainId, relayerConfig) {
   const zb = ethers.ZeroHash;
   const wbnb = canonicalWbnb(chainId);
   const tokenIn =
@@ -185,8 +326,8 @@ function buildDefaultSwapData(intentForm, chainId) {
       outputCommitmentSwap: zb,
       outputCommitmentChange: zb,
       merkleRoot: zb,
-      inputAssetID: getAssetIdForToken(intentForm.inputToken),
-      outputAssetIDSwap: getAssetIdForToken(intentForm.outputToken),
+      inputAssetID: getAssetIdForToken(intentForm.inputToken, relayerConfig),
+      outputAssetIDSwap: getAssetIdForToken(intentForm.outputToken, relayerConfig),
       outputAssetIDChange: 0,
       inputAmount: amountInWei,
       swapAmount: amountInWei,
@@ -218,7 +359,7 @@ function getExplorerTxBase(chainId) {
 }
 
 export default function ProtocolUserDapp({ uiVariant = "default" }) {
-  const [apiBase, setApiBase] = useState(() => localStorage.getItem("phantom_api") || "http://localhost:5050");
+  const [apiBase, setApiBase] = useState(() => localStorage.getItem("phantom_api") || API_URLS.join(", "));
   const base = useMemo(() => (apiBase || "").replace(/\/$/, "").trim(), [apiBase]);
   const [cfg, setCfg] = useState(null);
   const [health, setHealth] = useState(null);
@@ -229,12 +370,20 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [connectError, setConnectError] = useState(null);
 
   const [vault, setVault] = useState({ unlocked: false, key: null, data: { notes: [], updatedAt: null } });
-  const [, setVaultError] = useState(null);
+  const vaultRef = useRef(vault);
+  useEffect(() => {
+    vaultRef.current = vault;
+  }, [vault]);
+  /** When true, do not overwrite withdraw "Amount" from computed max (user typed a custom payout). */
+  const withdrawAmountUserEditedRef = useRef(false);
+  const [vaultError, setVaultError] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
 
-  const [tab, setTab] = useState("swap");
+  const [tab, setTab] = useState(uiVariant === "trade" ? "deposit" : "swap");
+  const [internalMatchMode, setInternalMatchMode] = useState("create");
   const [lastResult, setLastResult] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [actionSuccess, setActionSuccess] = useState(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [depositBlinding, setDepositBlinding] = useState(() => randomFieldElementString());
@@ -259,23 +408,62 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   });
   const [swapQuoteLoading, setSwapQuoteLoading] = useState(false);
   const [swapQuoteErr, setSwapQuoteErr] = useState(null);
+  const [swapClampHint, setSwapClampHint] = useState("");
   const [swapExpectedLabel, setSwapExpectedLabel] = useState("");
   const [swapMinLabel, setSwapMinLabel] = useState("");
   const [swapSlippageBps, setSwapSlippageBps] = useState(DEFAULT_SWAP_SLIPPAGE_BPS);
   const [swapLastQuote, setSwapLastQuote] = useState(null);
   const [swapProofBusy, setSwapProofBusy] = useState(false);
-  const [swapSubmitBusy, setSwapSubmitBusy] = useState(false);
+  const [swapFlowBusy, setSwapFlowBusy] = useState(false);
+  const [swapFlowStage, setSwapFlowStage] = useState("");
+  const [swapSpinnerTick, setSwapSpinnerTick] = useState(0);
   const [withdrawProofBusy, setWithdrawProofBusy] = useState(false);
   const [clientProverReady, setClientProverReady] = useState(false);
-  const [spendPick, setSpendPick] = useState(0);
 
   const spendable = useMemo(
-    () => spendableNoteEntries(vault.data, intentForm.inputToken),
-    [vault.data, intentForm.inputToken]
+    () => spendableNoteEntries(vault.data, intentForm.inputToken, cfg),
+    [vault.data, intentForm.inputToken, cfg]
   );
-  useEffect(() => {
-    setSpendPick(0);
-  }, [intentForm.inputToken]);
+  const autoSpendEntry = useMemo(() => {
+    if (!spendable.length) return null;
+    let desired = 0n;
+    let fee = 0n;
+    let gas = 0n;
+    try {
+      desired = ethers.parseUnits(String(intentForm.inputAmount || "0"), 18);
+    } catch {
+      desired = 0n;
+    }
+    try {
+      fee = BigInt(String(intentForm.protocolFee || "0"));
+    } catch {
+      fee = 0n;
+    }
+    try {
+      gas = BigInt(String(intentForm.gasRefund || "0"));
+    } catch {
+      gas = 0n;
+    }
+    const eligible = spendable
+      .map((entry) => {
+        let noteWei = 0n;
+        try {
+          noteWei = BigInt(String(entry?.note?.amount || "0"));
+        } catch {
+          noteWei = 0n;
+        }
+        const maxSwap = noteWei - fee - gas - MIN_SWAP_CHANGE_WEI;
+        return { entry, noteWei, maxSwap };
+      })
+      .filter((row) => row.maxSwap > 0n);
+    if (!eligible.length) return spendable[0];
+    const enough = eligible
+      .filter((row) => desired <= 0n || row.maxSwap >= desired)
+      .sort((a, b) => (a.noteWei < b.noteWei ? -1 : 1));
+    if (enough.length) return enough[0].entry;
+    const largest = eligible.sort((a, b) => (a.maxSwap > b.maxSwap ? -1 : 1))[0];
+    return largest?.entry || spendable[0];
+  }, [spendable, intentForm.inputAmount, intentForm.protocolFee, intentForm.gasRefund]);
 
   const [withdrawForm, setWithdrawForm] = useState({
     token: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7",
@@ -286,21 +474,46 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     withdrawDataJson: "",
   });
   const withdrawSpendable = useMemo(
-    () => spendableNoteEntries(vault.data, withdrawForm.token),
-    [vault.data, withdrawForm.token]
+    () => spendableNoteEntries(vault.data, withdrawForm.token, cfg),
+    [vault.data, withdrawForm.token, cfg]
   );
+  const withdrawAdvancedJson = useMemo(
+    () => String(withdrawForm.withdrawDataJson || "").trim(),
+    [withdrawForm.withdrawDataJson]
+  );
+  /** Largest payout `amountWei` such that change = note − payout − fee − gas > 0 (same 1-wei floor as swap). */
   const withdrawMaxPayoutWei = useMemo(() => {
     if (!withdrawSpendable.length) return null;
     try {
-      const inputWei = BigInt(withdrawSpendable[0].note.amount);
-      const feeWei = BigInt(String(withdrawForm.protocolFee || "0"));
-      const gasWei = BigInt(String(withdrawForm.gasRefund || "0"));
-      const max = inputWei - feeWei - gasWei - 1n;
+      const note = withdrawSpendable[0].note;
+      const inputWei = BigInt(note.amount);
+      let protocolFee = 0n;
+      let gasRefund = 0n;
+      try {
+        protocolFee = BigInt(String(withdrawForm.protocolFee || "0"));
+      } catch {
+        protocolFee = 0n;
+      }
+      try {
+        gasRefund = BigInt(String(withdrawForm.gasRefund || "0"));
+      } catch {
+        gasRefund = 0n;
+      }
+      const max = inputWei - protocolFee - gasRefund - MIN_SWAP_CHANGE_WEI;
       return max > 0n ? max : 0n;
     } catch {
       return null;
     }
   }, [withdrawSpendable, withdrawForm.protocolFee, withdrawForm.gasRefund]);
+
+  useEffect(() => {
+    if (withdrawAdvancedJson) return;
+    if (withdrawMaxPayoutWei == null || withdrawMaxPayoutWei <= 0n) return;
+    if (withdrawAmountUserEditedRef.current) return;
+    const nextAmt = ethers.formatUnits(withdrawMaxPayoutWei, 18);
+    setWithdrawForm((f) => (f.amount === nextAmt ? f : { ...f, amount: nextAmt }));
+  }, [withdrawMaxPayoutWei, withdrawAdvancedJson]);
+
   const [depositTokenChoice, setDepositTokenChoice] = useState(ethers.ZeroAddress);
   const [swapInputTokenChoice, setSwapInputTokenChoice] = useState(ethers.ZeroAddress);
   const [swapOutputTokenChoice, setSwapOutputTokenChoice] = useState("0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7");
@@ -317,7 +530,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [importTokenAddress, setImportTokenAddress] = useState("");
   const [orderForm, setOrderForm] = useState({
     side: "sell",
-    baseToken: "tBNB",
+    baseToken: "BNB",
     quoteToken: "BUSD",
     amount: "",
     price: "",
@@ -348,24 +561,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     localStorage.setItem("phantom_tokens", JSON.stringify(custom));
   }, [tokenList]);
 
-  function loadTestnetMockTokens() {
-    setTokenList((prev) => {
-      const byAddr = new Map(prev.map((t) => [String(t.address).toLowerCase(), t]));
-      for (const t of TESTNET_MOCK_TOKENS) {
-        byAddr.set(String(t.address).toLowerCase(), t);
-      }
-      return Array.from(byAddr.values());
-    });
-  }
-
-  async function copyToClipboard(text) {
-    try {
-      await navigator.clipboard.writeText(String(text || ""));
-    } catch {
-      /* ignore */
-    }
-  }
-
   useEffect(() => {
     setDepositTokenChoice(depositForm.token);
   }, [depositForm.token]);
@@ -383,8 +578,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   }, [withdrawForm.token]);
 
   useEffect(() => {
-    setDepositForm((prev) => ({ ...prev, assetID: getAssetIdForToken(prev.token) }));
-  }, [depositForm.token]);
+    if (!cfg?.assets?.length) return;
+    try {
+      const id = getAssetIdForToken(depositForm.token, cfg);
+      setDepositForm((prev) => (prev.assetID === id ? prev : { ...prev, assetID: id }));
+    } catch {
+      /* unknown token vs /config assets — submitDeposit will error with a clear message */
+    }
+  }, [depositForm.token, cfg]);
 
   useEffect(() => {
     if (!wallet?.address) return;
@@ -397,12 +598,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       return;
     }
     if (amountWei <= 0n) return;
-    const assetID = getAssetIdForToken(depositForm.token);
+    if (!cfg?.assets?.length) return;
+    const assetID = getAssetIdForToken(depositForm.token, cfg);
     const ownerPk = addressToOwnerPublicKey(wallet.address);
     const c = noteCommitment(assetID, amountWei.toString(), depositBlinding, ownerPk);
     const hex = commitmentToBytes32(c);
     setDepositForm((prev) => (prev.commitment === hex ? prev : { ...prev, commitment: hex }));
-  }, [wallet?.address, depositForm.token, depositForm.amount, depositBlinding]);
+  }, [wallet?.address, depositForm.token, depositForm.amount, depositBlinding, cfg]);
 
   useEffect(() => {
     let cancelled = false;
@@ -432,17 +634,24 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     let debounceTimer = null;
     let refreshTimer = null;
     async function run() {
-      if (swapProofBusy || swapSubmitBusy) {
+      if (swapProofBusy || swapFlowBusy) {
         setSwapQuoteLoading(false);
         return;
       }
       setSwapQuoteErr(null);
       const customJson = String(intentForm.swapDataJson || "").trim();
       let amt = String(intentForm.inputAmount || "").trim();
-      if (cfg?.mode === "live" && !customJson && spendable.length > 0) {
-        const i = Math.min(spendPick, spendable.length - 1);
+      if (cfg?.mode === "live" && !customJson && autoSpendEntry?.note) {
         try {
-          amt = ethers.formatUnits(spendable[i].note.amount, 18);
+          const noteWei = BigInt(autoSpendEntry.note.amount);
+          if (!amt || Number(amt) <= 0) {
+            amt = ethers.formatUnits(noteWei, 18);
+          } else {
+            const want = ethers.parseUnits(amt, 18);
+            if (want > noteWei) {
+              amt = ethers.formatUnits(noteWei, 18);
+            }
+          }
         } catch {
           /* keep */
         }
@@ -460,6 +669,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       const tokenOut = intentForm.outputToken && intentForm.outputToken.toLowerCase() !== ethers.ZeroAddress.toLowerCase()
         ? intentForm.outputToken
         : wbnbQ;
+      if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) {
+        setSwapLastQuote(null);
+        setSwapQuoteErr(null);
+        setSwapExpectedLabel("");
+        setSwapMinLabel("");
+        return;
+      }
       const chainSlug = Number(cfg.chainId) === 97 ? "bsc-testnet" : "bsc";
       const isBackgroundRefresh = !!swapLastQuote;
       if (!isBackgroundRefresh) setSwapQuoteLoading(true);
@@ -486,11 +702,59 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         } catch {
           refund = cfg?.mode === "live" ? FALLBACK_GAS_REFUND_WEI : "0";
         }
+        let protocolFeeStr = String(q.fees?.totalFee ?? "0");
+        if (cfg?.mode === "live" && autoSpendEntry?.note && cfg?.assets?.length) {
+          try {
+            const noteWei = autoSpendEntry.note.amount;
+            const aid = getAssetIdForToken(intentForm.inputToken, cfg);
+            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${noteWei}`);
+            protocolFeeStr = String(feeRes.totalProtocolFee ?? protocolFeeStr);
+          } catch {
+            /* quote fees often 0; proof path still resolves fee on-chain */
+          }
+        }
+        if (cfg?.mode === "live" && autoSpendEntry?.note) {
+          try {
+            const noteWei = BigInt(autoSpendEntry.note.amount);
+            const feeBn = BigInt(protocolFeeStr);
+            const gasBn = BigInt(refund);
+            const maxSwapWei = noteWei - feeBn - gasBn - MIN_SWAP_CHANGE_WEI;
+            if (maxSwapWei <= 0n) {
+              setSwapLastQuote(null);
+              setSwapQuoteErr(
+                "This note is too small after protocol fee and gas refund — the pool always keeps a leftover change note. Deposit more or lower Gas refund (Advanced)."
+              );
+              return;
+            }
+            let wantWei;
+            try {
+              wantWei = ethers.parseUnits(amt, 18);
+            } catch {
+              wantWei = 0n;
+            }
+            if (wantWei > maxSwapWei) {
+              setSwapClampHint(
+                "Swap amount was limited so part of the note stays as change (required by the pool)."
+              );
+              setIntentForm((p) => ({
+                ...p,
+                inputAmount: ethers.formatUnits(maxSwapWei, 18),
+                minOutputAmount: "",
+                protocolFee: protocolFeeStr,
+                gasRefund: refund,
+              }));
+              return;
+            }
+          } catch {
+            /* ignore clamp if BigInt/parse fails */
+          }
+        }
+        setSwapClampHint("");
         setSwapLastQuote(q);
         setIntentForm((p) => ({
           ...p,
           minOutputAmount: String(q.minAmountOut || "0"),
-          protocolFee: String(q.fees?.totalFee ?? "0"),
+          protocolFee: protocolFeeStr,
           gasRefund: refund,
         }));
         setSwapExpectedLabel(`${ethers.formatUnits(q.amountOut || "0", 18)}`);
@@ -515,11 +779,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       clearTimeout(debounceTimer);
       clearInterval(refreshTimer);
     };
-  }, [base, cfg?.chainId, cfg?.mode, intentForm.inputToken, intentForm.outputToken, intentForm.inputAmount, intentForm.swapDataJson, swapSlippageBps, spendable, spendPick, swapProofBusy, swapSubmitBusy, swapLastQuote]);
+  }, [base, cfg?.chainId, cfg?.mode, cfg?.assets?.length, intentForm.inputToken, intentForm.outputToken, intentForm.inputAmount, intentForm.swapDataJson, swapSlippageBps, autoSpendEntry, swapProofBusy, swapFlowBusy, swapLastQuote]);
 
   async function connect() {
     setConnectError(null);
     setActionError(null);
+    setActionSuccess(null);
+    setVaultError(null);
     try {
       if (!window.ethereum) throw new Error("No injected wallet found (MetaMask).");
       const provider = new ethers.BrowserProvider(window.ethereum);
@@ -537,24 +803,125 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   function disconnect() {
     setConnectError(null);
     setActionError(null);
+    setActionSuccess(null);
+    setVaultError(null);
     setWallet({ address: null, provider: null, signer: null });
     setWalletChainId(null);
     setVault({ unlocked: false, key: null, data: { notes: [], updatedAt: null } });
+  }
+
+  async function flushPendingVaultNoteAfterLoad(loaded) {
+    try {
+      const raw = sessionStorage.getItem(PENDING_VAULT_NOTE_KEY);
+      if (!raw) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+        return null;
+      }
+      const sn = parsed.payload;
+      if (!sn || typeof sn !== "object" || !sn.commitmentHex) {
+        sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+        return null;
+      }
+      const hex = String(sn.commitmentHex).toLowerCase();
+      const dup = (loaded.data?.notes || []).some((entry) => {
+        const p = entry?.payload;
+        if (!p || typeof p !== "object") return false;
+        const ph = String(p.commitmentHex || "").toLowerCase();
+        if (hex && ph && ph === hex) return true;
+        return String(p.blindingFactor) === String(sn.blindingFactor) && String(p.amount) === String(sn.amount);
+      });
+      if (dup) {
+        sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+        return null;
+      }
+      const next = {
+        notes: [{ t: Date.now(), payload: sn }, ...(loaded.data?.notes || [])].slice(0, 200),
+        updatedAt: Date.now(),
+      };
+      await saveVault({ key: loaded.key, data: next });
+      sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+      return { key: loaded.key, data: next };
+    } catch (e) {
+      console.warn("[vault] flush pending note failed", e);
+      return null;
+    }
+  }
+
+  async function mergeRelayerBackedNotesIntoVault({ key, data, ownerAddress }) {
+    if (!key || !data || !ownerAddress || !base) return { key, data, imported: 0 };
+    let list = [];
+    try {
+      const res = await fetchJson(`${base}/notes?limit=200`, { ownerAddress });
+      list = Array.isArray(res?.notes) ? res.notes : [];
+    } catch {
+      return { key, data, imported: 0 };
+    }
+    let notes = Array.isArray(data?.notes) ? [...data.notes] : [];
+    const haveHex = new Set(
+      notes
+        .map((e) => String(e?.payload?.commitmentHex || "").toLowerCase())
+        .filter(Boolean)
+    );
+    let imported = 0;
+    for (const row of list) {
+      const payload = relayerCanonicalNoteToVaultPayload(row?.note);
+      if (!payload) continue;
+      const hx = String(payload.commitmentHex || "").toLowerCase();
+      if (!hx || haveHex.has(hx)) continue;
+      notes.unshift({ t: Date.now(), payload });
+      haveHex.add(hx);
+      imported += 1;
+    }
+    if (!imported) return { key, data, imported: 0 };
+    notes = notes.slice(0, 200);
+    const nextData = { ...data, notes, updatedAt: new Date().toISOString() };
+    await saveVault({ key, data: nextData });
+    return { key, data: nextData, imported };
   }
 
   async function unlockVault() {
     setVaultError(null);
     if (!wallet.signer) {
       setVaultError("Connect wallet first.");
-      return;
+      return null;
     }
     try {
-      const msg = `Unlock Phantom Note Vault\n\nDomain: ${window.location.host}\nTime: ${new Date().toISOString()}`;
+      // Must be stable for the same wallet + site + chain: key is SHA256(signature). A changing
+      // timestamp made every signature different, so decrypt always failed after the first save.
+      let chainLine = "";
+      try {
+        const hex = await wallet.provider.send("eth_chainId", []);
+        chainLine = `\nChain ID: ${Number.parseInt(hex, 16)}`;
+      } catch {
+        /* ignore */
+      }
+      const msg = `Unlock Phantom Note Vault\n\nDomain: ${window.location.host}${chainLine}`;
       const signature = await wallet.signer.signMessage(msg);
       const loaded = await loadVault({ signature });
-      setVault({ unlocked: true, key: loaded.key, data: loaded.data });
+      const flushed = await flushPendingVaultNoteAfterLoad(loaded);
+      const merged = flushed ?? { key: loaded.key, data: loaded.data };
+      const remote = await mergeRelayerBackedNotesIntoVault({
+        key: merged.key,
+        data: merged.data,
+        ownerAddress: wallet.address,
+      });
+      const finalMerged = remote.imported > 0 ? { key: remote.key, data: remote.data } : merged;
+      setVault({ unlocked: true, key: finalMerged.key, data: finalMerged.data });
+      if (flushed) {
+        setActionSuccess("Restored a pending deposit note into your vault.");
+      } else if (remote.imported > 0) {
+        setActionSuccess(
+          `Imported ${remote.imported} note(s) from the relayer backup (deposits / swap outputs). You can withdraw if the asset matches.`
+        );
+      }
+      return finalMerged;
     } catch (e) {
       setVaultError(e.message || String(e));
+      return null;
     }
   }
 
@@ -619,8 +986,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       if (code === 4902 && Number(cfg.chainId) === 97) {
         await wallet.provider.send("wallet_addEthereumChain", [{
           chainId: "0x61",
-          chainName: "BSC Testnet",
-          nativeCurrency: { name: "tBNB", symbol: "tBNB", decimals: 18 },
+          chainName: "BNB Chain",
+          nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
           rpcUrls: ["https://data-seed-prebsc-1-s1.binance.org:8545"],
           blockExplorerUrls: ["https://testnet.bscscan.com"],
         }]);
@@ -636,6 +1003,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
   async function submitDeposit() {
     setActionError(null);
+    setActionSuccess(null);
     setLastResult(null);
     try {
       if (!wallet.signer) throw new Error("Connect wallet first.");
@@ -646,8 +1014,20 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         throw new Error(`Wallet is on chain ${activeChain}, but backend expects ${cfg.chainId}.`);
       }
 
+      let depositTxHash = null;
       const amountWei = ethers.parseUnits(String(depositForm.amount || "0"), 18);
-      const assetID = Number(getAssetIdForToken(depositForm.token));
+      const assetID = Number(getAssetIdForToken(depositForm.token, cfg));
+      const ownerPk = addressToOwnerPublicKey(wallet.address);
+      const c = noteCommitment(assetID, amountWei.toString(), depositBlinding, ownerPk);
+      const suggestedVaultNote = {
+        version: 1,
+        assetID,
+        amount: amountWei.toString(),
+        blindingFactor: depositBlinding,
+        ownerPublicKey: ownerPk,
+        commitmentDecimal: c.toString(),
+        commitmentHex: depositForm.commitment,
+      };
       const deadline = Math.floor(Date.now() / 1000) + Number(depositForm.deadlineSec || 900);
       const domain = {
         name: "ShadowDeFiRelayer",
@@ -671,7 +1051,10 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           body: JSON.stringify({ ...message, signature }),
         });
         const feeWei = BigInt(shadow?.feeWei || "0");
-        const totalFunding = amountWei + feeWei + SHADOW_SWEEP_GAS_BUFFER_WEI;
+        const shadowSweepBufferWei = BigInt(
+          cfg?.module4RelayerDeposit?.shadowSweepGasBufferWei ?? String(SHADOW_SWEEP_GAS_BUFFER_WEI_DEFAULT)
+        );
+        const totalFunding = amountWei + feeWei + shadowSweepBufferWei;
         const fundTx = await wallet.signer.sendTransaction({
           to: shadow.shadowAddress,
           value: totalFunding,
@@ -720,14 +1103,17 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             console.warn("[shadow-flow] notes/from-deposit failed (local vault still has note)", noteErr);
           }
         }
+        depositTxHash = sweep?.txHash || null;
         setLastResult({
           via: "shadow-flow",
           shadowAddress: shadow.shadowAddress,
           fundingTxHash: fundTx.hash,
           fundingWei: totalFunding.toString(),
-          gasBufferWei: SHADOW_SWEEP_GAS_BUFFER_WEI.toString(),
+          gasBufferWei: shadowSweepBufferWei.toString(),
           feeWei: feeWei.toString(),
           serverNote,
+          suggestedVaultNote,
+          vaultSaved: false,
           ...sweep,
         });
       } else {
@@ -740,28 +1126,42 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           method: "POST",
           body: JSON.stringify({ envelope }),
         });
-        setLastResult({ via: "relayer-submit", ...out });
+        depositTxHash = out?.txHash || null;
+        setLastResult({ via: "relayer-submit", suggestedVaultNote, vaultSaved: false, ...out });
       }
 
-      if (vault.unlocked && vault.key && wallet.address) {
-        const ownerPk = addressToOwnerPublicKey(wallet.address);
-        const c = noteCommitment(assetID, amountWei.toString(), depositBlinding, ownerPk);
-        const notePayload = {
-          version: 1,
-          assetID,
-          amount: amountWei.toString(),
-          blindingFactor: depositBlinding,
-          ownerPublicKey: ownerPk,
-          commitmentDecimal: c.toString(),
-          commitmentHex: depositForm.commitment,
-        };
-        const next = {
-          notes: [{ t: Date.now(), payload: notePayload }, ...(vault.data?.notes || [])].slice(0, 200),
-          updatedAt: Date.now(),
-        };
-        await saveVault({ key: vault.key, data: next });
-        setVault((v) => ({ ...v, data: next }));
+      const v = vaultRef.current;
+      let savedOk = false;
+      if (v.unlocked && v.key && wallet.address) {
+        try {
+          const notePayload = suggestedVaultNote;
+          const next = {
+            notes: [{ t: Date.now(), payload: notePayload }, ...(v.data?.notes || [])].slice(0, 200),
+            updatedAt: Date.now(),
+          };
+          await saveVault({ key: v.key, data: next });
+          setVault((prev) => ({ ...prev, unlocked: true, key: v.key, data: next }));
+          savedOk = true;
+          try {
+            sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+          } catch {
+            /* ignore */
+          }
+        } catch (saveErr) {
+          console.warn("[deposit] vault save failed", saveErr);
+        }
       }
+      if (!savedOk) {
+        try {
+          sessionStorage.setItem(
+            PENDING_VAULT_NOTE_KEY,
+            JSON.stringify({ payload: suggestedVaultNote, txHash: depositTxHash, ts: Date.now() })
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      setLastResult((prev) => (prev && prev.suggestedVaultNote ? { ...prev, vaultSaved: savedOk } : prev));
       setDepositBlinding(randomFieldElementString());
     } catch (e) {
       setActionError(stringifyErr(e?.message ?? e));
@@ -770,8 +1170,10 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
   async function submitSwap() {
     setActionError(null);
+    setActionSuccess(null);
     setLastResult(null);
-    setSwapSubmitBusy(true);
+    setSwapFlowBusy(true);
+    setSwapFlowStage("Preparing swap...");
     try {
       if (!wallet.signer) throw new Error("Connect wallet first.");
       if (!cfg?.chainId || !cfg?.addresses?.shieldedPool) throw new Error("Backend config not loaded.");
@@ -784,6 +1186,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
       const deadline = Math.floor(Date.now() / 1000) + Number(intentForm.deadlineSec || 900);
       const noteNonce = Number(intentForm.nonce || Date.now());
+
       let minOutBI = 0n;
       try {
         minOutBI = BigInt(String(intentForm.minOutputAmount || "0"));
@@ -807,12 +1210,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       }
 
       let swapData;
+      /** Set only in the auto-generated swap path (vault spend note). Advanced JSON has no `note` binding. */
+      let swapInputVaultNote = null;
       const customRaw = String(intentForm.swapDataJson || "").trim();
       if (customRaw) {
         try {
           const custom = JSON.parse(customRaw);
           if (custom && typeof custom === "object") {
-            swapData = mergeSwapData(buildDefaultSwapData(intentForm, cfg.chainId), custom);
+            swapData = mergeSwapData(buildDefaultSwapData(intentForm, cfg.chainId, cfg), custom);
           } else {
             throw new Error("Invalid swap JSON");
           }
@@ -820,24 +1225,49 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           throw new Error(e.message === "Invalid swap JSON" ? e.message : "Invalid swap JSON in Advanced.");
         }
       } else {
-        const pick = Math.min(spendPick, Math.max(0, spendable.length - 1));
-        const entry = spendable[pick];
+        const entry = autoSpendEntry || spendable[0];
         if (!entry?.note) {
           throw new Error(
             "No spendable note for this input token. Unlock the vault, deposit (commitment is now circuit-derived), then swap—or paste full swap JSON under Advanced."
           );
         }
         const note = entry.note;
-        const outAmt = String(swapLastQuote?.amountOut || "0");
-        if (!outAmt || BigInt(outAmt) <= 0n) {
+        swapInputVaultNote = note;
+        let outAmtStr = String(swapLastQuote?.amountOut || "0");
+        if (!outAmtStr || BigInt(outAmtStr) <= 0n) {
           throw new Error("Refresh the quote so expected output amount is available before proving.");
         }
         const feeBn = BigInt(String(intentForm.protocolFee || "0"));
         const gasBn = BigInt(String(intentForm.gasRefund || "0"));
         const inputAmountBn = BigInt(note.amount);
-        const swapAmountBn = inputAmountBn - feeBn - gasBn;
+        let swapAmountBn;
+        try {
+          swapAmountBn = ethers.parseUnits(String(intentForm.inputAmount || "0"), 18);
+        } catch {
+          throw new Error("Enter a valid swap amount.");
+        }
         if (swapAmountBn <= 0n) {
-          throw new Error("Note balance must be greater than protocol fee plus gas refund.");
+          throw new Error("Swap amount must be greater than zero.");
+        }
+        const maxSwapWei = inputAmountBn - feeBn - gasBn - MIN_SWAP_CHANGE_WEI;
+        if (maxSwapWei <= 0n) {
+          throw new Error(
+            "This note is too small after protocol fee and gas refund — the pool always keeps a leftover change note. Deposit more or lower Gas refund (Advanced)."
+          );
+        }
+        if (swapAmountBn > maxSwapWei) {
+          const oldSwap = swapAmountBn;
+          swapAmountBn = maxSwapWei;
+          const outBn = BigInt(outAmtStr);
+          outAmtStr = ((outBn * maxSwapWei) / oldSwap).toString();
+          minOutBI = (minOutBI * maxSwapWei) / oldSwap;
+          if (minOutBI === 0n || BigInt(outAmtStr) === 0n) {
+            throw new Error("Scaled quote rounded to zero — refresh the quote after lowering swap amount or gas refund.");
+          }
+        }
+        const changeWei = inputAmountBn - swapAmountBn - feeBn - gasBn;
+        if (changeWei <= 0n) {
+          throw new Error("Could not leave a positive change note — refresh the quote and try again.");
         }
         const merkle = await fetchJson(`${base}/merkle/${encodeURIComponent(note.commitmentHex)}`);
         const wbnb = canonicalWbnb(cfg.chainId);
@@ -859,8 +1289,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             commitment: note.commitmentDecimal,
           },
           outputNoteSwap: {
-            assetID: getAssetIdForToken(intentForm.outputToken),
-            amount: outAmt,
+            assetID: getAssetIdForToken(intentForm.outputToken, cfg),
+            amount: outAmtStr,
             blindingFactor: randomFieldElementString(),
             commitment: "0",
           },
@@ -874,22 +1304,26 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           merklePath: merkle.merklePath,
           merklePathIndices: merkle.merklePathIndices,
           swapAmount: swapAmountBn.toString(),
-          minOutputAmount: String(intentForm.minOutputAmount || "0"),
+          minOutputAmount: minOutBI.toString(),
           protocolFee: String(intentForm.protocolFee || "0"),
           gasRefund: String(intentForm.gasRefund || "0"),
         };
+        setSwapFlowStage("Requesting proof from relayer...");
         setSwapProofBusy(true);
         let gen;
         try {
-          if (clientProverReady) {
-            gen = await generateSwapProofClient(proofBody, {
-              wasmUrl: CLIENT_PROVER_WASM_URL,
-              zkeyUrl: CLIENT_PROVER_ZKEY_URL,
-            });
-          } else {
+          try {
             gen = await fetchJson(`${base}/swap/generate-proof`, {
               method: "POST",
               body: JSON.stringify(proofBody),
+            });
+          } catch (relayerErr) {
+            if (!clientProverReady) throw relayerErr;
+            console.warn("[swap] relayer proof failed, falling back to client prover:", relayerErr);
+            setSwapFlowStage("Relayer busy. Generating proof locally...");
+            gen = await generateSwapProofClient(proofBody, {
+              wasmUrl: CLIENT_PROVER_WASM_URL,
+              zkeyUrl: CLIENT_PROVER_ZKEY_URL,
             });
           }
         } finally {
@@ -905,15 +1339,15 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             tokenIn,
             tokenOut,
             amountIn: swapAmountBn.toString(),
-            minAmountOut: String(intentForm.minOutputAmount || "0"),
+            minAmountOut: minOutBI.toString(),
             fee: Number(swapLastQuote?.routeParams?.feeTier || 2500),
             sqrtPriceLimitX96: String(swapLastQuote?.routeParams?.sqrtPriceLimitX96 || 0),
             path: swapLastQuote?.routeParams?.path || "0x",
           },
           noteHints: {
             swap: {
-              assetId: getAssetIdForToken(intentForm.outputToken),
-              amount: outAmt,
+              assetId: getAssetIdForToken(intentForm.outputToken, cfg),
+              amount: outAmtStr,
               blindingFactor: proofBody.outputNoteSwap.blindingFactor,
               ownerPublicKey: note.ownerPublicKey,
             },
@@ -934,15 +1368,50 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         );
       }
       const nullifierHex = nullifierToBytes32Hex(swapData.publicInputs.nullifier);
+
       const minOutForAuth = String(
         swapData.publicInputs.minOutputAmountSwap ??
           swapData.swapParams?.minAmountOut ??
           intentForm.minOutputAmount ??
           "0"
       );
+      const intentReq = {
+        userAddress: wallet.address,
+        inputAssetID: Number(swapData.publicInputs.inputAssetID),
+        outputAssetID: Number(swapData.publicInputs.outputAssetIDSwap),
+        amountIn: String(swapData.publicInputs.swapAmount ?? "0"),
+        minAmountOut: String(swapData.publicInputs.minOutputAmountSwap ?? intentForm.minOutputAmount ?? "0"),
+        nonce: String(noteNonce),
+        nullifier: nullifierHex,
+        deadline,
+      };
+      setSwapFlowStage("Submitting signed intent...");
+
+      const intentRes = await fetchJson(`${base}/intent`, {
+        method: "POST",
+        body: JSON.stringify(intentReq),
+      });
+
+      const { intentId, intent, domain, types } = intentRes;
+      const typed = types || INTENT_TYPES;
+      const signPayload = {
+        user: intent.userAddress,
+        inputAssetID: intent.inputAssetID,
+        outputAssetID: intent.outputAssetID,
+        amountIn: intent.amountIn,
+        minAmountOut: intent.minAmountOut,
+        deadline: intent.deadline,
+        nonce: intent.nonce,
+        nullifier: intent.nullifier,
+      };
+      const intentSig = await wallet.signer.signTypedData(domain, typed, signPayload);
+
       const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
       const envelope = await encryptForRelayer(
         {
+          intentId,
+          intent,
+          intentSig,
           swapData,
           zkAuthorization: {
             nullifier: nullifierHex,
@@ -953,20 +1422,96 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         },
         keyInfo?.publicKeyPem
       );
+      setSwapFlowStage("Broadcasting swap transaction...");
       const out = await fetchJson(`${base}/swap/encrypted`, {
         method: "POST",
         body: JSON.stringify({ envelope }),
       });
+      /** Persist new output notes locally so Withdraw/Swap can spend them (on-chain commitments already exist). */
+      setSwapFlowStage("Finalizing vault notes...");
+      try {
+        const hints = swapData?.noteHints;
+        const pi = swapData?.publicInputs;
+        const { swap: swapC, change: changeC } = resolveSwapOutputCommitments(out, pi);
+        if (hints?.swap && hints?.change && pi && isNonZeroCommitmentStr(swapC) && isNonZeroCommitmentStr(changeC)) {
+          const swapNotePayload = buildVaultNoteFromSwapHint({
+            assetId: Number(hints.swap.assetId),
+            amountStr: String(pi.outputAmountSwap ?? hints.swap.amount),
+            blindingFactor: hints.swap.blindingFactor,
+            ownerPublicKey: hints.swap.ownerPublicKey,
+            commitmentStr: String(swapC),
+          });
+          const changeNotePayload = buildVaultNoteFromSwapHint({
+            assetId: Number(hints.change.assetId),
+            amountStr: String(pi.changeAmount ?? hints.change.amount),
+            blindingFactor: hints.change.blindingFactor,
+            ownerPublicKey: hints.change.ownerPublicKey,
+            commitmentStr: String(changeC),
+          });
+
+          let merged = { key: vaultRef.current.key, data: vaultRef.current.data };
+          if (!vaultRef.current.unlocked || !vaultRef.current.key) {
+            const u = await unlockVault();
+            if (!u?.key) {
+              setActionSuccess(
+                "Swap succeeded on-chain, but the note vault is locked — unlock Advanced → Note vault, then refresh and use “Add deposit note…” flow if needed. Swap outputs: BUSD + change."
+              );
+              setLastResult(out);
+              return;
+            }
+            merged = u;
+          } else {
+            const flushed = await flushPendingVaultNoteAfterLoad({ key: vaultRef.current.key, data: vaultRef.current.data });
+            if (flushed) merged = flushed;
+          }
+
+          const spentHex = String(
+            swapInputVaultNote?.commitmentHex ||
+              publicInputCommitmentToVaultHex(pi?.inputCommitment) ||
+              ""
+          ).toLowerCase();
+          let notes = Array.isArray(merged.data?.notes) ? [...merged.data.notes] : [];
+          if (spentHex) {
+            notes = notes.filter((entry) => {
+              const p = entry?.payload;
+              const ph = String(p?.commitmentHex || "").toLowerCase();
+              return !ph || ph !== spentHex;
+            });
+          }
+          const pushUnique = (payload) => {
+            const hx = String(payload.commitmentHex || "").toLowerCase();
+            if (!hx) return;
+            if (notes.some((e) => String(e?.payload?.commitmentHex || "").toLowerCase() === hx)) return;
+            notes.unshift({ t: Date.now(), payload });
+          };
+          pushUnique(swapNotePayload);
+          pushUnique(changeNotePayload);
+          const nextData = { ...merged.data, notes: notes.slice(0, 200), updatedAt: new Date().toISOString() };
+          await saveVault({ key: merged.key, data: nextData });
+          setVault({ unlocked: true, key: merged.key, data: nextData });
+          setActionSuccess("Saved swap output notes to your vault (output token + change). You can withdraw now.");
+        }
+      } catch (vaultSwapErr) {
+        console.warn("[swap] vault note save failed", vaultSwapErr);
+        setActionSuccess(null);
+        setActionError(
+          `Swap succeeded on-chain, but saving output notes to the local vault failed: ${stringifyErr(
+            vaultSwapErr?.message ?? vaultSwapErr
+          )}. Unlock the vault and retry, or import notes manually from the JSON.`
+        );
+      }
       setLastResult(out);
     } catch (e) {
       setActionError(stringifyErr(e?.message ?? e));
     } finally {
-      setSwapSubmitBusy(false);
+      setSwapFlowBusy(false);
+      setSwapFlowStage("");
     }
   }
 
   async function submitWithdraw() {
     setActionError(null);
+    setActionSuccess(null);
     setLastResult(null);
     try {
       if (!wallet.signer) throw new Error("Connect wallet first.");
@@ -992,7 +1537,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           throw new Error("Withdraw JSON must include proof, publicInputs, and recipient or finalRecipient.");
         }
       } else {
-        const spend = spendableNoteEntries(vault.data, withdrawForm.token);
+        const spend = spendableNoteEntries(vault.data, withdrawForm.token, cfg);
         if (!spend.length) {
           throw new Error("No spendable note for this token. Unlock the vault, deposit first, or paste full withdraw JSON under Advanced.");
         }
@@ -1074,6 +1619,62 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     }
   }
 
+  async function importSuggestedVaultNoteFromLastDeposit() {
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const sn = lastResult?.suggestedVaultNote;
+      if (!sn) throw new Error("No suggestedVaultNote on last result — deposit again after pulling latest UI.");
+      if (!wallet.signer) throw new Error("Connect wallet first.");
+
+      let merged = { key: vault.key, data: vault.data };
+      if (!vault.unlocked || !vault.key) {
+        const u = await unlockVault();
+        if (!u?.key) {
+          setActionError(
+            "Could not unlock the note vault. Approve the signature in MetaMask, or read the yellow note-vault message above. If your browser had an old broken vault, unlock once after this update — storage resets automatically."
+          );
+          return;
+        }
+        merged = u;
+      } else {
+        const flushed = await flushPendingVaultNoteAfterLoad({ key: vault.key, data: vault.data });
+        if (flushed) {
+          merged = flushed;
+          setVault({ unlocked: true, key: merged.key, data: merged.data });
+          setActionSuccess("Restored a pending deposit note into your vault.");
+        }
+      }
+
+      const hex = String(sn.commitmentHex || "").toLowerCase();
+      const dup = (merged.data?.notes || []).some((entry) => {
+        const p = entry?.payload;
+        if (!p || typeof p !== "object") return false;
+        const ph = String(p.commitmentHex || "").toLowerCase();
+        if (hex && ph && ph === hex) return true;
+        return String(p.blindingFactor) === String(sn.blindingFactor) && String(p.amount) === String(sn.amount);
+      });
+      if (dup) {
+        setActionSuccess("This note is already in your vault.");
+        return;
+      }
+      const next = {
+        notes: [{ t: Date.now(), payload: sn }, ...(merged.data?.notes || [])].slice(0, 200),
+        updatedAt: Date.now(),
+      };
+      await saveVault({ key: merged.key, data: next });
+      setVault((v) => ({ ...v, unlocked: true, key: merged.key, data: next }));
+      try {
+        sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
+      } catch {
+        /* ignore */
+      }
+      setActionSuccess("Saved deposit note to your vault. You can use Swap / Withdraw.");
+    } catch (e) {
+      setActionError(stringifyErr(e?.message ?? e));
+    }
+  }
+
   function importToken() {
     const symbol = importTokenSymbol.trim().toUpperCase();
     const address = importTokenAddress.trim();
@@ -1092,6 +1693,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setImportTokenSymbol("");
     setImportTokenAddress("");
     setActionError(null);
+    setActionSuccess(null);
   }
 
   function placeInternalOrder() {
@@ -1102,6 +1704,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       return;
     }
     setActionError(null);
+    setActionSuccess(null);
     const next = {
       id: Date.now(),
       side: orderForm.side,
@@ -1113,17 +1716,134 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     };
     setLocalOrders((prev) => [next, ...prev].slice(0, 12));
     setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
+    setActionSuccess("Internal match intent created. Other users can now join this order.");
+  }
+
+  function joinInternalOrder() {
+    if (!localOrders.length) {
+      setActionError("No active internal match intents found yet. Create one first.");
+      return;
+    }
+    const firstOpen = localOrders.find((order) => order.status === "OPEN");
+    if (!firstOpen) {
+      setActionError("No OPEN intents are available right now.");
+      return;
+    }
+    setLocalOrders((prev) =>
+      prev.map((order) => (order.id === firstOpen.id ? { ...order, status: "MATCHED" } : order))
+    );
+    setActionError(null);
+    setActionSuccess(`Matched internal order ${firstOpen.pair} at ${firstOpen.price}.`);
+  }
+
+  function cancelInternalOrder(orderId) {
+    setLocalOrders((prev) =>
+      prev.map((order) => (order.id === orderId ? { ...order, status: "CANCELLED" } : order))
+    );
+    setActionError(null);
+    setActionSuccess("Internal match intent cancelled.");
   }
 
   const showSwapPanel = tab === "swap" || (tab === "all" && uiVariant !== "trade");
-  const depthLevels = useMemo(() => ([
-    { price: "312.4000", size: "5.2000", side: "sell" },
-    { price: "311.9500", size: "3.7000", side: "sell" },
-    { price: "311.6000", size: "2.1000", side: "sell" },
-    { price: "311.1000", size: "4.9000", side: "buy" },
-    { price: "310.8500", size: "6.3000", side: "buy" },
-    { price: "310.4000", size: "1.9000", side: "buy" },
-  ]), []);
+  const hasOpenInternalOrder = useMemo(
+    () => localOrders.some((order) => order.status === "OPEN"),
+    [localOrders]
+  );
+  const tradeNeedsUnlock = uiVariant === "trade" && !vault.unlocked;
+  const openInternalOrders = useMemo(
+    () => localOrders.filter((order) => order.status === "OPEN"),
+    [localOrders]
+  );
+  const noteBalanceRows = useMemo(() => {
+    const notes = Array.isArray(vault.data?.notes) ? vault.data.notes : [];
+    const cfgAssets = Array.isArray(cfg?.assets) ? cfg.assets : [];
+    const assetToAddress = new Map();
+    assetToAddress.set(0, ethers.ZeroAddress);
+    cfgAssets.forEach((asset) => {
+      const id = Number(asset?.assetId);
+      const addr = String(asset?.address || "").trim();
+      if (Number.isFinite(id) && addr) assetToAddress.set(id, addr);
+    });
+
+    const sums = new Map();
+    notes.forEach((entry) => {
+      const raw = entry?.payload ?? entry;
+      if (Number(raw?.version) !== 1) return;
+      const aid = Number(raw?.assetID);
+      if (!Number.isFinite(aid)) return;
+      let amount = 0n;
+      try {
+        amount = BigInt(String(raw?.amount || "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (amount <= 0n) return;
+      const addr = assetToAddress.get(aid);
+      const key = addr ? String(addr).toLowerCase() : `asset:${aid}`;
+      sums.set(key, (sums.get(key) || 0n) + amount);
+    });
+
+    return Array.from(sums.entries())
+      .map(([key, totalWei]) => {
+        const isSynthetic = key.startsWith("asset:");
+        const tokenAddress = isSynthetic ? null : key;
+        const tokenHit = tokenAddress
+          ? tokenList.find((t) => String(t.address || "").toLowerCase() === tokenAddress)
+          : null;
+        const symbol = tokenHit?.symbol
+          || (tokenAddress === ethers.ZeroAddress.toLowerCase() ? "BNB" : isSynthetic ? key.toUpperCase() : "TOKEN");
+        return {
+          key,
+          tokenAddress,
+          symbol,
+          amountWei: totalWei,
+          amountLabel: formatTokenAmount(ethers.formatUnits(totalWei, 18)),
+        };
+      })
+      .sort((a, b) => (a.symbol > b.symbol ? 1 : -1));
+  }, [vault.data, cfg?.assets, tokenList]);
+  const [noteBalanceToken, setNoteBalanceToken] = useState("__all_notes__");
+  const selectedBalanceRow = useMemo(
+    () => noteBalanceRows.find((row) => row.key === noteBalanceToken) || null,
+    [noteBalanceRows, noteBalanceToken]
+  );
+  const noteBalanceTotalLabel = useMemo(() => {
+    const totalWei = noteBalanceRows.reduce((acc, row) => acc + BigInt(String(row.amountWei || "0")), 0n);
+    return formatTokenAmount(ethers.formatUnits(totalWei, 18));
+  }, [noteBalanceRows]);
+  const [walletBalanceLabel, setWalletBalanceLabel] = useState("—");
+  const [walletBalanceBusy, setWalletBalanceBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (uiVariant !== "trade") return;
+      if (!wallet?.provider || !wallet?.address) {
+        setWalletBalanceLabel("—");
+        return;
+      }
+      setWalletBalanceBusy(true);
+      try {
+        const raw = await wallet.provider.getBalance(wallet.address);
+        const label = formatTokenAmount(ethers.formatUnits(raw, 18));
+        if (!cancelled) setWalletBalanceLabel(label);
+      } catch {
+        if (!cancelled) setWalletBalanceLabel("—");
+      } finally {
+        if (!cancelled) setWalletBalanceBusy(false);
+      }
+    }
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [uiVariant, wallet?.provider, wallet?.address]);
+  useEffect(() => {
+    if (!swapFlowBusy) return undefined;
+    const t = setInterval(() => {
+      setSwapSpinnerTick((n) => (n + 1) % 4);
+    }, 140);
+    return () => clearInterval(t);
+  }, [swapFlowBusy]);
 
   return (
     <div
@@ -1131,27 +1851,31 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         maxWidth: uiVariant === "trade" ? "100%" : 760,
         margin: "0 auto",
         borderRadius: uiVariant === "trade" ? 24 : 18,
-        border: uiVariant === "trade" ? `1px solid ${PC.border}` : "1px solid rgba(255,255,255,0.14)",
-        background: uiVariant === "trade" ? PC.bg : "#11141b",
-        padding: uiVariant === "trade" ? 16 : 20,
+        border: uiVariant === "trade" ? "1px solid rgba(148, 163, 184, 0.12)" : "1px solid rgba(255,255,255,0.14)",
+        background: uiVariant === "trade"
+          ? "linear-gradient(180deg, rgba(8, 12, 20, 0.98) 0%, rgba(5, 8, 14, 0.99) 100%)"
+          : "#11141b",
+        padding: uiVariant === "trade" ? 18 : 20,
+        boxShadow: uiVariant === "trade" ? "0 14px 34px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255,255,255,0.03)" : "none",
+        backdropFilter: uiVariant === "trade" ? "blur(8px)" : "none",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 200px", minWidth: 0 }}>
-          <div style={{ fontSize: uiVariant === "trade" ? 26 : 28, fontWeight: 700, color: uiVariant === "trade" ? PC.teal : "#fff", lineHeight: 1.15, fontFamily: "var(--font-display, Georgia, serif)" }}>
-            {uiVariant === "trade" ? "InternalMatching" : "Phantom Swap"}
+          <div style={{ fontSize: uiVariant === "trade" ? 26 : 28, fontWeight: 700, color: uiVariant === "trade" ? "#d9fff8" : "#fff", lineHeight: 1.15, fontFamily: "var(--font-display, Georgia, serif)", letterSpacing: "-0.01em" }}>
+            {uiVariant === "trade" ? "Trade Console" : "Phantom Console"}
           </div>
           <div style={{ fontSize: 13, color: uiVariant === "trade" ? PC.muted : "rgba(255,255,255,0.65)", marginTop: 6, lineHeight: 1.45, maxWidth: 420 }}>
             {uiVariant === "trade"
-              ? "Place private limit orders, choose your sell price, and match against incoming counter-orders."
-              : "Deposit, swap, and withdraw through the relayer. Advanced users can edit proofs and API URL."}
+              ? "Step 1 unlock notes, then choose deposit, swap, withdraw, or internal matching."
+              : "Deposit, swap, and withdraw through the relayer. Advanced users can edit proofs and API settings."}
           </div>
-          <div style={{ fontSize: 12, marginTop: 6, color: clientProverReady ? "#18b980" : "rgba(255,255,255,0.58)" }}>
+          <div style={{ fontSize: 12, marginTop: 6, color: clientProverReady ? "rgba(226,232,240,0.92)" : "rgba(255,255,255,0.58)" }}>
             {clientProverReady ? "Client proving enabled." : "Client proving unavailable (using relayer proving fallback)."}
           </div>
           {uiVariant === "trade" && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-              {["Order placement", "Private matching", "Relayer settlement"].map((label) => (
+              {["1. Unlock", "2. Choose action", "3. Review and submit"].map((label) => (
                 <span
                   key={label}
                   style={{
@@ -1159,11 +1883,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                     fontWeight: 600,
                     letterSpacing: "0.08em",
                     textTransform: "uppercase",
-                    color: PC.teal,
-                    border: `1px solid rgba(0, 229, 199, 0.35)`,
+                    color: "rgba(203,213,225,0.95)",
+                    border: `1px solid rgba(148,163,184,0.28)`,
                     borderRadius: 999,
                     padding: "4px 10px",
-                    background: "rgba(0, 229, 199, 0.06)",
+                    background: "rgba(148,163,184,0.08)",
                   }}
                 >
                   {label}
@@ -1179,14 +1903,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               onClick={connect}
               style={{
                 borderRadius: 12,
-                background: "linear-gradient(135deg, #00e5c7 0%, #00b89c 100%)",
-                color: "#0a0a0a",
+                background: "rgba(30,41,59,0.9)",
+                color: "#e5e7eb",
                 padding: "10px 16px",
                 fontSize: 13,
                 fontWeight: 700,
                 border: "none",
                 cursor: "pointer",
-                boxShadow: "0 4px 20px rgba(0, 229, 199, 0.25)",
+                boxShadow: "0 4px 18px rgba(0, 0, 0, 0.25)",
               }}
             >
               Connect wallet
@@ -1215,43 +1939,19 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         </div>
       </div>
 
-      {uiVariant !== "trade" && Number(cfg?.chainId) === 97 && (
-        <div style={{ marginTop: 12, borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(0,0,0,0.26)", padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 240 }}>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", fontWeight: 700 }}>Testnet quick setup</div>
-            <div style={{ marginTop: 4, fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
-              Loads the mock tokens that have Pancake liquidity so quotes work immediately.
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              onClick={loadTestnetMockTokens}
-              style={{ borderRadius: 10, background: "#6d4aff", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 800, border: "none", cursor: "pointer" }}
-              type="button"
-            >
-              Load mock tokens
-            </button>
-            <button
-              onClick={() => copyToClipboard("0x5A8309a15DB141777Fc39e7AB1E16D09939D8B27")}
-              style={{ borderRadius: 10, background: "rgba(255,255,255,0.08)", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, border: "1px solid rgba(255,255,255,0.14)", cursor: "pointer" }}
-              type="button"
-            >
-              Copy tBUSD
-            </button>
-            <button
-              onClick={() => copyToClipboard("0xC6FC0c39C9e998182c90D0F4be41c4561Dd21967")}
-              style={{ borderRadius: 10, background: "rgba(255,255,255,0.08)", color: "#fff", padding: "8px 12px", fontSize: 12, fontWeight: 700, border: "1px solid rgba(255,255,255,0.14)", cursor: "pointer" }}
-              type="button"
-            >
-              Copy tCAKE
-            </button>
-          </div>
-        </div>
-      )}
-
       {cfgErr && <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid rgba(248,113,113,0.5)", background: "rgba(185,28,28,0.18)", padding: 10, fontSize: 13, color: "#fecaca" }}>{stringifyErr(cfgErr)}</div>}
       {connectError && <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid rgba(248,113,113,0.5)", background: "rgba(185,28,28,0.18)", padding: 10, fontSize: 13, color: "#fecaca" }}>{stringifyErr(connectError)}</div>}
       {actionError && <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid rgba(248,113,113,0.5)", background: "rgba(185,28,28,0.18)", padding: 10, fontSize: 13, color: "#fecaca" }}>{stringifyErr(actionError)}</div>}
+      {actionSuccess && (
+        <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid rgba(52, 211, 153, 0.45)", background: "rgba(6, 78, 59, 0.35)", padding: 10, fontSize: 13, color: "#a7f3d0" }}>
+          {actionSuccess}
+        </div>
+      )}
+      {vaultError && (
+        <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid rgba(251, 191, 36, 0.45)", background: "rgba(120, 53, 15, 0.35)", padding: 10, fontSize: 13, color: "#fde68a" }}>
+          {stringifyErr(vaultError)}
+        </div>
+      )}
 
       <div
         style={{
@@ -1260,8 +1960,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           flexWrap: "wrap",
           gap: 10,
           borderRadius: uiVariant === "trade" ? 16 : 12,
-          border: `1px solid ${uiVariant === "trade" ? PC.border : "rgba(255,255,255,0.12)"}`,
-          background: uiVariant === "trade" ? PC.card : "rgba(0,0,0,0.26)",
+          border: `1px solid ${uiVariant === "trade" ? "rgba(148,163,184,0.14)" : "rgba(255,255,255,0.12)"}`,
+          background: uiVariant === "trade" ? "rgba(8, 12, 20, 0.82)" : "rgba(0,0,0,0.26)",
           padding: uiVariant === "trade" ? "12px 14px" : 12,
           fontSize: 12,
           alignItems: "center",
@@ -1285,7 +1985,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               padding: "6px 12px",
               borderRadius: 999,
               background: "rgba(0,0,0,0.35)",
-              border: `1px solid ${row.ok ? "rgba(0, 229, 199, 0.25)" : "rgba(248, 113, 113, 0.35)"}`,
+              border: "1px solid rgba(148,163,184,0.22)",
             }}
           >
             <span style={{ color: PC.muted, fontWeight: 600, textTransform: "uppercase", fontSize: 10, letterSpacing: "0.06em" }}>{row.k}</span>
@@ -1295,111 +1995,138 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       </div>
 
       {uiVariant === "trade" && (
-        <div style={{ marginTop: 14, borderRadius: 20, border: `1px solid ${PC.border}`, background: PC.card, padding: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 12 }}>
-            <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
-              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Order placement</div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                {["sell", "buy"].map((side) => (
-                  <button
-                    key={side}
-                    type="button"
-                    onClick={() => setOrderForm((prev) => ({ ...prev, side }))}
-                    style={{
-                      borderRadius: 10,
-                      padding: "8px 12px",
-                      border: `1px solid ${PC.border}`,
-                      background: orderForm.side === side ? (side === "sell" ? "rgba(239,68,68,0.18)" : "rgba(34,197,94,0.18)") : "transparent",
-                      color: "#fff",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      textTransform: "uppercase",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {side}
-                  </button>
-                ))}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <input value={orderForm.baseToken} onChange={(e) => setOrderForm((prev) => ({ ...prev, baseToken: e.target.value.toUpperCase() }))} placeholder="Base token" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
-                <input value={orderForm.quoteToken} onChange={(e) => setOrderForm((prev) => ({ ...prev, quoteToken: e.target.value.toUpperCase() }))} placeholder="Quote token" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
-                <input value={orderForm.amount} onChange={(e) => setOrderForm((prev) => ({ ...prev, amount: e.target.value }))} placeholder="Amount to sell" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
-                <input value={orderForm.price} onChange={(e) => setOrderForm((prev) => ({ ...prev, price: e.target.value }))} placeholder="Limit price" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
-              </div>
-              <button type="button" onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "none", background: `linear-gradient(90deg, ${PC.teal}, #7645d9)`, color: "#191326", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: "pointer" }}>
-                Place order
+        <div style={{ marginTop: 14, borderRadius: 16, border: tradeNeedsUnlock ? "1px solid rgba(148, 163, 184, 0.24)" : "1px solid rgba(148, 163, 184, 0.14)", background: "rgba(9, 12, 20, 0.78)", padding: 14 }}>
+          <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Unlock notes</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, color: "#fff", lineHeight: 1.45 }}>
+              {!tradeNeedsUnlock
+                ? "Unlocked. You can now choose Deposit, Swap, Withdraw, or Internal Match."
+                : "Step 1: unlock notes before trading so Deposit, Swap, Withdraw, and Internal Match become active."}
+            </div>
+            {!wallet.signer ? (
+              <button
+                type="button"
+                onClick={connect}
+                style={{ borderRadius: 10, border: "1px solid rgba(148,163,184,0.25)", background: "rgba(30,41,59,0.9)", color: "#e5e7eb", padding: "9px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+              >
+                Connect wallet
               </button>
-            </div>
-            <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
-              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Orderbook (x, y, z levels)</div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 11, color: PC.muted }}>
-                  <span>Price</span><span>Size</span><span>Side</span>
-                </div>
-                {depthLevels.map((row, idx) => (
-                  <div key={`${row.price}-${idx}`} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 12, color: "#fff" }}>
-                    <span>{row.price}</span>
-                    <span>{row.size}</span>
-                    <span style={{ color: row.side === "sell" ? "#f87171" : "#4ade80", textTransform: "uppercase" }}>{row.side}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            ) : (
+              <button
+                type="button"
+                onClick={unlockVault}
+                style={{ borderRadius: 10, border: tradeNeedsUnlock ? "1px solid rgba(148,163,184,0.3)" : `1px solid ${PC.border}`, background: tradeNeedsUnlock ? "rgba(51,65,85,0.55)" : "rgba(30,41,59,0.52)", color: "#fff", padding: "9px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+              >
+                {!tradeNeedsUnlock ? "Unlocked" : "Unlock notes"}
+              </button>
+            )}
           </div>
-          <div style={{ marginTop: 12, borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
-            <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Placed orders</div>
-            <div style={{ display: "grid", gap: 6 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr 0.8fr", fontSize: 11, color: PC.muted }}>
-                <span>Pair</span><span>Amount</span><span>Price</span><span>Total</span><span>Status</span>
+        </div>
+      )}
+
+      {uiVariant === "trade" && (
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 14,
+            border: "1px solid rgba(148,163,184,0.18)",
+            background: "rgba(10,14,22,0.82)",
+            padding: 12,
+          }}
+        >
+          <div style={{ fontSize: 11, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+            Your balances
+          </div>
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+            <div style={{ borderRadius: 10, border: "1px solid rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.55)", padding: "8px 10px" }}>
+              <div style={{ fontSize: 11, color: PC.muted }}>Wallet balance</div>
+              <div style={{ marginTop: 3, color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "var(--font-mono, monospace)" }}>
+                {walletBalanceBusy ? "Loading..." : walletBalanceLabel} BNB
               </div>
-              {localOrders.length === 0 ? (
-                <div style={{ fontSize: 12, color: PC.muted }}>No orders placed yet.</div>
-              ) : localOrders.map((order) => (
-                <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr 0.8fr", fontSize: 12, color: "#fff" }}>
-                  <span>{order.pair}</span>
-                  <span>{order.amount}</span>
-                  <span>{order.price}</span>
-                  <span>{order.total}</span>
-                  <span style={{ color: PC.teal }}>{order.status}</span>
-                </div>
-              ))}
+            </div>
+            <div style={{ borderRadius: 10, border: "1px solid rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.55)", padding: "8px 10px" }}>
+              <div style={{ fontSize: 11, color: PC.muted, marginBottom: 6 }}>Note balance</div>
+              <select
+                value={noteBalanceToken}
+                onChange={(e) => setNoteBalanceToken(e.target.value)}
+                style={{ width: "100%", borderRadius: 8, border: "1px solid rgba(148,163,184,0.24)", background: "rgba(15,23,42,0.7)", color: "#fff", padding: "7px 10px", fontSize: 12 }}
+              >
+                <option value="__all_notes__">All notes total: {noteBalanceTotalLabel}</option>
+                {noteBalanceRows.map((row) => (
+                  <option key={row.key} value={row.key}>
+                    {row.symbol}: {row.amountLabel}
+                  </option>
+                ))}
+              </select>
+              <div style={{ marginTop: 3, color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "var(--font-mono, monospace)" }}>
+                {selectedBalanceRow ? `${selectedBalanceRow.amountLabel} ${selectedBalanceRow.symbol}` : `${noteBalanceTotalLabel} TOTAL`}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        {(uiVariant === "trade" ? ["swap", "withdraw"] : ["swap", "deposit", "withdraw", "all"]).map((k) => (
+      <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", padding: "8px", borderRadius: 14, border: "1px solid rgba(148,163,184,0.12)", background: "rgba(6, 10, 16, 0.72)" }}>
+        {uiVariant === "trade" && (
+          <button
+            type="button"
+            onClick={unlockVault}
+            disabled={!wallet.signer}
+            style={{
+              borderRadius: 10,
+              padding: "10px 16px",
+              fontSize: 13,
+              fontWeight: 800,
+              border: tradeNeedsUnlock ? "1px solid rgba(203,213,225,0.32)" : "1px solid rgba(148,163,184,0.14)",
+              background: tradeNeedsUnlock ? "rgba(71,85,105,0.7)" : "rgba(18, 24, 36, 0.62)",
+              color: "#fff",
+              cursor: wallet.signer ? "pointer" : "not-allowed"
+            }}
+          >
+            {tradeNeedsUnlock ? "Unlock Notes" : "Notes Unlocked"}
+          </button>
+        )}
+        {(uiVariant === "trade" ? ["deposit", "swap", "withdraw", "internal"] : ["swap", "deposit", "withdraw", "all"]).map((k) => (
           <button
             key={k}
             type="button"
-            onClick={() => { setTab(k); setActionError(null); setLastResult(null); }}
+            onClick={() => {
+              setTab(k);
+              setActionError(null);
+              setActionSuccess(null);
+              setVaultError(null);
+              setLastResult(null);
+            }}
+            disabled={uiVariant === "trade" && tradeNeedsUnlock}
             style={{
               borderRadius: 10,
               padding: "10px 14px",
               fontSize: 13,
               fontWeight: 700,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: tab === k ? "#6d4aff" : "rgba(255,255,255,0.08)",
-              color: "#fff",
-              cursor: "pointer"
+              border: tab === k ? "1px solid rgba(203,213,225,0.34)" : "1px solid rgba(148,163,184,0.14)",
+              background: tab === k ? "rgba(71,85,105,0.68)" : "rgba(255,255,255,0.03)",
+              color: uiVariant === "trade" && tradeNeedsUnlock ? "rgba(255,255,255,0.35)" : "#fff",
+              opacity: uiVariant === "trade" && tradeNeedsUnlock ? 0.55 : 1,
+              cursor: uiVariant === "trade" && tradeNeedsUnlock ? "not-allowed" : "pointer"
             }}
           >
-            {k === "deposit" ? "Deposit" : k === "swap" ? "Swap" : k === "withdraw" ? "Withdraw" : "All"}
+            {k === "deposit" ? "Deposit" : k === "swap" ? "Swap" : k === "withdraw" ? "Withdraw" : k === "internal" ? "Internal Match" : "All"}
           </button>
         ))}
         {uiVariant !== "trade" && (
           <Link to="/trade" style={{ fontSize: 13, fontWeight: 700, color: PC.teal, textDecoration: "none", marginLeft: 4 }}>
-            InternalMatching →
+            Internal Match →
           </Link>
         )}
       </div>
+      {uiVariant === "trade" && tradeNeedsUnlock && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "#fde68a" }}>
+          Unlock notes first to continue.
+        </div>
+      )}
 
-      {uiVariant !== "trade" && (tab === "deposit" || tab === "all") && (
-        <div style={{ marginTop: 14, borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(0,0,0,0.26)", padding: 14 }}>
+      {(tab === "deposit" || (tab === "all" && uiVariant !== "trade")) && (!tradeNeedsUnlock || uiVariant !== "trade") && (
+        <div style={{ marginTop: 14, borderRadius: 16, border: "1px solid rgba(148,163,184,0.12)", background: "rgba(8, 12, 20, 0.84)", padding: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Deposit</div>
           <div style={{ marginTop: 10, display: "grid", gap: 10, gridTemplateColumns: "repeat(2, minmax(0,1fr))" }}>
             <div>
@@ -1447,15 +2174,20 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             <input value={depositForm.commitment} readOnly style={{ width: "100%", borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)", background: "#151a23", color: "#fff", padding: "10px 12px", fontSize: 14 }} />
           </div>
           <div style={{ marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.45 }}>
-            Unlock the note vault before deposit to save this note automatically for swaps.
+            Unlock the note vault before deposit so the client can save your note for swap/withdraw. If the vault was locked, use “Add deposit note to vault” in the result panel after deposit.
           </div>
-          <button onClick={submitDeposit} disabled={!canTransact} style={{ marginTop: 12, borderRadius: 10, background: canTransact ? "#18b980" : "#3a4d45", color: "#fff", padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "none", cursor: canTransact ? "pointer" : "not-allowed" }}>
+          {!vault?.unlocked ? (
+            <div style={{ marginTop: 10, padding: 10, borderRadius: 10, border: "1px solid rgba(248,180,100,0.45)", background: "rgba(248,180,100,0.08)", fontSize: 12, color: "#fde68a" }}>
+              Vault is locked — swap and withdraw will not see your note until you unlock the vault and deposit again, or import the note from the last deposit result.
+            </div>
+          ) : null}
+            <button onClick={submitDeposit} disabled={!canTransact} style={{ marginTop: 12, borderRadius: 10, background: canTransact ? "rgba(30,41,59,0.9)" : "rgba(51,65,85,0.45)", color: "#fff", padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "1px solid rgba(148,163,184,0.22)", cursor: canTransact ? "pointer" : "not-allowed" }}>
             Deposit
           </button>
         </div>
       )}
 
-      {showSwapPanel && (
+      {showSwapPanel && (!tradeNeedsUnlock || uiVariant !== "trade") && (
         <div style={{ marginTop: 14, borderRadius: 20, border: `1px solid ${PC.border}`, background: PC.card, padding: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <span style={{ fontSize: 18, fontWeight: 800, color: PC.text }}>Swap</span>
@@ -1472,8 +2204,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                     fontSize: 12,
                     fontWeight: 700,
                     border: `1px solid ${PC.border}`,
-                    background: swapSlippageBps === bps ? PC.teal : "transparent",
-                    color: swapSlippageBps === bps ? "#191326" : PC.text,
+                    background: swapSlippageBps === bps ? "rgba(71,85,105,0.78)" : "transparent",
+                    color: PC.text,
                     cursor: "pointer",
                   }}
                 >
@@ -1492,20 +2224,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                   No spendable vault notes for this input asset. Unlock the vault, deposit (note is saved), wait for on-chain commitment, then swap—or paste a full proof payload under Advanced.
                 </span>
               ) : (
-                <label style={{ display: "block" }}>
-                  <span style={{ display: "block", marginBottom: 6, color: PC.text, fontWeight: 700 }}>Spend note from vault</span>
-                  <select
-                    value={String(Math.min(spendPick, spendable.length - 1))}
-                    onChange={(e) => setSpendPick(Number(e.target.value))}
-                    style={{ width: "100%", borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }}
-                  >
-                    {spendable.map((s, i) => (
-                      <option key={`${s.vaultIdx}-${i}`} value={i}>
-                        #{s.vaultIdx} · {ethers.formatEther(s.note.amount)} in
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <span style={{ color: PC.text }}>
+                  Auto note spend enabled. Using best available note{autoSpendEntry?.note?.amount ? ` (${ethers.formatEther(autoSpendEntry.note.amount)}).` : "."}
+                </span>
               )}
             </div>
           ) : null}
@@ -1553,7 +2274,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 borderRadius: 12,
                 border: `2px solid ${PC.border}`,
                 background: PC.card,
-                color: PC.teal,
+                color: "rgba(226,232,240,0.92)",
                 cursor: "pointer",
                 fontSize: 18,
                 lineHeight: 1,
@@ -1587,7 +2308,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 style={{ marginTop: 8, width: "100%", borderRadius: 12, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 14 }}
               />
             )}
-            <div style={{ marginTop: 10, fontSize: 22, fontWeight: 700, color: swapQuoteLoading ? PC.muted : PC.teal, letterSpacing: "-0.02em" }}>
+            <div style={{ marginTop: 10, fontSize: 22, fontWeight: 700, color: swapQuoteLoading ? PC.muted : "rgba(226,232,240,0.95)", letterSpacing: "-0.02em" }}>
               {swapQuoteLoading ? (
                 <span style={{ display: "inline-flex", gap: 5, alignItems: "center" }}>
                   <span className="dapp-quote-pulse">Fetching quote</span>
@@ -1604,52 +2325,21 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               <span style={{ color: PC.text, fontWeight: 700 }}>{swapQuoteLoading ? "…" : (swapMinLabel || "—")}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span>Protocol + oracle (est.)</span>
-              <span style={{ color: PC.text }}>{swapLastQuote?.fees?.totalFee ? `${ethers.formatUnits(swapLastQuote.fees.totalFee, 18).slice(0, 12)} (in)` : "—"}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span>DEX fee policy</span>
-              <span style={{ color: PC.text }}>{swapLastQuote?.protocolDexFeeBps != null ? `${Number(swapLastQuote.protocolDexFeeBps) / 100}%` : "—"}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, gap: 12 }}>
-              <span>Quote source</span>
-              <span style={{ color: PC.teal, fontWeight: 700, fontSize: 12, textAlign: "right" }}>
-                {swapLastQuote?.quoteSource ? QUOTE_SOURCE_LABEL[swapLastQuote.quoteSource] || swapLastQuote.quoteSource : "—"}
-              </span>
-            </div>
-            {Array.isArray(swapLastQuote?.quotePath) && swapLastQuote.quotePath.length > 0 && (
-              <div style={{ marginBottom: 8, fontSize: 11, color: PC.muted, lineHeight: 1.4 }}>
-                Path:{" "}
-                <span style={{ color: PC.text, fontFamily: "var(--font-mono, monospace)", wordBreak: "break-all" }}>
-                  {swapLastQuote.quotePath.join(" → ")}
-                </span>
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
               <span>Route</span>
-              <span style={{ color: PC.text, fontSize: 11, maxWidth: "58%", textAlign: "right" }}>{swapLastQuote?.routeDescription ?? cfg?.features?.quoteMode ?? "—"}</span>
+              <span style={{ color: PC.text, fontSize: 12, maxWidth: "58%", textAlign: "right" }}>{swapLastQuote?.routeDescription ?? cfg?.features?.quoteMode ?? "—"}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-              <span>Relayer gas (from your note)</span>
-              <span style={{ color: PC.teal, fontWeight: 700, textAlign: "right", maxWidth: "62%" }}>
-                {swapQuoteLoading
-                  ? "…"
-                  : `${ethers.formatEther(intentForm.gasRefund || "0")} BNB equiv.`}
+              <span>Relayer gas</span>
+              <span style={{ color: "rgba(226,232,240,0.95)", fontWeight: 700, textAlign: "right", maxWidth: "62%" }}>
+                {swapQuoteLoading ? "…" : `${ethers.formatEther(intentForm.gasRefund || "0")} BNB`}
               </span>
             </div>
-            <p style={{ margin: "10px 0 0", fontSize: 11, lineHeight: 1.45, color: PC.muted }}>
-              The relayer broadcasts the transaction; <strong style={{ color: PC.text }}>gasRefund</strong> in your proof reimburses them from pool rules so they are not expected to spend their own BNB for your swap.
-            </p>
-            {!!cfg?.features && (
-              <div style={{ marginTop: 8, fontSize: 11, color: PC.muted }}>
-                Quote: <span style={{ color: PC.text }}>{cfg?.features?.quoteMode ?? "—"}</span>
-                {" · "}
-                Dry-run: <span style={{ color: PC.text }}>{cfg?.features?.dryRun ? "yes" : "no"}</span>
-              </div>
-            )}
             {swapQuoteErr && <div style={{ marginTop: 8, fontSize: 12, color: "#ed4b9e" }}>{swapQuoteErr}</div>}
+            {swapClampHint && !swapQuoteErr && (
+              <div style={{ marginTop: 8, fontSize: 12, color: PC.muted }}>{swapClampHint}</div>
+            )}
             {cfg?.mode === "live" && !swapGasRefundOk && !swapQuoteLoading && (intentForm.inputAmount || "").trim() && (
-              <div style={{ marginTop: 8, fontSize: 12, color: "#ed4b9e" }}>Waiting for gas cover from quote (gasRefund).</div>
+              <div style={{ marginTop: 8, fontSize: 12, color: "#ed4b9e" }}>Waiting for relayer gas quote…</div>
             )}
           </div>
 
@@ -1665,7 +2355,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             <button
               type="button"
               onClick={connect}
-              style={{ marginTop: 14, borderRadius: 16, background: `linear-gradient(90deg, ${PC.teal}, #7645d9)`, color: "#191326", padding: "16px 18px", fontSize: 16, fontWeight: 800, border: "none", cursor: "pointer", width: "100%" }}
+              style={{ marginTop: 14, borderRadius: 16, background: "rgba(30,41,59,0.92)", color: "#f8fafc", padding: "16px 18px", fontSize: 16, fontWeight: 800, border: "1px solid rgba(148,163,184,0.22)", cursor: "pointer", width: "100%" }}
             >
               Connect wallet
             </button>
@@ -1673,28 +2363,43 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             <button
               type="button"
               onClick={submitSwap}
-              disabled={!canTransact || swapQuoteLoading || swapProofBusy || swapSubmitBusy || !!swapQuoteErr || !swapGasRefundOk}
+              disabled={!canTransact || swapQuoteLoading || swapProofBusy || swapFlowBusy || !!swapQuoteErr || !swapGasRefundOk}
               style={{
                 marginTop: 14,
                 borderRadius: 16,
-                background: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? `linear-gradient(90deg, ${PC.teal}, #7645d9)` : "#3a3842",
-                color: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? "#191326" : PC.muted,
+                background: canTransact && !swapQuoteLoading && !swapProofBusy && !swapFlowBusy && !swapQuoteErr && swapGasRefundOk ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)",
+                color: canTransact && !swapQuoteLoading && !swapProofBusy && !swapFlowBusy && !swapQuoteErr && swapGasRefundOk ? "#f8fafc" : PC.muted,
                 padding: "16px 18px",
                 fontSize: 16,
                 fontWeight: 800,
                 border: "none",
-                cursor: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? "pointer" : "not-allowed",
+                cursor: canTransact && !swapQuoteLoading && !swapProofBusy && !swapFlowBusy && !swapQuoteErr && swapGasRefundOk ? "pointer" : "not-allowed",
                 width: "100%",
               }}
             >
-              {swapProofBusy ? "Generating proof…" : swapSubmitBusy ? "Submitting swap…" : "Submit swap via relayer"}
+              {swapFlowBusy ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 17, lineHeight: 1, width: 18, display: "inline-block", textAlign: "center" }}>
+                    {["◐", "◓", "◑", "◒"][swapSpinnerTick]}
+                  </span>
+                  {swapFlowStage || "Processing swap..."}
+                </span>
+              ) : (
+                "Submit swap via relayer"
+              )}
             </button>
+          )}
+          {swapFlowBusy && (
+            <div style={{ marginTop: 8, fontSize: 12, color: PC.muted, display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 14 }}>{["◐", "◓", "◑", "◒"][swapSpinnerTick]}</span>
+              Please wait while we prepare and submit your swap securely.
+            </div>
           )}
         </div>
       )}
 
-      {(tab === "withdraw" || (tab === "all" && uiVariant !== "trade")) && (
-        <div style={{ marginTop: 14, borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(0,0,0,0.26)", padding: 14 }}>
+      {(tab === "withdraw" || (tab === "all" && uiVariant !== "trade")) && (!tradeNeedsUnlock || uiVariant !== "trade") && (
+        <div style={{ marginTop: 14, borderRadius: 16, border: "1px solid rgba(148,163,184,0.12)", background: "rgba(8, 12, 20, 0.84)", padding: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Withdraw</div>
           <div style={{ marginTop: 8, fontSize: 12, color: PC.muted, lineHeight: 1.45 }}>
             Shielded withdraw: proof + nullifier spend; relayer submits <code style={{ color: "#fff" }}>shieldedWithdraw</code>. Amount is the payout to recipient; change stays in the pool as a new note. Set protocol fee and gas refund so they match your note (on-chain enforces min fee from oracle).
@@ -1705,6 +2410,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               value={withdrawTokenChoice}
               onChange={(e) => {
                 const next = e.target.value;
+                withdrawAmountUserEditedRef.current = false;
                 setWithdrawTokenChoice(next);
                 if (next !== "__custom__") setWithdrawForm({ ...withdrawForm, token: next });
               }}
@@ -1730,6 +2436,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 disabled={withdrawMaxPayoutWei == null || withdrawMaxPayoutWei <= 0n || !wallet?.signer}
                 onClick={() => {
                   if (withdrawMaxPayoutWei == null || withdrawMaxPayoutWei <= 0n) return;
+                  withdrawAmountUserEditedRef.current = false;
                   setWithdrawForm((f) => ({ ...f, amount: ethers.formatUnits(withdrawMaxPayoutWei, 18) }));
                 }}
                 style={{
@@ -1740,7 +2447,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                   fontSize: 11,
                   fontWeight: 700,
                   border: "1px solid rgba(255,255,255,0.14)",
-                  cursor: withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n ? "pointer" : "not-allowed",
+                  cursor:
+                    withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n ? "pointer" : "not-allowed",
                 }}
               >
                 Use max payout
@@ -1748,14 +2456,17 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             </div>
             <input
               value={withdrawForm.amount}
-              onChange={(e) => setWithdrawForm({ ...withdrawForm, amount: e.target.value })}
+              onChange={(e) => {
+                withdrawAmountUserEditedRef.current = true;
+                setWithdrawForm({ ...withdrawForm, amount: e.target.value });
+              }}
               style={{ marginTop: 4, width: "100%", borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)", background: "#151a23", color: "#fff", padding: "10px 12px", fontSize: 14 }}
             />
-            {withdrawSpendable.length > 0 && (
+            {!withdrawAdvancedJson && withdrawSpendable.length > 0 && (
               <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.45 }}>
                 First spendable note:{" "}
-                <span style={{ color: PC.text }}>{ethers.formatEther(withdrawSpendable[0].note.amount)}</span> (18 decimals)
-                {" "}· Max payout after fee &amp; gas:{" "}
+                <span style={{ color: PC.text }}>{ethers.formatEther(withdrawSpendable[0].note.amount)}</span> (18
+                decimals) · Max payout after fee &amp; gas (leaves 1 wei change in pool):{" "}
                 <span style={{ color: PC.text }}>
                   {withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n
                     ? ethers.formatUnits(withdrawMaxPayoutWei, 18)
@@ -1763,7 +2474,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 </span>
               </div>
             )}
-            {!withdrawSpendable.length && (
+            {!withdrawAdvancedJson && !withdrawSpendable.length && cfg?.assets?.length > 0 && (
               <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
                 No vault note for this token — deposit or swap here first, or paste withdraw JSON under Advanced.
               </div>
@@ -1799,10 +2510,130 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           <button
             onClick={submitWithdraw}
             disabled={cfg?.mode !== "live" || withdrawProofBusy || !wallet?.signer}
-            style={{ marginTop: 12, borderRadius: 10, background: cfg?.mode === "live" && !withdrawProofBusy ? "#18b980" : "#3a4d45", color: "#fff", padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "none", cursor: cfg?.mode === "live" && !withdrawProofBusy ? "pointer" : "not-allowed" }}
+            style={{ marginTop: 12, borderRadius: 10, background: cfg?.mode === "live" && !withdrawProofBusy ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)", color: "#fff", padding: "10px 14px", fontSize: 14, fontWeight: 700, border: "1px solid rgba(148,163,184,0.22)", cursor: cfg?.mode === "live" && !withdrawProofBusy ? "pointer" : "not-allowed" }}
           >
             {withdrawProofBusy ? "Generating proof…" : "Withdraw via relayer"}
           </button>
+        </div>
+      )}
+
+      {uiVariant === "trade" && tab === "internal" && !tradeNeedsUnlock && (
+        <div style={{ marginTop: 14, borderRadius: 20, border: `1px solid ${PC.border}`, background: PC.card, padding: 16 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+            {[
+              { id: "create", label: "Create match" },
+              { id: "join", label: "Join existing" },
+              { id: "manage", label: "Manage my intents" },
+            ].map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => setInternalMatchMode(mode.id)}
+                style={{
+                  borderRadius: 10,
+                  padding: "8px 12px",
+                  border: `1px solid ${PC.border}`,
+                  background: internalMatchMode === mode.id ? "rgba(0,229,199,0.18)" : "transparent",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+
+          {internalMatchMode === "create" && (
+            <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
+              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Create internal match intent</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                {["sell", "buy"].map((side) => (
+                  <button
+                    key={side}
+                    type="button"
+                    onClick={() => setOrderForm((prev) => ({ ...prev, side }))}
+                    style={{
+                      borderRadius: 10,
+                      padding: "8px 12px",
+                      border: `1px solid ${PC.border}`,
+                      background: orderForm.side === side ? (side === "sell" ? "rgba(239,68,68,0.18)" : "rgba(34,197,94,0.18)") : "transparent",
+                      color: "#fff",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {side}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <input value={orderForm.baseToken} onChange={(e) => setOrderForm((prev) => ({ ...prev, baseToken: e.target.value.toUpperCase() }))} placeholder="Base token" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
+                <input value={orderForm.quoteToken} onChange={(e) => setOrderForm((prev) => ({ ...prev, quoteToken: e.target.value.toUpperCase() }))} placeholder="Quote token" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+                <input value={orderForm.amount} onChange={(e) => setOrderForm((prev) => ({ ...prev, amount: e.target.value }))} placeholder="Amount" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
+                <input value={orderForm.price} onChange={(e) => setOrderForm((prev) => ({ ...prev, price: e.target.value }))} placeholder="Limit price" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
+              </div>
+              <button type="button" onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: "rgba(30,41,59,0.92)", color: "#f8fafc", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: "pointer" }}>
+                Create internal match intent
+              </button>
+            </div>
+          )}
+
+          {internalMatchMode === "join" && (
+            <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
+              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Join existing internal match</div>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 11, color: PC.muted }}>
+                  <span>Price</span><span>Size</span><span>Side</span>
+                </div>
+                {openInternalOrders.length === 0 ? (
+                  <div style={{ fontSize: 12, color: PC.muted, padding: "6px 0" }}>
+                    No live internal intents yet. Create a match intent first.
+                  </div>
+                ) : openInternalOrders.map((order) => (
+                  <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 12, color: "#fff" }}>
+                    <span>{order.price}</span>
+                    <span>{order.amount}</span>
+                    <span style={{ color: order.side === "sell" ? "#fca5a5" : "#bbf7d0", textTransform: "uppercase" }}>{order.side}</span>
+                  </div>
+                ))}
+              </div>
+              <button type="button" onClick={joinInternalOrder} style={{ marginTop: 12, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: hasOpenInternalOrder ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)", color: hasOpenInternalOrder ? "#f8fafc" : PC.muted, padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: hasOpenInternalOrder ? "pointer" : "not-allowed" }} disabled={!hasOpenInternalOrder}>
+                Match first open intent
+              </button>
+            </div>
+          )}
+
+          {internalMatchMode === "manage" && (
+            <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
+              <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>My internal intents</div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {localOrders.length === 0 ? (
+                  <div style={{ fontSize: 12, color: PC.muted }}>No internal intents yet. Create one in the first tab.</div>
+                ) : localOrders.map((order) => (
+                  <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr auto", gap: 8, alignItems: "center", fontSize: 12, color: "#fff" }}>
+                    <span>{order.pair}</span>
+                    <span>{order.amount}</span>
+                    <span>{order.price}</span>
+                    <span style={{ color: order.status === "OPEN" ? "rgba(226,232,240,0.92)" : PC.muted }}>{order.status}</span>
+                    <button
+                      type="button"
+                      disabled={order.status !== "OPEN"}
+                      onClick={() => cancelInternalOrder(order.id)}
+                      style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: order.status === "OPEN" ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: order.status === "OPEN" ? "pointer" : "not-allowed" }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1824,7 +2655,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             />
             <button
               onClick={importToken}
-              style={{ borderRadius: 10, background: "#6d4aff", color: "#fff", padding: "10px 14px", fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer" }}
+              style={{ borderRadius: 10, background: "rgba(30,41,59,0.9)", color: "#fff", padding: "10px 14px", fontSize: 13, fontWeight: 700, border: "1px solid rgba(148,163,184,0.22)", cursor: "pointer" }}
             >
               Import token
             </button>
@@ -1843,12 +2674,16 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>Note vault</div>
                 <button
+                  type="button"
                   onClick={unlockVault}
-                  style={{ borderRadius: 10, background: "rgba(255,255,255,0.08)", color: "#fff", padding: "6px 10px", fontSize: 12, fontWeight: 700, border: "1px solid rgba(255,255,255,0.16)", cursor: "pointer" }}
+                  style={{ borderRadius: 10, background: "rgba(255,255,255,0.08)", color: "#fff", padding: "6px 10px", fontSize: 12, fontWeight: 700, border: "1px solid rgba(255,255,255,0.16)", cursor: wallet.signer ? "pointer" : "not-allowed" }}
                   disabled={!wallet.signer}
                 >
                   {vault.unlocked ? "Unlocked" : "Unlock"}
                 </button>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.5)", lineHeight: 1.4 }}>
+                Same message every time (domain + chain) so your signature derives a stable encryption key. If unlock failed before this fix, click Unlock once more after rebuilding.
               </div>
               <textarea
                 value={noteDraft}
@@ -1858,7 +2693,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               />
               <button
                 onClick={addNoteToVault}
-                style={{ marginTop: 8, borderRadius: 10, background: "#18b980", color: "#fff", padding: "8px 10px", fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer" }}
+                style={{ marginTop: 8, borderRadius: 10, background: "rgba(30,41,59,0.9)", color: "#fff", padding: "8px 10px", fontSize: 12, fontWeight: 700, border: "1px solid rgba(148,163,184,0.22)", cursor: "pointer" }}
                 disabled={!vault.unlocked}
               >
                 Save
@@ -1868,7 +2703,12 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.65)" }}>Swap JSON</div>
           <textarea value={intentForm.swapDataJson} onChange={(e) => setIntentForm({ ...intentForm, swapDataJson: e.target.value })} style={{ marginTop: 4, height: 112, width: "100%", borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)", background: "#151a23", color: "#fff", padding: "10px 12px", fontSize: 12, fontFamily: "var(--font-mono)" }} placeholder='{"proof":{...},"publicInputs":{...},"swapParams":{...}}' />
           <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.65)" }}>Withdraw JSON</div>
-          <textarea value={withdrawForm.withdrawDataJson} onChange={(e) => setWithdrawForm({ withdrawDataJson: e.target.value })} style={{ marginTop: 4, height: 96, width: "100%", borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)", background: "#151a23", color: "#fff", padding: "10px 12px", fontSize: 12, fontFamily: "var(--font-mono)" }} placeholder='{"proof":{...},"publicInputs":{...},"recipient":"0x..."}' />
+          <textarea
+            value={withdrawForm.withdrawDataJson}
+            onChange={(e) => setWithdrawForm({ ...withdrawForm, withdrawDataJson: e.target.value })}
+            style={{ marginTop: 4, height: 96, width: "100%", borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)", background: "#151a23", color: "#fff", padding: "10px 12px", fontSize: 12, fontFamily: "var(--font-mono)" }}
+            placeholder='{"proof":{...},"publicInputs":{...},"recipient":"0x..."}'
+          />
         </div>
       )}
 
@@ -1877,12 +2717,12 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           style={{
             marginTop: 14,
             borderRadius: 16,
-            border: lastResult?.txHash || lastResult?.fundingTxHash ? "1px solid rgba(0, 229, 199, 0.35)" : "1px solid rgba(255,255,255,0.12)",
-            background: lastResult?.txHash || lastResult?.fundingTxHash ? "rgba(0, 229, 199, 0.06)" : "rgba(0,0,0,0.26)",
+            border: "1px solid rgba(148,163,184,0.18)",
+            background: "rgba(8,12,20,0.72)",
             padding: 14,
           }}
         >
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: lastResult?.txHash || lastResult?.fundingTxHash ? PC.teal : "rgba(255,255,255,0.65)" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "rgba(203,213,225,0.9)" }}>
             {lastResult?.txHash || lastResult?.fundingTxHash ? "Submitted on-chain" : "Result"}
           </div>
           {(lastResult?.txHash || lastResult?.fundingTxHash) && (
@@ -1920,6 +2760,42 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                   <span style={{ fontSize: 12, color: "#fff" }}>{String(lastResult.blockNumber)}</span>
                 </div>
               )}
+            </div>
+          )}
+          {lastResult?.suggestedVaultNote && (
+            <div style={{ marginTop: 10 }}>
+              {lastResult?.vaultSaved ? (
+                <div style={{ marginBottom: 8, fontSize: 12, color: "rgba(52, 211, 153, 0.95)", lineHeight: 1.5 }}>
+                  <strong>Already saved at deposit time</strong> — your vault was unlocked, so this note was written when the deposit finished. If the button below is grey and does nothing, refresh or reconnect locked the vault in memory: open <strong>Advanced → Unlock</strong> and sign again; then Swap/Withdraw can read your notes.
+                </div>
+              ) : null}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={importSuggestedVaultNoteFromLastDeposit}
+                  title={
+                    wallet?.signer
+                      ? "Saves this deposit note locally. Signs vault unlock in MetaMask if the vault is still locked."
+                      : "Connect wallet first"
+                  }
+                  style={{
+                    borderRadius: 10,
+                    background: wallet?.signer ? "rgba(30,41,59,0.92)" : "rgba(255,255,255,0.1)",
+                    color: "#fff",
+                    padding: "8px 12px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    border: "none",
+                    cursor: wallet?.signer ? "pointer" : "not-allowed",
+                  }}
+                  disabled={!wallet?.signer}
+                >
+                  Add deposit note to vault
+                </button>
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", maxWidth: 420 }}>
+                  Required for Swap / Withdraw tabs to find a spendable note (same blinding as your deposit). If you already saved at deposit time, you only need this after a refresh or another browser.
+                </span>
+              </div>
             </div>
           )}
           <pre style={{ marginTop: 8, overflow: "auto", fontSize: 12, color: "rgba(255,255,255,0.9)" }}>{JSON.stringify(lastResult, null, 2)}</pre>
