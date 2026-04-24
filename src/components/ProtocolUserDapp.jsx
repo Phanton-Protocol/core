@@ -1375,43 +1375,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           intentForm.minOutputAmount ??
           "0"
       );
-      const intentReq = {
-        userAddress: wallet.address,
-        inputAssetID: Number(swapData.publicInputs.inputAssetID),
-        outputAssetID: Number(swapData.publicInputs.outputAssetIDSwap),
-        amountIn: String(swapData.publicInputs.swapAmount ?? "0"),
-        minAmountOut: String(swapData.publicInputs.minOutputAmountSwap ?? intentForm.minOutputAmount ?? "0"),
-        nonce: String(noteNonce),
-        nullifier: nullifierHex,
-        deadline,
-      };
-      setSwapFlowStage("Submitting signed intent...");
-
-      const intentRes = await fetchJson(`${base}/intent`, {
-        method: "POST",
-        body: JSON.stringify(intentReq),
-      });
-
-      const { intentId, intent, domain, types } = intentRes;
-      const typed = types || INTENT_TYPES;
-      const signPayload = {
-        user: intent.userAddress,
-        inputAssetID: intent.inputAssetID,
-        outputAssetID: intent.outputAssetID,
-        amountIn: intent.amountIn,
-        minAmountOut: intent.minAmountOut,
-        deadline: intent.deadline,
-        nonce: intent.nonce,
-        nullifier: intent.nullifier,
-      };
-      const intentSig = await wallet.signer.signTypedData(domain, typed, signPayload);
-
       const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
       const envelope = await encryptForRelayer(
         {
-          intentId,
-          intent,
-          intentSig,
           swapData,
           zkAuthorization: {
             nullifier: nullifierHex,
