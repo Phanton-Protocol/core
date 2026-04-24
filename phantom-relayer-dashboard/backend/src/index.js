@@ -166,12 +166,23 @@ function requireModule4SubmitAuth(req, res, next) {
 }
 
 const RELAYER_ENC_PRIVATE_KEY_PEM = process.env.RELAYER_ENC_PRIVATE_KEY_PEM || "";
+const RELAYER_ENC_PRIVATE_KEY_PEM_B64 = process.env.RELAYER_ENC_PRIVATE_KEY_PEM_B64 || "";
 let relayerEncPublicKeyPem = "";
 let relayerEncPrivateKeyPem = "";
 let relayerEncKeyId = "";
 {
+  let resolvedPem = "";
   if (RELAYER_ENC_PRIVATE_KEY_PEM.trim()) {
-    relayerEncPrivateKeyPem = RELAYER_ENC_PRIVATE_KEY_PEM;
+    resolvedPem = RELAYER_ENC_PRIVATE_KEY_PEM;
+  } else if (RELAYER_ENC_PRIVATE_KEY_PEM_B64.trim()) {
+    try {
+      resolvedPem = Buffer.from(RELAYER_ENC_PRIVATE_KEY_PEM_B64.trim(), "base64").toString("utf8");
+    } catch {
+      resolvedPem = "";
+    }
+  }
+  if (resolvedPem.trim()) {
+    relayerEncPrivateKeyPem = resolvedPem;
     relayerEncPublicKeyPem = crypto.createPublicKey(relayerEncPrivateKeyPem).export({ type: "spki", format: "pem" });
   } else {
     const generated = crypto.generateKeyPairSync("rsa", {
@@ -2527,10 +2538,21 @@ async function processSwapRequestBody(body) {
       throw err;
     }
     const cached = intents.get(intentId) || getIntent(db, intentId)?.payload;
-    if (!cached) {
-      const err = new Error("Unknown intentId");
-      err.status = 404;
-      throw err;
+    // Serverless instances do not share in-memory/disk state across invocations.
+    // If /intent and /swap/encrypted land on different instances, cached intent may be missing.
+    // In that case, continue with signature-bound payload validation below.
+    if (cached) {
+      try {
+        const sameNullifier = String(cached.nullifier || "").toLowerCase() === String(intent.nullifier || "").toLowerCase();
+        const sameNonce = String(cached.nonce || "") === String(intent.nonce || "");
+        if (!sameNullifier || !sameNonce) {
+          const err = new Error("intent payload mismatch for provided intentId");
+          err.status = 400;
+          throw err;
+        }
+      } catch (e) {
+        if (e?.status) throw e;
+      }
     }
 
     const typedIntent = {
