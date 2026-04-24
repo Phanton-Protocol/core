@@ -171,6 +171,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function ensureErc20AllowanceForPool(signer, token, owner, spender, amountWei) {
+  if (!signer || !token || !owner || !spender) return;
+  if (String(token).toLowerCase() === ethers.ZeroAddress.toLowerCase()) return;
+  const erc20 = new ethers.Contract(
+    token,
+    [
+      "function allowance(address owner, address spender) view returns (uint256)",
+      "function approve(address spender, uint256 amount) returns (bool)",
+    ],
+    signer
+  );
+  const current = BigInt(await erc20.allowance(owner, spender));
+  if (current >= BigInt(amountWei)) return;
+  const tx = await erc20.approve(spender, ethers.MaxUint256);
+  await tx.wait();
+}
+
 const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const WBNB_BSC_MAINNET = "0xbb4CdB9Cbd36B01bD1cBaEBF2De08d9173bc095c";
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
@@ -1094,6 +1111,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           ...sweep,
         });
       } else {
+        await ensureErc20AllowanceForPool(
+          wallet.signer,
+          depositForm.token,
+          wallet.address,
+          cfg.addresses.shieldedPool,
+          amountWei
+        );
         const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
         const envelope = await encryptForRelayer(
           { ...message, signature },
