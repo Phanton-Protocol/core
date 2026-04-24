@@ -171,19 +171,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const INTENT_TYPES = {
-  SwapIntent: [
-    { name: "user", type: "address" },
-    { name: "inputAssetID", type: "uint256" },
-    { name: "outputAssetID", type: "uint256" },
-    { name: "amountIn", type: "uint256" },
-    { name: "minAmountOut", type: "uint256" },
-    { name: "deadline", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "nullifier", type: "bytes32" },
-  ],
-};
-
 const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const WBNB_BSC_MAINNET = "0xbb4CdB9Cbd36B01bD1cBaEBF2De08d9173bc095c";
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
@@ -421,6 +408,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [swapSlippageBps, setSwapSlippageBps] = useState(DEFAULT_SWAP_SLIPPAGE_BPS);
   const [swapLastQuote, setSwapLastQuote] = useState(null);
   const [swapProofBusy, setSwapProofBusy] = useState(false);
+  const [swapSubmitBusy, setSwapSubmitBusy] = useState(false);
   const [withdrawProofBusy, setWithdrawProofBusy] = useState(false);
   const [clientProverReady, setClientProverReady] = useState(false);
   const [spendPick, setSpendPick] = useState(0);
@@ -620,7 +608,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     let debounceTimer = null;
     let refreshTimer = null;
     async function run() {
-      if (swapProofBusy) {
+      if (swapProofBusy || swapSubmitBusy) {
         setSwapQuoteLoading(false);
         return;
       }
@@ -768,7 +756,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       clearTimeout(debounceTimer);
       clearInterval(refreshTimer);
     };
-  }, [base, cfg?.chainId, cfg?.mode, cfg?.assets?.length, intentForm.inputToken, intentForm.outputToken, intentForm.inputAmount, intentForm.swapDataJson, swapSlippageBps, spendable, spendPick, swapProofBusy, swapLastQuote]);
+  }, [base, cfg?.chainId, cfg?.mode, cfg?.assets?.length, intentForm.inputToken, intentForm.outputToken, intentForm.inputAmount, intentForm.swapDataJson, swapSlippageBps, spendable, spendPick, swapProofBusy, swapSubmitBusy, swapLastQuote]);
 
   async function connect() {
     setConnectError(null);
@@ -1161,6 +1149,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setActionError(null);
     setActionSuccess(null);
     setLastResult(null);
+    setSwapSubmitBusy(true);
     try {
       if (!wallet.signer) throw new Error("Connect wallet first.");
       if (!cfg?.chainId || !cfg?.addresses?.shieldedPool) throw new Error("Backend config not loaded.");
@@ -1361,39 +1350,24 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       }
       const nullifierHex = nullifierToBytes32Hex(swapData.publicInputs.nullifier);
 
-      const intentReq = {
-        userAddress: wallet.address,
-        inputAssetID: Number(swapData.publicInputs.inputAssetID),
-        outputAssetID: Number(swapData.publicInputs.outputAssetIDSwap),
-        amountIn: String(swapData.publicInputs.swapAmount ?? "0"),
-        minAmountOut: String(swapData.publicInputs.minOutputAmountSwap ?? intentForm.minOutputAmount ?? "0"),
-        nonce: String(noteNonce),
-        nullifier: nullifierHex,
-        deadline,
-      };
-
-      const intentRes = await fetchJson(`${base}/intent`, {
-        method: "POST",
-        body: JSON.stringify(intentReq),
-      });
-
-      const { intentId, intent, domain, types } = intentRes;
-      const typed = types || INTENT_TYPES;
-      const signPayload = {
-        user: intent.userAddress,
-        inputAssetID: intent.inputAssetID,
-        outputAssetID: intent.outputAssetID,
-        amountIn: intent.amountIn,
-        minAmountOut: intent.minAmountOut,
-        deadline: intent.deadline,
-        nonce: intent.nonce,
-        nullifier: intent.nullifier,
-      };
-      const intentSig = await wallet.signer.signTypedData(domain, typed, signPayload);
+      const minOutForAuth = String(
+        swapData.publicInputs.minOutputAmountSwap ??
+          swapData.swapParams?.minAmountOut ??
+          intentForm.minOutputAmount ??
+          "0"
+      );
 
       const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
       const envelope = await encryptForRelayer(
-        { intentId, intent, intentSig, swapData },
+        {
+          swapData,
+          zkAuthorization: {
+            nullifier: nullifierHex,
+            deadline,
+            nonce: String(noteNonce),
+            minAmountOut: minOutForAuth,
+          },
+        },
         keyInfo?.publicKeyPem
       );
       const out = await fetchJson(`${base}/swap/encrypted`, {
@@ -1475,6 +1449,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       setLastResult(out);
     } catch (e) {
       setActionError(stringifyErr(e?.message ?? e));
+    } finally {
+      setSwapSubmitBusy(false);
     }
   }
 
@@ -2269,21 +2245,21 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             <button
               type="button"
               onClick={submitSwap}
-              disabled={!canTransact || swapQuoteLoading || swapProofBusy || !!swapQuoteErr || !swapGasRefundOk}
+              disabled={!canTransact || swapQuoteLoading || swapProofBusy || swapSubmitBusy || !!swapQuoteErr || !swapGasRefundOk}
               style={{
                 marginTop: 14,
                 borderRadius: 16,
-                background: canTransact && !swapQuoteLoading && !swapProofBusy && !swapQuoteErr && swapGasRefundOk ? `linear-gradient(90deg, ${PC.teal}, #7645d9)` : "#3a3842",
-                color: canTransact && !swapQuoteLoading && !swapProofBusy && !swapQuoteErr && swapGasRefundOk ? "#191326" : PC.muted,
+                background: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? `linear-gradient(90deg, ${PC.teal}, #7645d9)` : "#3a3842",
+                color: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? "#191326" : PC.muted,
                 padding: "16px 18px",
                 fontSize: 16,
                 fontWeight: 800,
                 border: "none",
-                cursor: canTransact && !swapQuoteLoading && !swapProofBusy && !swapQuoteErr && swapGasRefundOk ? "pointer" : "not-allowed",
+                cursor: canTransact && !swapQuoteLoading && !swapProofBusy && !swapSubmitBusy && !swapQuoteErr && swapGasRefundOk ? "pointer" : "not-allowed",
                 width: "100%",
               }}
             >
-              {swapProofBusy ? "Generating proof…" : "Submit swap via relayer"}
+              {swapProofBusy ? "Generating proof…" : swapSubmitBusy ? "Submitting swap…" : "Submit swap via relayer"}
             </button>
           )}
         </div>
@@ -2324,12 +2300,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>Amount (payout to recipient)</div>
               <button
                 type="button"
-                disabled={
-                  !!withdrawAdvancedJson ||
-                  withdrawMaxPayoutWei == null ||
-                  withdrawMaxPayoutWei <= 0n ||
-                  !wallet?.signer
-                }
+                disabled={withdrawMaxPayoutWei == null || withdrawMaxPayoutWei <= 0n || !wallet?.signer}
                 onClick={() => {
                   if (withdrawMaxPayoutWei == null || withdrawMaxPayoutWei <= 0n) return;
                   withdrawAmountUserEditedRef.current = false;
@@ -2337,14 +2308,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 }}
                 style={{
                   borderRadius: 8,
-                  background: withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n && !withdrawAdvancedJson ? "rgba(24,185,128,0.25)" : "rgba(255,255,255,0.06)",
+                  background: withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n ? "rgba(24,185,128,0.25)" : "rgba(255,255,255,0.06)",
                   color: "#fff",
                   padding: "6px 10px",
                   fontSize: 11,
                   fontWeight: 700,
                   border: "1px solid rgba(255,255,255,0.14)",
                   cursor:
-                    withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n && !withdrawAdvancedJson ? "pointer" : "not-allowed",
+                    withdrawMaxPayoutWei != null && withdrawMaxPayoutWei > 0n ? "pointer" : "not-allowed",
                 }}
               >
                 Use max payout

@@ -1,0 +1,9 @@
+{
+  "functions": [
+    {
+      "source": "phantom-relayer-dashboard/backend",
+      "runtime": "nodejs20",
+      "codebase": "relayer-backend"
+    }
+  ]
+}
