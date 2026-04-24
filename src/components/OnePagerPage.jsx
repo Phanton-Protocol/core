@@ -105,7 +105,7 @@ const sections = [
   {
     title: 'DEVELOPMENT ROADMAP',
     bullets: [
-      'Phase 1-3: Foundation, security audit, mainnet launch (testnet operational).',
+      'Phase 1-3: Foundation, security audit, and mainnet launch readiness.',
       'Phase 4: Platform & enterprise (Banking/Payroll SaaS beta, HRIS integrations).',
       'Phase 5: Advanced privacy (FHE matching production, view keys, metadata reduction).',
       'Phase 6-8: Ecosystem expansion (multi-language SDKs, cross-chain, developer dApp toolkit).',
@@ -169,7 +169,7 @@ export default function OnePagerPage() {
           ))}
 
           <p className="mono" style={{ color: 'rgba(255,255,255,0.75)', marginTop: '1.4rem' }}>
-            One Pager: phantomprotocol.io • Status: Testnet • Target Multi-Chain.
+            One Pager: phantomprotocol.io • Status: Live Buildout • Target Multi-Chain.
           </p>
         </div>
       </main>

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { EPAPER_PUBLIC_URL } from '../config';
-import logoImg from '../assets/logo.svg';
+import logoImg from '../assets/logo-pro.svg';
 
 const primaryLinks = [
     { name: 'ForInvestors', sectionId: 'investors', oneWordLabel: true },

@@ -73,7 +73,7 @@ const SDKSection = () => {
           <div>
             <div style={{ color: '#fff', fontWeight: 600, marginBottom: '0.35rem' }}>Contract interfaces</div>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0, lineHeight: 1.5 }}>
-              ShieldedPool, NoteStorage, SwapAdaptor, RelayerStaking. ABIs and deployment addresses for BNB Chain testnet/mainnet.
+              ShieldedPool, NoteStorage, SwapAdaptor, RelayerStaking. ABIs and deployment addresses for BNB Chain environments.
             </p>
           </div>
           <div>
