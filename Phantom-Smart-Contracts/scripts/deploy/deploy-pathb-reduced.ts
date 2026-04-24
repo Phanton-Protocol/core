@@ -35,6 +35,7 @@ async function main() {
 
   const ProtocolToken = await ethers.getContractFactory("ProtocolToken");
   const protocolToken = await ProtocolToken.deploy(deployer.address);
+  console.log("[path-b][tx] ProtocolToken.deploy:", protocolToken.deploymentTransaction()?.hash);
   await protocolToken.waitForDeployment();
   const protocolTokenAddr = await protocolToken.getAddress();
   console.log("[path-b] ProtocolToken:", protocolTokenAddr);
@@ -42,6 +43,7 @@ async function main() {
   const minStake = ethers.parseUnits("1000", 18);
   const RelayerStaking = await ethers.getContractFactory("RelayerStaking");
   const relayerStaking = await RelayerStaking.deploy(protocolTokenAddr, minStake);
+  console.log("[path-b][tx] RelayerStaking.deploy:", relayerStaking.deploymentTransaction()?.hash);
   await relayerStaking.waitForDeployment();
   const relayerStakingAddr = await relayerStaking.getAddress();
   console.log("[path-b] RelayerStaking:", relayerStakingAddr);
@@ -49,12 +51,14 @@ async function main() {
   const infra = await deployVerifiersAndSwapAdaptor();
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
+  console.log("[path-b][tx] FeeOracle.deploy:", feeOracle.deploymentTransaction()?.hash);
   await feeOracle.waitForDeployment();
   const feeOracleAddr = await feeOracle.getAddress();
   console.log("[path-b] FeeOracle:", feeOracleAddr);
 
   if (existingOffchainOracle) {
     const tx = await feeOracle.setOffchainOracle(existingOffchainOracle);
+    console.log("[path-b][tx] FeeOracle.setOffchainOracle:", tx.hash);
     await tx.wait();
     console.log("[path-b] FeeOracle.offchainOracle set:", existingOffchainOracle);
   }
@@ -66,6 +70,7 @@ async function main() {
 
   const ReducedPool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
   const pool = await ReducedPool.deploy();
+  console.log("[path-b][tx] ShieldedPoolUpgradeableReduced.deploy:", pool.deploymentTransaction()?.hash);
   await pool.waitForDeployment();
   const poolAddr = await pool.getAddress();
   console.log("[path-b] ShieldedPoolUpgradeableReduced:", poolAddr);
@@ -77,13 +82,16 @@ async function main() {
     feeOracleAddr,
     relayerStakingAddr
   );
+  console.log("[path-b][tx] ShieldedPool.initialize:", initTx.hash);
   await initTx.wait();
   console.log("[path-b] pool initialized");
 
   const transferAmount = ethers.parseUnits(transferAmountHuman, 18);
   const transferATx = await protocolToken.transfer(walletA, transferAmount);
+  console.log("[path-b][tx] ProtocolToken.transfer(walletA):", transferATx.hash);
   await transferATx.wait();
   const transferBTx = await protocolToken.transfer(walletB, transferAmount);
+  console.log("[path-b][tx] ProtocolToken.transfer(walletB):", transferBTx.hash);
   await transferBTx.wait();
   console.log(`[path-b] transferred ${transferAmountHuman} SHDW to wallet A and B`);
 
@@ -93,8 +101,10 @@ async function main() {
   const stakingAsB = relayerStaking.connect(walletBSigner);
   const stakeAmount = ethers.parseUnits(stakeAmountHuman, 18);
   const approveTx = await tokenAsB.approve(relayerStakingAddr, ethers.MaxUint256);
+  console.log("[path-b][tx] ProtocolToken.approve(staking):", approveTx.hash);
   await approveTx.wait();
   const stakeTx = await stakingAsB.stake(stakeAmount);
+  console.log("[path-b][tx] RelayerStaking.stake:", stakeTx.hash);
   await stakeTx.wait();
   const isRelayer = await relayerStaking.isRelayer(walletB);
   const stakedBalance = await relayerStaking.stakedBalance(walletB);
