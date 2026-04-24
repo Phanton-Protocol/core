@@ -235,6 +235,18 @@ const CONFIG_DIR = process.env.PHANTOM_CONFIG_DIR || path.join(__dirname, "..", 
 const CONFIG_PATH = process.env.PHANTOM_CONFIG_PATH || "";
 const CANONICAL_PROFILES_PATH = process.env.PHANTOM_CANONICAL_PROFILES_PATH || path.join(CONFIG_DIR, "canonicalProfiles.json");
 const CANONICAL_PROFILE_ID = process.env.PHANTOM_CANONICAL_PROFILE || "";
+const FALLBACK_ASSETS_BY_CHAIN = {
+  97: [
+    { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
+    { assetId: 1, symbol: "BUSD", decimals: 18, address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
+    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13" },
+  ],
+  56: [
+    { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" },
+    { assetId: 1, symbol: "BUSD", decimals: 18, address: "0xe9e7cea3dedca5984780bafc599bd69add087d56" },
+    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x55d398326f99059fF775485246999027B3197955" },
+  ],
+};
 const PLACEHOLDER_RELAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function toBps(v, fallback) {
@@ -502,7 +514,8 @@ function getRuntimeConfig() {
     relayerStaking: envStr(process.env.RELAYER_STAKING_ADDRESS) ?? fileCfg.addresses?.relayerStaking ?? RELAYER_STAKING_ADDRESS ?? null,
   };
 
-  const assets = Array.isArray(fileCfg.assets) ? fileCfg.assets : [];
+  const assetsFromFile = Array.isArray(fileCfg.assets) ? fileCfg.assets : [];
+  const assets = assetsFromFile.length > 0 ? assetsFromFile : (FALLBACK_ASSETS_BY_CHAIN[Number(chainId)] || []);
   const requiredForTx =
     RELAYER_DRY_RUN
       ? ["SHIELDED_POOL_ADDRESS"]
@@ -3505,7 +3518,7 @@ function startServer(tryPort) {
   });
 }
 
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL && !process.env.FIREBASE_FUNCTIONS) {
   (async () => {
     try {
       await assertNoMockRuntimeGate();
