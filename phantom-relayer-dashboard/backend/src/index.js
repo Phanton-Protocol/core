@@ -2293,7 +2293,9 @@ app.post("/quote", async (req, res) => {
     });
   }
 
-  if (RPC_URL) {
+  // Keep quote source aligned with execution path: when a SwapAdaptor is configured,
+  // quote via adaptor first so `outputAmountSwap` matches on-chain swap execution.
+  if (RPC_URL && !SWAP_ADAPTOR_ADDRESS) {
     try {
       const provider = new ethers.JsonRpcProvider(RPC_URL);
       const amountInBn = parseAmount(amountIn);
@@ -3143,7 +3145,8 @@ app.post("/shadow-sweep", async (req, res) => {
   if (!SHIELDED_POOL_ADDRESS || !RELAYER_PRIVATE_KEY || !RPC_URL) {
     return res.status(500).json({ error: "Relayer env not configured" });
   }
-  const { shadowAddress, commitment } = req.body || {};
+  const { shadowAddress, commitment, deposit } = req.body || {};
+  const normalizedCommitment = String(commitment || deposit?.commitment || "").toLowerCase();
   let entry;
   let entryAddress = shadowAddress;
   if (shadowAddress) {
@@ -3156,6 +3159,47 @@ app.post("/shadow-sweep", async (req, res) => {
         break;
       }
     }
+  }
+  // Serverless-safe fallback: reconstruct from signed deposit payload when in-memory map is missing.
+  if (!entry && deposit && typeof deposit === "object") {
+    const parsed = depositSchema.safeParse(deposit);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid shadow sweep deposit payload", details: parsed.error.flatten() });
+    }
+    const payload = parsed.data;
+    const signerAddr = ethers.verifyTypedData(
+      DEPOSIT_DOMAIN,
+      DEPOSIT_TYPES,
+      {
+        depositor: payload.depositor,
+        token: payload.token,
+        amount: payload.amount,
+        commitment: payload.commitment,
+        assetID: Number(payload.assetID),
+        deadline: payload.deadline,
+      },
+      payload.signature
+    );
+    if (signerAddr.toLowerCase() !== payload.depositor.toLowerCase()) {
+      return res.status(400).json({ error: "Invalid shadow sweep deposit signature" });
+    }
+    if (normalizedCommitment && String(payload.commitment).toLowerCase() !== normalizedCommitment) {
+      return res.status(400).json({ error: "Commitment mismatch for shadow sweep payload" });
+    }
+    const seed = getShadowSeed(payload);
+    const derivedShadowAddress = new ethers.Wallet(seed).address;
+    if (shadowAddress && derivedShadowAddress.toLowerCase() !== String(shadowAddress).toLowerCase()) {
+      return res.status(400).json({ error: "shadowAddress does not match signed deposit payload" });
+    }
+    entryAddress = derivedShadowAddress;
+    entry = {
+      depositor: payload.depositor,
+      token: payload.token,
+      amount: payload.amount,
+      commitment: payload.commitment,
+      assetID: Number(payload.assetID),
+      deadline: payload.deadline,
+    };
   }
   if (!entry) {
     return res.status(404).json({ error: "Shadow deposit not found" });
@@ -3790,12 +3834,62 @@ function normalizeJoinSplitSwapParamsForChain(swapData) {
   swapData.swapParams = next;
 }
 
+async function precheckSwapOutDeterminism(swapData) {
+  if (!RPC_URL || !SWAP_ADAPTOR_ADDRESS) return;
+  const pi = swapData?.publicInputs || {};
+  const sp = swapData?.swapParams || {};
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const adaptorAbi = [
+    "function getExpectedOutput((address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint24 fee,uint160 sqrtPriceLimitX96,bytes path)) view returns (uint256)"
+  ];
+  const adaptor = new ethers.Contract(SWAP_ADAPTOR_ADDRESS, adaptorAbi, provider);
+  const expectedOut = toBigInt(
+    await adaptor.getExpectedOutput({
+      tokenIn: toAddress(sp.tokenIn),
+      tokenOut: toAddress(sp.tokenOut),
+      amountIn: toBigInt(sp.amountIn || 0),
+      minAmountOut: 0,
+      fee: Number(sp.fee || 0),
+      sqrtPriceLimitX96: toBigInt(sp.sqrtPriceLimitX96 || 0),
+      path: sp.path || "0x",
+    })
+  );
+  const proofOut = toBigInt(pi.outputAmountSwap || 0);
+  const minOut = toBigInt(pi.minOutputAmountSwap || 0);
+  if (expectedOut !== proofOut) {
+    const err = new Error("Swap output mismatch before submit (proof output != adaptor output)");
+    err.code = "SP_OUT_PRECHECK_MISMATCH";
+    err.status = 409;
+    err.details = {
+      reason: "SP_OUT_PRECHECK_MISMATCH",
+      adaptorOutput: expectedOut.toString(),
+      proofOutputAmountSwap: proofOut.toString(),
+      proofMinOutputAmountSwap: minOut.toString(),
+      note: "Regenerate quote+proof from the same swap adaptor quote immediately before submit."
+    };
+    throw err;
+  }
+  if (expectedOut < minOut) {
+    const err = new Error("Swap output below minimum before submit (adaptor output < min output)");
+    err.code = "SP_OUT_PRECHECK_BELOW_MIN";
+    err.status = 409;
+    err.details = {
+      reason: "SP_OUT_PRECHECK_BELOW_MIN",
+      adaptorOutput: expectedOut.toString(),
+      proofMinOutputAmountSwap: minOut.toString(),
+      note: "Refresh quote and lower minOutput/slippage, then regenerate proof."
+    };
+    throw err;
+  }
+}
+
 async function submitSwap(swapData) {
   if (!RPC_URL || !RELAYER_PRIVATE_KEY || !SHIELDED_POOL_ADDRESS) {
     throw new Error("Relayer env not configured");
   }
 
   normalizeJoinSplitSwapParamsForChain(swapData);
+  await precheckSwapOutDeterminism(swapData);
 
   console.log("\n🔐 Phase 2: Collecting validator signatures...");
 

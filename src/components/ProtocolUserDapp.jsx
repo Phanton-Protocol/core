@@ -33,6 +33,22 @@ function stringifyErr(x) {
   return String(x);
 }
 
+const BLOCKED_RELAYER_BASES = new Set([
+  "https://backend-ashy-ten-75.vercel.app",
+]);
+
+function sanitizeRelayerBaseRaw(raw, fallbackRaw = API_URLS.join(", ")) {
+  const parse = (v) =>
+    String(v || "")
+      .split(/[\n,\s]+/)
+      .map((x) => x.trim().replace(/\/$/, ""))
+      .filter(Boolean);
+  const picked = parse(raw).filter((b) => !BLOCKED_RELAYER_BASES.has(b.toLowerCase()));
+  if (picked.length > 0) return Array.from(new Set(picked)).join(", ");
+  const fb = parse(fallbackRaw).filter((b) => !BLOCKED_RELAYER_BASES.has(b.toLowerCase()));
+  return Array.from(new Set(fb)).join(", ");
+}
+
 /** Build a v1 vault note payload from swap hints + on-chain commitment (decimal string or bytes32 hex). */
 function buildVaultNoteFromSwapHint({ assetId, amountStr, blindingFactor, ownerPublicKey, commitmentStr }) {
   const raw = String(commitmentStr || "").trim();
@@ -105,7 +121,10 @@ function publicInputCommitmentToVaultHex(c) {
 function relayerCanonicalNoteToVaultPayload(note) {
   if (!note || typeof note !== "object") return null;
   if (Number(note.version) === 1 && note.commitmentHex && note.commitmentDecimal) {
-    return note;
+    return {
+      ...note,
+      poolAddress: String(note.poolAddress || ""),
+    };
   }
   const schema = String(note.schema || "");
   const commitmentHexRaw = String(note.commitment || "").trim();
@@ -135,6 +154,7 @@ function relayerCanonicalNoteToVaultPayload(note) {
     ownerPublicKey,
     commitmentDecimal,
     commitmentHex,
+    poolAddress: String(note.poolAddress || ""),
   };
 }
 
@@ -157,9 +177,7 @@ async function fetchJson(url, opts) {
     path = String(url || "");
   }
   try {
-    const { data } = await relayerFetchJson(path, fetchOpts, {
-      overrideBasesRaw: localStorage.getItem("phantom_api") || "",
-    });
+    const { data } = await relayerFetchJson(path, fetchOpts);
     return data;
   } catch (err) {
     const msg = err?.message || String(err);
@@ -273,12 +291,45 @@ function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
   }
   const notes = vaultData?.notes || [];
   const out = [];
+  const poolLower = String(relayerConfig?.addresses?.shieldedPool || "").toLowerCase();
   notes.forEach((n, vaultIdx) => {
     const raw = n.payload ?? n;
     const verOk = Number(raw?.version) === 1;
-    if (verOk && Number(raw.assetID) === aid) out.push({ vaultIdx, note: raw });
+    if (!verOk || Number(raw.assetID) !== aid) return;
+    if (poolLower) {
+      const notePool = String(raw.poolAddress || "").toLowerCase();
+      // Backward compatibility: older saved notes may not have poolAddress.
+      // Reject only explicit mismatches; allow empty pool tags.
+      if (notePool && notePool !== poolLower) return;
+    }
+    out.push({ vaultIdx, note: raw });
   });
-  return out;
+  return out.sort((a, b) => {
+    try {
+      const av = BigInt(String(a?.note?.amount || "0"));
+      const bv = BigInt(String(b?.note?.amount || "0"));
+      if (av === bv) return 0;
+      return av > bv ? -1 : 1;
+    } catch {
+      return 0;
+    }
+  });
+}
+
+async function fetchMerkleForNote(base, note, relayerConfig) {
+  try {
+    return await fetchJson(`${base}/merkle/${encodeURIComponent(note.commitmentHex)}`);
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (/commitment not found after sync/i.test(msg)) {
+      const pool = String(relayerConfig?.addresses?.shieldedPool || "");
+      const poolHint = pool ? `${pool.slice(0, 10)}...` : "active pool";
+      throw new Error(
+        `Selected note is not available on the ${poolHint}. This note likely belongs to an older pool deployment. Re-unlock notes and use a note from this pool, or make a fresh deposit first.`
+      );
+    }
+    throw e;
+  }
 }
 
 function canonicalWbnb(chainId) {
@@ -361,7 +412,7 @@ function buildDefaultSwapData(intentForm, chainId, relayerConfig) {
       tokenOut,
       amountIn: amountInWei,
       minAmountOut: minOut,
-      fee: 2500,
+      fee: 0,
       sqrtPriceLimitX96: 0,
       path: "0x",
     },
@@ -376,7 +427,9 @@ function getExplorerTxBase(chainId) {
 }
 
 export default function ProtocolUserDapp({ uiVariant = "default" }) {
-  const [apiBase, setApiBase] = useState(() => localStorage.getItem("phantom_api") || API_URLS.join(", "));
+  const [apiBase, setApiBase] = useState(() =>
+    sanitizeRelayerBaseRaw(localStorage.getItem("phantom_api") || "", API_URLS.join(", "))
+  );
   const base = useMemo(() => (apiBase || "").replace(/\/$/, "").trim(), [apiBase]);
   const [cfg, setCfg] = useState(null);
   const [health, setHealth] = useState(null);
@@ -476,7 +529,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     if (!eligible.length) return spendable[0];
     const enough = eligible
       .filter((row) => desired <= 0n || row.maxSwap >= desired)
-      .sort((a, b) => (a.noteWei < b.noteWei ? -1 : 1));
+      .sort((a, b) => (a.noteWei > b.noteWei ? -1 : 1));
     if (enough.length) return enough[0].entry;
     const largest = eligible.sort((a, b) => (a.maxSwap > b.maxSwap ? -1 : 1))[0];
     return largest?.entry || spendable[0];
@@ -555,8 +608,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [localOrders, setLocalOrders] = useState([]);
 
   useEffect(() => {
-    localStorage.setItem("phantom_api", apiBase);
-    setRuntimeRelayerBases(apiBase);
+    const sanitized = sanitizeRelayerBaseRaw(apiBase, API_URLS.join(", "));
+    if (sanitized !== apiBase) {
+      setApiBase(sanitized);
+      return;
+    }
+    localStorage.setItem("phantom_api", sanitized);
+    setRuntimeRelayerBases(sanitized);
   }, [apiBase]);
 
   useEffect(() => {
@@ -1044,6 +1102,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         ownerPublicKey: ownerPk,
         commitmentDecimal: c.toString(),
         commitmentHex: depositForm.commitment,
+        poolAddress: cfg?.addresses?.shieldedPool || "",
       };
       const deadline = Math.floor(Date.now() / 1000) + Number(depositForm.deadlineSec || 900);
       const domain = {
@@ -1086,6 +1145,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               body: JSON.stringify({
                 shadowAddress: shadow.shadowAddress,
                 commitment: depositForm.commitment,
+                deposit: { ...message, signature },
               }),
             });
             sweepErr = null;
@@ -1257,7 +1317,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         }
         const note = entry.note;
         swapInputVaultNote = note;
-        let outAmtStr = String(swapLastQuote?.amountOut || "0");
+        let activeQuote = swapLastQuote || null;
+        let outAmtStr = String(activeQuote?.amountOut || "0");
         if (!outAmtStr || BigInt(outAmtStr) <= 0n) {
           throw new Error("Refresh the quote so expected output amount is available before proving.");
         }
@@ -1293,7 +1354,33 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (changeWei <= 0n) {
           throw new Error("Could not leave a positive change note — refresh the quote and try again.");
         }
-        const merkle = await fetchJson(`${base}/merkle/${encodeURIComponent(note.commitmentHex)}`);
+        // Reduced pool enforces strict output equality (SP:out). Refresh quote immediately
+        // before proof generation so public output tracks the latest adaptor output.
+        try {
+          const freshQuote = await fetchJson(`${base}/quote`, {
+            method: "POST",
+            body: JSON.stringify({
+              tokenIn: String(intentForm.inputToken || ethers.ZeroAddress),
+              tokenOut: String(intentForm.outputToken || ethers.ZeroAddress),
+              amountIn: ethers.formatUnits(swapAmountBn, 18),
+              tokenInDecimals: 18,
+              tokenOutDecimals: 18,
+              slippageBps: Number(swapSlippageBps || DEFAULT_SWAP_SLIPPAGE_BPS),
+              chainSlug: Number(cfg.chainId) === 97 ? "bscTestnet" : "bsc",
+            }),
+          });
+          const freshOut = BigInt(String(freshQuote?.amountOut || "0"));
+          const freshMin = BigInt(String(freshQuote?.minAmountOut || "0"));
+          if (freshOut > 0n && freshMin > 0n) {
+            activeQuote = freshQuote;
+            outAmtStr = freshOut.toString();
+            minOutBI = freshMin;
+            setSwapLastQuote(freshQuote);
+          }
+        } catch (freshQuoteErr) {
+          console.warn("[swap] fresh pre-proof quote failed, using last quote:", freshQuoteErr);
+        }
+        const merkle = await fetchMerkleForNote(base, note, cfg);
         const wbnb = canonicalWbnb(cfg.chainId);
         const tokenIn =
           String(intentForm.inputToken).toLowerCase() === ethers.ZeroAddress.toLowerCase()
@@ -1364,9 +1451,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             tokenOut,
             amountIn: swapAmountBn.toString(),
             minAmountOut: minOutBI.toString(),
-            fee: Number(swapLastQuote?.routeParams?.feeTier || 2500),
-            sqrtPriceLimitX96: String(swapLastQuote?.routeParams?.sqrtPriceLimitX96 || 0),
-            path: swapLastQuote?.routeParams?.path || "0x",
+              fee: Number(activeQuote?.routeParams?.feeTier || 0),
+              sqrtPriceLimitX96: String(activeQuote?.routeParams?.sqrtPriceLimitX96 || 0),
+              path: activeQuote?.routeParams?.path || "0x",
           },
           noteHints: {
             swap: {
@@ -1542,7 +1629,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (changeWei <= 0n) {
           throw new Error("After withdraw + protocol fee + gas refund, change must stay positive in the pool (see ShieldedPool conservation).");
         }
-        const merkle = await fetchJson(`${base}/merkle/${encodeURIComponent(note.commitmentHex)}`);
+        const merkle = await fetchMerkleForNote(base, note, cfg);
         const proofBody = {
           inputNote: {
             assetID: note.assetID,
