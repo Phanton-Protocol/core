@@ -115,6 +115,15 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     /// @notice Batch execution protection - prevents sandwich attacks
     uint256 public constant MAX_BATCH_SIZE = 10; // Maximum swaps per batch
     mapping(bytes32 => uint256) public batchExecutionTime; // batch hash => execution timestamp
+    bytes32 public constant RELAYER_ATTESTATION_TYPEHASH = keccak256(
+        "RelayerSwapAttestation(bytes32 proofHash,bytes32 nullifier,uint256 inputAssetID,uint256 outputAssetIDSwap,uint256 swapAmount,uint256 minOutputAmountSwap,address relayer,address pool,uint256 chainId,uint256 deadline,uint256 nonce)"
+    );
+    bytes32 public constant RELAYER_ATTESTATION_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 public constant RELAYER_ATTESTATION_NAME_HASH = keccak256("PhantomRelayerAttestation");
+    bytes32 public constant RELAYER_ATTESTATION_VERSION_HASH = keccak256("1");
+    mapping(address => mapping(uint256 => bool)) public relayerAttestationNonceUsed;
     
     // ============ Compliance Module ============
     /// @notice Compliance module for Chainalysis checks
@@ -187,6 +196,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     event PortfolioStateReset(address indexed user, bytes32 oldCommitment, uint256 oldNonce);
     event NullifierMarked(bytes32 indexed nullifier);
     event GasRefunded(address indexed relayer, uint256 amount);
+    event RelayerAttestationVerified(address indexed relayer, uint256 indexed nonce, bytes32 digest);
     event RelayerBlacklisted(address indexed relayer);
     event RelayerUnblacklisted(address indexed relayer);
 
@@ -552,6 +562,8 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
 
         // Verify change amount is non-zero (must have change for join-split)
         if (inputs.changeAmount == 0) revert PoolErr(19);
+        address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
+        _verifyRelayerSwapAttestation(swapData, inputs, relayer);
 
         // ============ STEP 5: FEE CALCULATION ============
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
@@ -614,8 +626,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         nullifiers[inputs.nullifier] = true;
 
         // ============ STEP 10: RELAYER REFUND ============
-        address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
-        
         // Send protocol fee to staking distributor
         if (totalProtocolFee > 0) {
             if (inputToken == address(0)) {
@@ -662,6 +672,64 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             // Transaction logging handled off-chain to reduce stack depth
             // _logTransaction(relayer, 1, inputs.outputCommitmentSwap, false);
         }
+    }
+
+    function _verifyRelayerSwapAttestation(
+        JoinSplitSwapData calldata swapData,
+        JoinSplitPublicInputs memory inputs,
+        address relayer
+    ) internal {
+        if (swapData.relayerAttestationSig.length == 0) revert PoolErr(48);
+        if (swapData.relayerAttestationDeadline < block.timestamp) revert PoolErr(49);
+        if (relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce]) revert PoolErr(50);
+
+        bytes32 proofHash = keccak256(abi.encode(swapData.proof.a, swapData.proof.b, swapData.proof.c));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                RELAYER_ATTESTATION_TYPEHASH,
+                proofHash,
+                inputs.nullifier,
+                inputs.inputAssetID,
+                inputs.outputAssetIDSwap,
+                inputs.swapAmount,
+                inputs.minOutputAmountSwap,
+                relayer,
+                address(this),
+                block.chainid,
+                swapData.relayerAttestationDeadline,
+                swapData.relayerAttestationNonce
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                RELAYER_ATTESTATION_DOMAIN_TYPEHASH,
+                RELAYER_ATTESTATION_NAME_HASH,
+                RELAYER_ATTESTATION_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        address recovered = _recoverAttestationSigner(digest, swapData.relayerAttestationSig);
+        if (recovered != msg.sender || recovered != relayer) revert PoolErr(51);
+
+        relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce] = true;
+        emit RelayerAttestationVerified(relayer, swapData.relayerAttestationNonce, digest);
+    }
+
+    function _recoverAttestationSigner(bytes32 digest, bytes memory signature) internal pure returns (address) {
+        if (signature.length != 65) return address(0);
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) return address(0);
+        return ecrecover(digest, v, r, s);
     }
 
     /**

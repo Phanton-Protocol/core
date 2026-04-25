@@ -49,33 +49,55 @@ async function getJoinSplitTotalProtocolFeeWei(inputAssetID, inputAmountWei) {
 }
 
 /**
- * Repo layout: `phantom-relayer-dashboard/backend/src` → `core/` is three levels up.
- * `joinsplit_public9` Groth16 (9 public outputs) proves MiMC7 note commitments + nullifier, depth-10 Merkle
- * inclusion (same rule as `MerkleTree.sol`), two output commitments, 120-bit conservation
- * `inputAmount = swapAmount + changeAmount + protocolFee + gasRefund`, and slippage
- * `outputAmountSwap >= minOutputAmountSwap` when the swap leg is active (`withdrawMode = 0`).
- * See `Phantom-Smart-Contracts/circuits/joinsplit_public9/joinsplit_public9.circom`.
+ * Repo layout: `phantom-relayer-dashboard/backend/src` in local dev, but serverless
+ * bundling can place `src` at `/var/task/src`. Resolve circuit roots defensively.
  */
+function firstExistingPath(candidates) {
+  for (const p of candidates) {
+    if (!p) continue;
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      /* ignore */
+    }
+  }
+  return candidates.find(Boolean) || "";
+}
+
+const BACKEND_ROOT = path.join(__dirname, "..");
+const DASHBOARD_ROOT = path.join(__dirname, "..", "..");
 const CORE_ROOT = process.env.PHANTOM_CORE_ROOT || path.join(__dirname, "..", "..", "..");
-const PUBLIC9_WASM = path.join(
-  CORE_ROOT,
-  "Phantom-Smart-Contracts",
-  "circuits",
-  "joinsplit_public9",
-  "build",
-  "joinsplit_public9_js",
-  "joinsplit_public9.wasm"
-);
-const PUBLIC9_ZKEY = path.join(CORE_ROOT, "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "circuit_final.zkey");
-const LEGACY_WASM = path.join(__dirname, "..", "..", "circuits", "joinsplit_js", "joinsplit.wasm");
-const LEGACY_ZKEY = path.join(__dirname, "..", "..", "circuits", "joinsplit_0001.zkey");
-const PORTFOLIO_WASM = process.env.PORTFOLIO_WASM || path.join(__dirname, "..", "..", "circuits", "portfolio_note_js", "portfolio_note.wasm");
-const PORTFOLIO_ZKEY = process.env.PORTFOLIO_ZKEY || path.join(__dirname, "..", "..", "circuits", "portfolio_note_0001.zkey");
+
+const PUBLIC9_WASM = firstExistingPath([
+  path.join(CORE_ROOT, "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "build", "joinsplit_public9_js", "joinsplit_public9.wasm"),
+]);
+const PUBLIC9_ZKEY = firstExistingPath([
+  path.join(CORE_ROOT, "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "circuit_final.zkey"),
+]);
+const LEGACY_WASM = firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "joinsplit_js", "joinsplit.wasm"),
+  path.join(DASHBOARD_ROOT, "circuits", "joinsplit_js", "joinsplit.wasm"),
+]);
+const LEGACY_ZKEY = firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "joinsplit_0001.zkey"),
+  path.join(DASHBOARD_ROOT, "circuits", "joinsplit_0001.zkey"),
+]);
+const PORTFOLIO_WASM = process.env.PORTFOLIO_WASM || firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "portfolio_note_js", "portfolio_note.wasm"),
+  path.join(DASHBOARD_ROOT, "circuits", "portfolio_note_js", "portfolio_note.wasm"),
+]);
+const PORTFOLIO_ZKEY = process.env.PORTFOLIO_ZKEY || firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "portfolio_note_0001.zkey"),
+  path.join(DASHBOARD_ROOT, "circuits", "portfolio_note_0001.zkey"),
+]);
 
 function getRapidsnarkPath() {
   return process.env.RAPIDSNARK_PATH;
 }
-const CIRCUITS_DIR = path.join(__dirname, "..", "..", "circuits");
+const CIRCUITS_DIR = firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits"),
+  path.join(DASHBOARD_ROOT, "circuits"),
+]);
 
 const DEV_BYPASS_PROOFS = process.env.DEV_BYPASS_PROOFS === "true";
 

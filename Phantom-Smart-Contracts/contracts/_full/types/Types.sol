@@ -154,6 +154,9 @@ struct JoinSplitSwapData {
     bytes32 commitment;               // Commit-reveal commitment hash (for MEV protection)
     uint256 deadline;                 // Transaction deadline timestamp (frontrunning protection)
     uint256 nonce;                    // User nonce (reordering protection)
+    bytes relayerAttestationSig;      // EIP-712 signature by relayer over swap proof payload
+    uint256 relayerAttestationDeadline; // Relayer attestation expiry timestamp
+    uint256 relayerAttestationNonce;  // Relayer attestation replay-protection nonce
 }
 
 /**

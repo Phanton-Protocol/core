@@ -166,12 +166,23 @@ function requireModule4SubmitAuth(req, res, next) {
 }
 
 const RELAYER_ENC_PRIVATE_KEY_PEM = process.env.RELAYER_ENC_PRIVATE_KEY_PEM || "";
+const RELAYER_ENC_PRIVATE_KEY_PEM_B64 = process.env.RELAYER_ENC_PRIVATE_KEY_PEM_B64 || "";
 let relayerEncPublicKeyPem = "";
 let relayerEncPrivateKeyPem = "";
 let relayerEncKeyId = "";
 {
+  let resolvedPem = "";
   if (RELAYER_ENC_PRIVATE_KEY_PEM.trim()) {
-    relayerEncPrivateKeyPem = RELAYER_ENC_PRIVATE_KEY_PEM;
+    resolvedPem = RELAYER_ENC_PRIVATE_KEY_PEM;
+  } else if (RELAYER_ENC_PRIVATE_KEY_PEM_B64.trim()) {
+    try {
+      resolvedPem = Buffer.from(RELAYER_ENC_PRIVATE_KEY_PEM_B64.trim(), "base64").toString("utf8");
+    } catch {
+      resolvedPem = "";
+    }
+  }
+  if (resolvedPem.trim()) {
+    relayerEncPrivateKeyPem = resolvedPem;
     relayerEncPublicKeyPem = crypto.createPublicKey(relayerEncPrivateKeyPem).export({ type: "spki", format: "pem" });
   } else {
     const generated = crypto.generateKeyPairSync("rsa", {
@@ -2527,10 +2538,21 @@ async function processSwapRequestBody(body) {
       throw err;
     }
     const cached = intents.get(intentId) || getIntent(db, intentId)?.payload;
-    if (!cached) {
-      const err = new Error("Unknown intentId");
-      err.status = 404;
-      throw err;
+    // Serverless instances do not share in-memory/disk state across invocations.
+    // If /intent and /swap/encrypted land on different instances, cached intent may be missing.
+    // In that case, continue with signature-bound payload validation below.
+    if (cached) {
+      try {
+        const sameNullifier = String(cached.nullifier || "").toLowerCase() === String(intent.nullifier || "").toLowerCase();
+        const sameNonce = String(cached.nonce || "") === String(intent.nonce || "");
+        if (!sameNullifier || !sameNonce) {
+          const err = new Error("intent payload mismatch for provided intentId");
+          err.status = 400;
+          throw err;
+        }
+      } catch (e) {
+        if (e?.status) throw e;
+      }
     }
 
     const typedIntent = {
@@ -3807,7 +3829,7 @@ async function submitSwap(swapData) {
   const signer = new ethers.Wallet(RELAYER_PRIVATE_KEY, provider);
   const abi = [
     "function commitSwap(bytes32 commitmentHash, uint256 deadline) external",
-    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256)) external"
+    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256)) external"
   ];
   const contract = new ethers.Contract(SHIELDED_POOL_ADDRESS, abi, signer);
 
@@ -3856,6 +3878,58 @@ async function submitSwap(swapData) {
     swapData.swapParams?.path || "0x"
   ];
   const relayerAddr = (swapData.relayer && swapData.relayer !== ethers.ZeroAddress) ? swapData.relayer : signer.address;
+  const attestationDeadline = Number(
+    swapData.relayerAttestationDeadline ||
+    swapData.deadline ||
+    (Math.floor(Date.now() / 1000) + 900)
+  );
+  const attestationNonce = toU256(
+    swapData.relayerAttestationNonce ||
+    `${Date.now()}${Math.floor(Math.random() * 1000000)}`
+  );
+  const proofHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(["bytes", "bytes", "bytes"], proofTuple)
+  );
+  const attestationChainId = Number(CHAIN_ID || 97);
+  const attestationDomain = {
+    name: "PhantomRelayerAttestation",
+    version: "1",
+    chainId: attestationChainId,
+    verifyingContract: SHIELDED_POOL_ADDRESS,
+  };
+  const attestationTypes = {
+    RelayerSwapAttestation: [
+      { name: "proofHash", type: "bytes32" },
+      { name: "nullifier", type: "bytes32" },
+      { name: "inputAssetID", type: "uint256" },
+      { name: "outputAssetIDSwap", type: "uint256" },
+      { name: "swapAmount", type: "uint256" },
+      { name: "minOutputAmountSwap", type: "uint256" },
+      { name: "relayer", type: "address" },
+      { name: "pool", type: "address" },
+      { name: "chainId", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+    ],
+  };
+  const attestationValue = {
+    proofHash,
+    nullifier: toBytes32(pi.nullifier),
+    inputAssetID: toU256(pi.inputAssetID),
+    outputAssetIDSwap: toU256(pi.outputAssetIDSwap),
+    swapAmount: toU256(pi.swapAmount),
+    minOutputAmountSwap: toU256(pi.minOutputAmountSwap),
+    relayer: relayerAddr,
+    pool: SHIELDED_POOL_ADDRESS,
+    chainId: BigInt(attestationChainId),
+    deadline: BigInt(attestationDeadline),
+    nonce: attestationNonce,
+  };
+  const relayerAttestationSig = await signer.signTypedData(
+    attestationDomain,
+    attestationTypes,
+    attestationValue
+  );
   const swapDataForContract = [
     proofTuple,
     publicInputsTuple,
@@ -3864,7 +3938,10 @@ async function submitSwap(swapData) {
     swapData.encryptedPayload || "0x",
     (swapData.commitment && swapData.commitment !== ethers.ZeroHash) ? swapData.commitment : ethers.ZeroHash,
     Number(swapData.deadline || 0),
-    toU256(swapData.nonce || 0)
+    toU256(swapData.nonce || 0),
+    relayerAttestationSig,
+    BigInt(attestationDeadline),
+    attestationNonce
   ];
 
   if (DEV_BYPASS_VALIDATORS) {

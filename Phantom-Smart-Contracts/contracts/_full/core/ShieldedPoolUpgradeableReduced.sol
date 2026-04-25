@@ -450,6 +450,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData) external override nonReentrant {
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
+        address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
 
         require(!nullifiers[inputs.nullifier], "SP: nullifier already used");
         _requireSpendableMerkleRoot(inputs.merkleRoot);
@@ -520,7 +521,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
         nullifiers[inputs.nullifier] = true;
 
-        address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputToken == address(0)) {
             gasReserve -= inputs.gasRefund;
             payable(relayer).transfer(inputs.gasRefund);
@@ -545,6 +545,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         emit CommitmentAdded(inputs.outputCommitmentSwap, swapIndex);
         emit CommitmentAdded(inputs.outputCommitmentChange, changeIndex);
     }
+
 
     // ============ Withdraw Functions ============
     function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant {
