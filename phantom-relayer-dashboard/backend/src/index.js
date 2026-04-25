@@ -910,6 +910,26 @@ async function readPoolDepositFeeUsdE8() {
   }
 }
 
+/** On-chain pool `DEPOSIT_FEE_USD` is $2 at 1e8 USD scale (see ShieldedPoolUpgradeableReduced). */
+const ONCHAIN_MIN_DEPOSIT_FEE_USD_E8 = 2n * 10n ** 8n;
+
+async function readFeeOracleAddressFromPool() {
+  if (!RPC_URL || !SHIELDED_POOL_ADDRESS) return null;
+  try {
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const pool = new ethers.Contract(
+      SHIELDED_POOL_ADDRESS,
+      ["function feeOracle() view returns (address)"],
+      provider
+    );
+    const addr = await pool.feeOracle();
+    if (!addr || addr === ethers.ZeroAddress) return null;
+    return addr;
+  } catch {
+    return null;
+  }
+}
+
 const WBNB_BSC_MAINNET = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
 const WBNB_BSC_TESTNET = "0xae13d989dac2f0debff460ac112a837c89baa7cd";
 const PANCAKE_V2_ROUTER_BSC = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
@@ -1057,15 +1077,69 @@ async function getDepositFeeBNBWei() {
   }
   const wbnb = CHAIN_ID === 56 ? WBNB_BSC_MAINNET : WBNB_BSC_TESTNET;
   const chainSlug = CHAIN_ID === 56 ? "bsc" : "bsc-testnet";
+  // Small cushion over the DEX-implied wei, then verify against the *same* on-chain FeeOracle the pool uses.
+  const safetyBps = Math.max(10000, toBps(process.env.PHANTOM_DEPOSIT_FEE_SAFETY_BPS, 10500));
+  const minWeiFloor = toBig(process.env.PHANTOM_DEPOSIT_FEE_MIN_WEI, 2500000000000000n); // 0.0025 BNB default floor
+  const maxWeiCap = toBig(process.env.PHANTOM_DEPOSIT_FEE_MAX_WEI, CHAIN_ID === 97 ? 5n * 10n ** 17n : 3n * 10n ** 17n); // 0.5 / 0.3 BNB cap
+
+  const bumpSafety = (wei) => {
+    const adjusted = (wei * BigInt(safetyBps) + 9999n) / 10000n;
+    return adjusted < minWeiFloor ? minWeiFloor : adjusted;
+  };
+
+  let guess;
   try {
     const price = await getDexPriceUsd(wbnb, chainSlug);
     if (!price || price === 0n) throw new Error("No BNB price");
-    return (effectiveUsd * 10n ** 18n) / price;
-  } catch (e) {
-    const fallback = CHAIN_ID === 97 ? 3333333333333333n : 3333333333333333n;
-
-    return fallback;
+    guess = (effectiveUsd * 10n ** 18n + (price - 1n)) / price;
+  } catch {
+    guess = CHAIN_ID === 97 ? 3333333333333333n : 3333333333333333n;
   }
+  guess = bumpSafety(guess);
+
+  const foAddr = await readFeeOracleAddressFromPool();
+  if (!foAddr || !RPC_URL) return guess;
+
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const fo = new ethers.Contract(
+    foAddr,
+    ["function getUSDValue(address token,uint256 amount) view returns (uint256)"],
+    provider
+  );
+
+  let wei = guess;
+  for (let i = 0; i < 24; i++) {
+    let usd = 0n;
+    try {
+      usd = BigInt((await fo.getUSDValue(ethers.ZeroAddress, wei)).toString());
+    } catch (e) {
+      const msg = e?.shortMessage || e?.message || String(e);
+      if (i === 0) {
+        console.warn(
+          `[deposit fee] FeeOracle.getUSDValue(native) failed (misconfigured/stale offchain oracle or missing BNB/USD feed): ${msg}. ` +
+            "Fix on-chain FeeOracle (see Phantom-Smart-Contracts/scripts/deploy/fix-feeoracle-bnb-usd-bsc-testnet.ts)."
+        );
+      }
+      usd = 0n;
+    }
+    if (usd >= ONCHAIN_MIN_DEPOSIT_FEE_USD_E8) return wei;
+    if (usd === 0n) {
+      wei = bumpSafety((wei * 3n) / 2n + 1n);
+    } else {
+      // ceil to target USD using linear scaling
+      wei = bumpSafety((ONCHAIN_MIN_DEPOSIT_FEE_USD_E8 * wei + usd - 1n) / usd);
+    }
+    if (wei > maxWeiCap) {
+      throw new Error(
+        `deposit_fee_oracle_unsatisfiable: FeeOracle still prices attached BNB below $2 at feeWei=${wei.toString()} ` +
+          `(cap=${maxWeiCap.toString()}). Fix FeeOracle (disable stale offchain oracle + set BNB/USD feed on testnet).`
+      );
+    }
+  }
+  throw new Error(
+    "deposit_fee_oracle_unsatisfiable: could not find feeWei that satisfies on-chain $2 check. " +
+      "Run scripts/deploy/fix-feeoracle-bnb-usd-bsc-testnet.ts with the FeeOracle owner key."
+  );
 }
 
 const quoteSchema = z.object({
