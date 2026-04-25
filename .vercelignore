@@ -10,6 +10,11 @@ docs
 fhe-node
 frontend
 phantom-relayer-dashboard
+!phantom-relayer-dashboard/
+!phantom-relayer-dashboard/vercel.json
+!phantom-relayer-dashboard/backend/
+!phantom-relayer-dashboard/backend/**
+!phantom-relayer-dashboard/backend/vercel.json
 relayer-dashboard
 !scripts/
 !scripts/generate-seo-html-entries.mjs
