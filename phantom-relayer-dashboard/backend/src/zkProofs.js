@@ -69,9 +69,13 @@ const DASHBOARD_ROOT = path.join(__dirname, "..", "..");
 const CORE_ROOT = process.env.PHANTOM_CORE_ROOT || path.join(__dirname, "..", "..", "..");
 
 const PUBLIC9_WASM = firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "joinsplit_public9_js", "joinsplit_public9.wasm"),
+  path.join(DASHBOARD_ROOT, "circuits", "joinsplit_public9_js", "joinsplit_public9.wasm"),
   path.join(CORE_ROOT, "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "build", "joinsplit_public9_js", "joinsplit_public9.wasm"),
 ]);
 const PUBLIC9_ZKEY = firstExistingPath([
+  path.join(BACKEND_ROOT, "circuits", "joinsplit_public9_final.zkey"),
+  path.join(DASHBOARD_ROOT, "circuits", "joinsplit_public9_final.zkey"),
   path.join(CORE_ROOT, "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "circuit_final.zkey"),
 ]);
 const LEGACY_WASM = firstExistingPath([
