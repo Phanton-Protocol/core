@@ -7,6 +7,24 @@ function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function resolveWritableEnterpriseDir(preferredDir) {
+  const candidates = [];
+  if (preferredDir) candidates.push(preferredDir);
+  candidates.push("/tmp/enterprise");
+  for (const dir of candidates) {
+    try {
+      ensureDir(dir);
+      const probe = path.join(dir, ".write-probe");
+      fs.writeFileSync(probe, "ok", "utf8");
+      fs.unlinkSync(probe);
+      return dir;
+    } catch (_) {
+      // Try the next candidate directory.
+    }
+  }
+  throw new Error("No writable enterprise data directory available");
+}
+
 function readJson(filePath, fallback) {
   try {
     if (!fs.existsSync(filePath)) return fallback;
@@ -76,7 +94,8 @@ function verifyMessageSignature(wallet, message, signature) {
 
 function createEnterpriseRouter() {
   const router = express.Router();
-  const dataDir = process.env.ENTERPRISE_DATA_DIR || path.join(__dirname, "..", "data", "enterprise");
+  const requestedDir = process.env.ENTERPRISE_DATA_DIR || path.join(__dirname, "..", "data", "enterprise");
+  const dataDir = resolveWritableEnterpriseDir(requestedDir);
   const store = createStore(dataDir);
   const enterpriseApiKey = String(process.env.ENTERPRISE_API_KEY || "").trim();
 
