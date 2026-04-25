@@ -30,7 +30,7 @@ import PitchDeckPage from './components/PitchDeckPage';
 import BankingSystemPage from './components/BankingSystemPage';
 import { blogPosts } from './data/blogPosts';
 import logoUrl from './assets/logo-pro.svg';
-import { SOCIAL_LINKS, RUNBOOK_URL } from './config';
+import { API_URL, SOCIAL_LINKS, RUNBOOK_URL } from './config';
 import { HOME_SCROLL_SECTION_IDS } from './seo/homeScrollSections';
 import GhostChainVisualizer from './components/GhostChainVisualizer';
 import DataInterceptionBackground from './components/DataInterceptionBackground';
@@ -98,7 +98,7 @@ function TradePage() {
 }
 
 function RelayerStakerPage() {
-  const [apiBase, setApiBase] = useState(() => localStorage.getItem('phantom_api') || 'https://relayers-backend.onrender.com');
+  const [apiBase, setApiBase] = useState(() => localStorage.getItem('phantom_api') || API_URL);
   const [health, setHealth] = useState(null);
   const [stakingStats, setStakingStats] = useState(null);
   const [relayerStatus, setRelayerStatus] = useState(null);

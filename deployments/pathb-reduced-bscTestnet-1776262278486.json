@@ -5,14 +5,14 @@
   "deployedAt": "2026-04-15T14:11:18.486Z",
   "note": "Path-B reduced stack: new SHDW + RelayerStaking + pool + walletB stake",
   "contracts": {
-    "protocolToken": "0xbd29Ad0AAe0Bc028499912D75C8d07dDf89E7845",
-    "relayerStaking": "0x05e3C4723ae6c842a0EF54f9954386E4923B865f",
-    "joinSplitVerifier": "0xD4dF033D726d840902EcaaDFE99Fe71D84633a77",
-    "portfolioVerifier": "0xD4dF033D726d840902EcaaDFE99Fe71D84633a77",
-    "thresholdVerifier": "0xD4dF033D726d840902EcaaDFE99Fe71D84633a77",
-    "swapAdaptor": "0x2eb59FD64bEd076Bea03C8DfD133DEB70bC8D0ed",
-    "groth16Verifier": "0x05C4600f7F5281686aCc89a85b6A7d08f2A78E2D",
-    "feeOracle": "0xCAB096F64A9dD4d506DE2dcF93b8EbB1A90a465B",
-    "shieldedPool": "0xfEDA81bB28e912b1cc695F7038e58749ED19e568"
+    "protocolToken": "0x46E3f887C17495A806068CB33C261c3EB45FA97f",
+    "relayerStaking": "0x15701431276D3e90d68ABd559B0a01b65aB10343",
+    "joinSplitVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
+    "portfolioVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
+    "thresholdVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
+    "swapAdaptor": "0x88521d26561d26E7A91c427bA37Bebe8e1ec4556",
+    "groth16Verifier": "0x69B1B9A4B792366579989AF04Be66F297761D5a7",
+    "feeOracle": "0x633D5Edd746B07F8dBBAc95b1F5E36C8a8cb48D2",
+    "shieldedPool": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2"
   }
 }

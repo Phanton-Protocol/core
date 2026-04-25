@@ -1,7 +1,7 @@
 {
   "network": "https://data-seed-prebsc-1-s1.binance.org:8545",
   "chainId": "97",
-  "shieldedPoolAddress": "0x5a65A7155660107FA82c139B62a6Ccb11fe4aDD7",
+  "shieldedPoolAddress": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2",
   "matchingHandlerAddress": "0xB10dFF54Bc6C375026c701747AfbF465B4B86dDe",
   "fheCoprocessorAddress": "0x5E93F479b70033405ECC686DbAC7adc7cc87EA56",
   "deployer": "0x3428bF0bF95D13A2907c816b1EC49C1f9E94Cf40",
