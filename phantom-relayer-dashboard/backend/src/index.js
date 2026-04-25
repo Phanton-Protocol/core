@@ -792,12 +792,14 @@ async function sweepShadowDeposit(shadowAddress, deposit) {
     const approveTx = await token.approve(SHIELDED_POOL_ADDRESS, deposit.amount);
     await approveTx.wait();
   }
+  const feeWei = await getDepositFeeBNBWei();
   const tx = await pool.depositFor(
     poolDepositor,
     deposit.token,
     deposit.amount,
     deposit.commitment,
-    deposit.assetID
+    deposit.assetID,
+    { value: feeWei }
   );
   const receipt = await tx.wait();
   storeCommitmentsFromReceipt(receipt);
@@ -3883,12 +3885,49 @@ async function precheckSwapOutDeterminism(swapData) {
   }
 }
 
+async function precheckSwapNullifierUnused(swapData) {
+  if (!RPC_URL || !SHIELDED_POOL_ADDRESS) return;
+  const pi = swapData?.publicInputs || {};
+  const nullifier = pi?.nullifier;
+  if (!nullifier) return;
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const pool = new ethers.Contract(
+    SHIELDED_POOL_ADDRESS,
+    ["function isNullifierUsed(bytes32 nullifier) view returns (bool used)"],
+    provider
+  );
+  const nullifierBytes32 = (() => {
+    const s = String(nullifier);
+    if (/^0x[0-9a-fA-F]{64}$/.test(s)) return s;
+    return ethers.zeroPadValue(ethers.toBeHex(toBigInt(s)), 32);
+  })();
+  let used = false;
+  try {
+    used = Boolean(await pool.isNullifierUsed(nullifierBytes32));
+  } catch {
+    // Fallback for reduced/legacy pools where helper may be absent.
+    used = false;
+  }
+  if (used) {
+    const err = new Error("Swap note already spent on-chain (nullifier already used). Unlock notes and use a fresh note.");
+    err.code = "SWAP_NULLIFIER_ALREADY_USED";
+    err.status = 409;
+    err.details = {
+      reason: "SWAP_NULLIFIER_ALREADY_USED",
+      nullifier: String(nullifier),
+      note: "This note was already consumed by a confirmed transaction or another pending swap."
+    };
+    throw err;
+  }
+}
+
 async function submitSwap(swapData) {
   if (!RPC_URL || !RELAYER_PRIVATE_KEY || !SHIELDED_POOL_ADDRESS) {
     throw new Error("Relayer env not configured");
   }
 
   normalizeJoinSplitSwapParamsForChain(swapData);
+  await precheckSwapNullifierUnused(swapData);
   await precheckSwapOutDeterminism(swapData);
 
   console.log("\n🔐 Phase 2: Collecting validator signatures...");
@@ -4648,7 +4687,7 @@ async function submitDeposit(payload) {
     }
     return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
   } else {
-
+    const feeWei = await getDepositFeeBNBWei();
     const abi = [
       "function depositFor(address depositor,address token,uint256 amount,bytes32 commitment,uint256 assetID) external"
     ];
@@ -4658,7 +4697,8 @@ async function submitDeposit(payload) {
       payload.token,
       payload.amount,
       payload.commitment,
-      payload.assetID
+      payload.assetID,
+      { value: feeWei }
     );
     const receipt = await tx.wait();
     try {
