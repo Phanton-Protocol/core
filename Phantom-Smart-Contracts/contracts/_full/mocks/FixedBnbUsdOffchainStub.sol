@@ -5,12 +5,11 @@ import "../interfaces/IOffchainPriceOracle.sol";
 
 /**
  * @notice Minimal off-chain oracle stub for BSC testnet when the previous offchain feed is stale.
- * @dev `FeeOracle.getUSDValue` offchain branch computes:
- *      `(amount * price) / 10**(18 - 8)` = `(amount * price) / 1e10`.
- *      With `price = 600`, 0.00333 BNB (`3.33e15` wei) maps to ~`2e8` USD scale (pool `$2` floor).
+ * @dev Returns BNB/USD with 8 decimals, matching `IOffchainPriceOracle`.
+ *      Use a realistic value (e.g. $600 => 600 * 1e8) so `calculateFee` does not overcharge.
  */
 contract FixedBnbUsdOffchainStub is IOffchainPriceOracle {
-    uint256 public constant PRICE = 600;
+    uint256 public constant PRICE = 600 * 1e8;
 
     function getPrice(address) external view returns (uint256 price, uint256 updatedAt) {
         return (PRICE, block.timestamp);

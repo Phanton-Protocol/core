@@ -209,6 +209,11 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         withdrawHandler = _withdrawHandler;
     }
 
+    function setFeeOracle(address _feeOracle) external onlyOwner {
+        require(_feeOracle != address(0), "SP: zero oracle");
+        feeOracle = IFeeOracle(_feeOracle);
+    }
+
     /**
      * @notice Register asset for swap/withdraw (owner only).
      * @dev AssetID 0 is reserved for native BNB (`address(0)`).

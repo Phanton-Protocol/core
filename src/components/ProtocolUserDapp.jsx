@@ -50,7 +50,7 @@ function sanitizeRelayerBaseRaw(raw, fallbackRaw = API_URLS.join(", ")) {
 }
 
 /** Build a v1 vault note payload from swap hints + on-chain commitment (decimal string or bytes32 hex). */
-function buildVaultNoteFromSwapHint({ assetId, amountStr, blindingFactor, ownerPublicKey, commitmentStr }) {
+function buildVaultNoteFromSwapHint({ assetId, amountStr, blindingFactor, ownerPublicKey, commitmentStr, poolAddress = "" }) {
   const raw = String(commitmentStr || "").trim();
   if (!raw) throw new Error("Missing commitment for vault note");
   let cDec;
@@ -72,6 +72,7 @@ function buildVaultNoteFromSwapHint({ assetId, amountStr, blindingFactor, ownerP
     ownerPublicKey: String(ownerPublicKey),
     commitmentDecimal: cDec,
     commitmentHex,
+    poolAddress: String(poolAddress || ""),
   };
 }
 
@@ -244,7 +245,6 @@ const DEPOSIT_TYPES = {
 
 /** Must match `ethers.getAddress` / pool config (EIP-55). Wrong checksum breaks quotes in the relayer. */
 const USDT_BSC_TESTNET = "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13";
-
 const DEFAULT_TOKEN_LIST = [
   { symbol: "BNB", address: ethers.ZeroAddress },
   { symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
@@ -290,7 +290,8 @@ function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
     return [];
   }
   const notes = vaultData?.notes || [];
-  const out = [];
+  const taggedMatches = [];
+  const untaggedMatches = [];
   const poolLower = String(relayerConfig?.addresses?.shieldedPool || "").toLowerCase();
   notes.forEach((n, vaultIdx) => {
     const raw = n.payload ?? n;
@@ -298,13 +299,18 @@ function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
     if (!verOk || Number(raw.assetID) !== aid) return;
     if (poolLower) {
       const notePool = String(raw.poolAddress || "").toLowerCase();
-      // Backward compatibility: older saved notes may not have poolAddress.
-      // Reject only explicit mismatches; allow empty pool tags.
       if (notePool && notePool !== poolLower) return;
+      if (notePool === poolLower) {
+        taggedMatches.push({ vaultIdx, note: raw });
+        return;
+      }
+      untaggedMatches.push({ vaultIdx, note: raw });
+      return;
     }
-    out.push({ vaultIdx, note: raw });
+    taggedMatches.push({ vaultIdx, note: raw });
   });
-  return out.sort((a, b) => {
+  const selected = poolLower && taggedMatches.length > 0 ? taggedMatches : [...taggedMatches, ...untaggedMatches];
+  return selected.sort((a, b) => {
     try {
       const av = BigInt(String(a?.note?.amount || "0"));
       const bv = BigInt(String(b?.note?.amount || "0"));
@@ -1504,6 +1510,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         method: "POST",
         body: JSON.stringify({ envelope }),
       });
+      const withdrawTokenAfterSwap = String(intentForm.outputToken || ethers.ZeroAddress);
+      setWithdrawForm((prev) => ({ ...prev, token: withdrawTokenAfterSwap }));
+      setWithdrawTokenChoice(withdrawTokenAfterSwap);
       /** Persist new output notes locally so Withdraw/Swap can spend them (on-chain commitments already exist). */
       setSwapFlowStage("Finalizing vault notes...");
       try {
@@ -1517,6 +1526,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             blindingFactor: hints.swap.blindingFactor,
             ownerPublicKey: hints.swap.ownerPublicKey,
             commitmentStr: String(swapC),
+            poolAddress: cfg?.addresses?.shieldedPool || "",
           });
           const changeNotePayload = buildVaultNoteFromSwapHint({
             assetId: Number(hints.change.assetId),
@@ -1524,6 +1534,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             blindingFactor: hints.change.blindingFactor,
             ownerPublicKey: hints.change.ownerPublicKey,
             commitmentStr: String(changeC),
+            poolAddress: cfg?.addresses?.shieldedPool || "",
           });
 
           let merged = { key: vaultRef.current.key, data: vaultRef.current.data };

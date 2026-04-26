@@ -224,6 +224,7 @@ const PORT = process.env.PORT || 5050;
 const RPC_URL = process.env.RPC_URL;
 const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY;
 const SHIELDED_POOL_ADDRESS = process.env.SHIELDED_POOL_ADDRESS;
+process.env.SHIELDED_POOL_ADDRESS = SHIELDED_POOL_ADDRESS || process.env.SHIELDED_POOL_ADDRESS || "";
 const NOTE_STORAGE_ADDRESS = process.env.NOTE_STORAGE_ADDRESS;
 const OFFCHAIN_ORACLE_ADDRESS = process.env.OFFCHAIN_ORACLE_ADDRESS;
 const ORACLE_SIGNER_PRIVATE_KEY = process.env.ORACLE_SIGNER_PRIVATE_KEY;
@@ -1077,10 +1078,11 @@ async function getDepositFeeBNBWei() {
   }
   const wbnb = CHAIN_ID === 56 ? WBNB_BSC_MAINNET : WBNB_BSC_TESTNET;
   const chainSlug = CHAIN_ID === 56 ? "bsc" : "bsc-testnet";
-  // Small cushion over the DEX-implied wei, then verify against the *same* on-chain FeeOracle the pool uses.
   const safetyBps = Math.max(10000, toBps(process.env.PHANTOM_DEPOSIT_FEE_SAFETY_BPS, 10500));
-  const minWeiFloor = toBig(process.env.PHANTOM_DEPOSIT_FEE_MIN_WEI, 2500000000000000n); // 0.0025 BNB default floor
-  const maxWeiCap = toBig(process.env.PHANTOM_DEPOSIT_FEE_MAX_WEI, CHAIN_ID === 97 ? 5n * 10n ** 17n : 3n * 10n ** 17n); // 0.5 / 0.3 BNB cap
+  // Small cushion over the DEX-implied wei, then verify against the same on-chain FeeOracle the pool uses.
+  const safetyBps = Math.max(10000, toBps(process.env.PHANTOM_DEPOSIT_FEE_SAFETY_BPS, 10500));
+  const minWeiFloor = toBig(process.env.PHANTOM_DEPOSIT_FEE_MIN_WEI, 2500000000000000n);
+  const maxWeiCap = toBig(process.env.PHANTOM_DEPOSIT_FEE_MAX_WEI, CHAIN_ID === 97 ? 5n * 10n ** 17n : 3n * 10n ** 17n);
 
   const bumpSafety = (wei) => {
     const adjusted = (wei * BigInt(safetyBps) + 9999n) / 10000n;
@@ -1116,6 +1118,7 @@ async function getDepositFeeBNBWei() {
       const msg = e?.shortMessage || e?.message || String(e);
       if (i === 0) {
         console.warn(
+          `[deposit fee] FeeOracle.getUSDValue(native) failed (misconfigured/stale offchain oracle or missing BNB/USD feed): ${msg}. ` +
           `[deposit fee] FeeOracle.getUSDValue(native) failed (misconfigured/stale offchain oracle or missing BNB/USD feed): ${msg}. ` +
             "Fix on-chain FeeOracle (see Phantom-Smart-Contracts/scripts/deploy/fix-feeoracle-bnb-usd-bsc-testnet.ts)."
         );
@@ -2304,6 +2307,10 @@ app.get("/deposit/required-fee-bnb", async (req, res) => {
 });
 
 const ESTIMATED_SHIELDED_SWAP_GAS_UNITS = 900000n;
+const SWAP_GAS_REFUND_MAX_WEI = toBig(
+  process.env.PHANTOM_SWAP_GAS_REFUND_MAX_WEI,
+  CHAIN_ID === 97 ? 2n * 10n ** 15n : 8n * 10n ** 15n
+);
 
 async function attachQuoteExecutionHints(payload, slippageBps) {
   let suggestedGasRefundWei = "0";
@@ -2315,7 +2322,11 @@ async function attachQuoteExecutionHints(payload, slippageBps) {
       const gp = fd.gasPrice ?? fd.maxFeePerGas ?? 0n;
       if (gp && gp > 0n) {
         gasPriceWei = gp.toString();
-        suggestedGasRefundWei = (gp * ESTIMATED_SHIELDED_SWAP_GAS_UNITS).toString();
+        let suggested = gp * ESTIMATED_SHIELDED_SWAP_GAS_UNITS;
+        if (SWAP_GAS_REFUND_MAX_WEI > 0n && suggested > SWAP_GAS_REFUND_MAX_WEI) {
+          suggested = SWAP_GAS_REFUND_MAX_WEI;
+        }
+        suggestedGasRefundWei = suggested.toString();
       }
     }
   } catch (_) {}
