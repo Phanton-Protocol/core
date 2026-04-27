@@ -350,6 +350,15 @@ function formatTokenAmount(value, maxFrac = 6) {
   return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
 }
 
+function isWithdrawNullifierSpentError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    /withdraw_simulation_failed:\s*sp:nul/.test(msg) ||
+    /withdraw_nullifier_already_spent/.test(msg) ||
+    (/nullifier/.test(msg) && /(spent|already|used)/.test(msg))
+  );
+}
+
 function mergeSwapData(base, overlay) {
   if (!overlay || typeof overlay !== "object") return base;
   const out = { ...base, ...overlay };
@@ -1611,9 +1620,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         throw new Error(`Wallet is on chain ${activeChain}, but backend expects ${cfg.chainId}.`);
       }
 
-      let withdrawData;
       const customRaw = String(withdrawForm.withdrawDataJson || "").trim();
       if (customRaw) {
+        let withdrawData;
         let parsed;
         try {
           parsed = JSON.parse(customRaw);
@@ -1624,84 +1633,179 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (!withdrawData?.proof || !withdrawData?.publicInputs || (!withdrawData?.recipient && !withdrawData?.finalRecipient)) {
           throw new Error("Withdraw JSON must include proof, publicInputs, and recipient or finalRecipient.");
         }
+        const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
+        const envelope = await encryptForRelayer({ withdrawData }, keyInfo?.publicKeyPem);
+        const out = await fetchJson(`${base}/withdraw/encrypted`, {
+          method: "POST",
+          body: JSON.stringify({ envelope }),
+        });
+        setLastResult(out);
       } else {
-        const spend = spendableNoteEntries(vault.data, withdrawForm.token, cfg);
+        // Pull relayer-backed notes before withdraw so fresh swap outputs are available even after refresh/device change.
+        if (vaultRef.current?.unlocked && vaultRef.current?.key && wallet?.address) {
+          try {
+            const merged = await mergeRelayerBackedNotesIntoVault({
+              key: vaultRef.current.key,
+              data: vaultRef.current.data,
+              ownerAddress: wallet.address,
+            });
+            if (merged.imported > 0) {
+              setVault({ unlocked: true, key: merged.key, data: merged.data });
+              setActionSuccess(
+                `Imported ${merged.imported} note(s) from relayer backup before withdraw.`
+              );
+            }
+          } catch (mergeErr) {
+            console.warn("[withdraw] relayer note sync failed", mergeErr);
+          }
+        }
+
+        const spend = spendableNoteEntries(vaultRef.current?.data, withdrawForm.token, cfg);
         if (!spend.length) {
           throw new Error("No spendable note for this token. Unlock the vault, deposit first, or paste full withdraw JSON under Advanced.");
         }
-        const note = spend[0].note;
         const amt = String(withdrawForm.amount || "").trim();
         if (!amt) throw new Error("Enter withdraw amount (payout to recipient, same decimals as note).");
         const amountWei = ethers.parseUnits(amt, 18);
         const protocolFee = BigInt(String(withdrawForm.protocolFee || "0"));
         const gasRefund = BigInt(String(withdrawForm.gasRefund || "0"));
-        const inputWei = BigInt(note.amount);
-        const changeWei = inputWei - amountWei - protocolFee - gasRefund;
-        if (changeWei <= 0n) {
-          throw new Error("After withdraw + protocol fee + gas refund, change must stay positive in the pool (see ShieldedPool conservation).");
-        }
-        const merkle = await fetchMerkleForNote(base, note, cfg);
-        const proofBody = {
-          inputNote: {
-            assetID: note.assetID,
-            amount: note.amount,
-            blindingFactor: note.blindingFactor,
-            ownerPublicKey: note.ownerPublicKey,
-            nullifier: noteNullifier(note.commitmentDecimal, note.ownerPublicKey).toString(),
-            commitment: note.commitmentDecimal,
-          },
-          outputNoteChange: {
-            assetID: note.assetID,
-            amount: changeWei.toString(),
-            blindingFactor: randomFieldElementString(),
-            commitment: "0",
-          },
-          merkleRoot: merkle.merkleRoot,
-          merklePath: merkle.merklePath,
-          merklePathIndices: merkle.merklePathIndices,
-          protocolFee: protocolFee.toString(),
-          gasRefund: gasRefund.toString(),
-          withdrawAmount: amountWei.toString(),
+        const pruneSpentNote = async (spentHex) => {
+          const normalized = String(spentHex || "").toLowerCase();
+          if (!normalized || !vaultRef.current?.unlocked || !vaultRef.current?.key) return;
+          const currentNotes = Array.isArray(vaultRef.current?.data?.notes) ? vaultRef.current.data.notes : [];
+          const nextNotes = currentNotes.filter(
+            (entry) => String(entry?.payload?.commitmentHex || "").toLowerCase() !== normalized
+          );
+          if (nextNotes.length === currentNotes.length) return;
+          const nextData = { ...vaultRef.current.data, notes: nextNotes, updatedAt: new Date().toISOString() };
+          await saveVault({ key: vaultRef.current.key, data: nextData });
+          setVault({ unlocked: true, key: vaultRef.current.key, data: nextData });
         };
-        setWithdrawProofBusy(true);
-        let gen;
-        try {
-          gen = await fetchJson(`${base}/withdraw/generate-proof`, {
-            method: "POST",
-            body: JSON.stringify(proofBody),
-          });
-        } finally {
-          setWithdrawProofBusy(false);
-        }
-        if (!gen?.proof || !gen?.publicInputs) {
-          throw new Error(gen?.message || gen?.error || "Withdraw proof generation returned no proof.");
-        }
-        const recipient = (withdrawForm.recipient || "").trim() || wallet.address;
-        withdrawData = {
-          proof: gen.proof,
-          publicInputs: gen.publicInputs,
-          recipient,
-          finalRecipient: recipient,
-          ownerAddress: wallet.address.toLowerCase(),
-          noteHints: {
-            change: {
-              assetId: note.assetID,
-              amount: changeWei.toString(),
-              blindingFactor: proofBody.outputNoteChange.blindingFactor,
-              ownerPublicKey: note.ownerPublicKey,
-            },
-          },
-          encryptedPayload: "0x",
-        };
-      }
 
-      const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
-      const envelope = await encryptForRelayer({ withdrawData }, keyInfo?.publicKeyPem);
-      const out = await fetchJson(`${base}/withdraw/encrypted`, {
-        method: "POST",
-        body: JSON.stringify({ envelope }),
-      });
-      setLastResult(out);
+        let lastNullifierErr = null;
+        for (const candidate of spend) {
+          const note = candidate.note;
+          const inputWei = BigInt(note.amount);
+          const changeWei = inputWei - amountWei - protocolFee - gasRefund;
+          if (changeWei <= 0n) continue;
+          try {
+            const merkle = await fetchMerkleForNote(base, note, cfg);
+            const proofBody = {
+              inputNote: {
+                assetID: note.assetID,
+                amount: note.amount,
+                blindingFactor: note.blindingFactor,
+                ownerPublicKey: note.ownerPublicKey,
+                nullifier: noteNullifier(note.commitmentDecimal, note.ownerPublicKey).toString(),
+                commitment: note.commitmentDecimal,
+              },
+              outputNoteChange: {
+                assetID: note.assetID,
+                amount: changeWei.toString(),
+                blindingFactor: randomFieldElementString(),
+                commitment: "0",
+              },
+              merkleRoot: merkle.merkleRoot,
+              merklePath: merkle.merklePath,
+              merklePathIndices: merkle.merklePathIndices,
+              protocolFee: protocolFee.toString(),
+              gasRefund: gasRefund.toString(),
+              withdrawAmount: amountWei.toString(),
+            };
+            setWithdrawProofBusy(true);
+            let gen;
+            try {
+              gen = await fetchJson(`${base}/withdraw/generate-proof`, {
+                method: "POST",
+                body: JSON.stringify(proofBody),
+              });
+            } finally {
+              setWithdrawProofBusy(false);
+            }
+            if (!gen?.proof || !gen?.publicInputs) {
+              throw new Error(gen?.message || gen?.error || "Withdraw proof generation returned no proof.");
+            }
+            const recipient = (withdrawForm.recipient || "").trim() || wallet.address;
+            const withdrawData = {
+              proof: gen.proof,
+              publicInputs: gen.publicInputs,
+              recipient,
+              finalRecipient: recipient,
+              ownerAddress: wallet.address.toLowerCase(),
+              noteHints: {
+                change: {
+                  assetId: note.assetID,
+                  amount: changeWei.toString(),
+                  blindingFactor: proofBody.outputNoteChange.blindingFactor,
+                  ownerPublicKey: note.ownerPublicKey,
+                },
+              },
+              encryptedPayload: "0x",
+            };
+
+            const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
+            const envelope = await encryptForRelayer({ withdrawData }, keyInfo?.publicKeyPem);
+            const out = await fetchJson(`${base}/withdraw/encrypted`, {
+              method: "POST",
+              body: JSON.stringify({ envelope }),
+            });
+            setLastResult(out);
+
+            // Keep vault aligned with chain: remove consumed note and save fresh change note.
+            try {
+              const consumedHex = String(note.commitmentHex || "").toLowerCase();
+              await pruneSpentNote(consumedHex);
+              if (vaultRef.current?.unlocked && vaultRef.current?.key) {
+                const changeCommitment = String(gen?.publicInputs?.outputCommitmentChange || "").trim();
+                if (changeCommitment) {
+                  const changeNotePayload = buildVaultNoteFromSwapHint({
+                    assetId: Number(note.assetID),
+                    amountStr: changeWei.toString(),
+                    blindingFactor: proofBody.outputNoteChange.blindingFactor,
+                    ownerPublicKey: note.ownerPublicKey,
+                    commitmentStr: changeCommitment,
+                    poolAddress: cfg?.addresses?.shieldedPool || "",
+                  });
+                  const curNotes = Array.isArray(vaultRef.current?.data?.notes) ? vaultRef.current.data.notes : [];
+                  const hx = String(changeNotePayload.commitmentHex || "").toLowerCase();
+                  const exists = curNotes.some((entry) => String(entry?.payload?.commitmentHex || "").toLowerCase() === hx);
+                  if (!exists) {
+                    const nextData = {
+                      ...vaultRef.current.data,
+                      notes: [{ t: Date.now(), payload: changeNotePayload }, ...curNotes].slice(0, 200),
+                      updatedAt: new Date().toISOString(),
+                    };
+                    await saveVault({ key: vaultRef.current.key, data: nextData });
+                    setVault({ unlocked: true, key: vaultRef.current.key, data: nextData });
+                  }
+                }
+              }
+            } catch (vaultSyncErr) {
+              console.warn("[withdraw] vault sync failed", vaultSyncErr);
+            }
+            return;
+          } catch (attemptErr) {
+            if (isWithdrawNullifierSpentError(attemptErr)) {
+              lastNullifierErr = attemptErr;
+              try {
+                await pruneSpentNote(note?.commitmentHex);
+              } catch {
+                /* ignore stale vault cleanup failure */
+              }
+              continue;
+            }
+            throw attemptErr;
+          } finally {
+            setWithdrawProofBusy(false);
+          }
+        }
+        if (lastNullifierErr) {
+          throw new Error(
+            "All spendable notes for this token appear already spent (nullifier used). Vault stale notes were cleaned; refresh and try again."
+          );
+        }
+        throw new Error("No valid spendable note remained after fee/refund and note checks.");
+      }
     } catch (e) {
       setActionError(stringifyErr(e?.message ?? e));
     }
