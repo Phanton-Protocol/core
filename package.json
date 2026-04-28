@@ -15,6 +15,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:backend": "npm run test --prefix phantom-relayer-dashboard/backend",
+    "ci:e2e:prod-gate": "npm run ci:e2e:prod-gate --prefix phantom-relayer-dashboard/backend",
     "verify": "npm run lint && npm run build && npm run test:backend",
     "e2e:testnet": "node phantom-relayer-dashboard/backend/scripts/e2e-mvp-testnet.cjs",
     "fingerprints:mock-bytecode": "npm run fingerprints:mock-bytecode -w phantom-smart-contracts",

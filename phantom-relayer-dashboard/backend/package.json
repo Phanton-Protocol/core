@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node scripts/check-syntax.cjs && node --test --test-force-exit test/*.test.cjs",
     "e2e:testnet": "node scripts/e2e-mvp-testnet.cjs",
+    "ci:e2e:prod-gate": "npm run mvp:preflight && npm run e2e:testnet",
     "e2e:shadow-diagram": "node scripts/e2e-shadow-diagram-testnet.cjs",
     "mvp:preflight": "node scripts/preflight-mvp.cjs",
     "dev": "node src/index.js",

@@ -51,6 +51,7 @@ const {
   logModule4
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs, canonicalNullifierHex } = require("./swapIntentBinding");
+const FROZEN_PRODUCTION_CONFIG = require(path.join(__dirname, "..", "..", "..", "frozenProductionConfig.json"));
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
@@ -247,6 +248,7 @@ const CONFIG_DIR = process.env.PHANTOM_CONFIG_DIR || path.join(__dirname, "..", 
 const CONFIG_PATH = process.env.PHANTOM_CONFIG_PATH || "";
 const CANONICAL_PROFILES_PATH = process.env.PHANTOM_CANONICAL_PROFILES_PATH || path.join(CONFIG_DIR, "canonicalProfiles.json");
 const CANONICAL_PROFILE_ID = process.env.PHANTOM_CANONICAL_PROFILE || "";
+const FROZEN_DEPLOYMENT_VERSION = String(FROZEN_PRODUCTION_CONFIG.version || "").trim();
 const FALLBACK_ASSETS_BY_CHAIN = {
   97: [
     { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
@@ -512,22 +514,52 @@ function assertRuntimeParameterConsistency() {
 }
 
 function getRuntimeConfig() {
-  const filePath = CONFIG_PATH || selectConfigFileByChainId(CHAIN_ID);
+  const filePath = CONFIG_PATH || null;
   const fileCfg = readJsonIfExists(filePath) || {};
-  const envStr = (v) => (v && String(v).trim() ? String(v).trim() : undefined);
-
-  const chainId = Number(process.env.CHAIN_ID ?? fileCfg.chainId ?? CHAIN_ID ?? 97);
-  const rpcUrl = String(process.env.RPC_URL ?? fileCfg.rpcUrl ?? RPC_URL ?? "").trim();
-  const addresses = {
-    shieldedPool: envStr(process.env.SHIELDED_POOL_ADDRESS) ?? fileCfg.addresses?.shieldedPool ?? SHIELDED_POOL_ADDRESS ?? null,
-    swapAdaptor: envStr(process.env.SWAP_ADAPTOR_ADDRESS) ?? fileCfg.addresses?.swapAdaptor ?? SWAP_ADAPTOR_ADDRESS ?? null,
-    noteStorage: envStr(process.env.NOTE_STORAGE_ADDRESS) ?? fileCfg.addresses?.noteStorage ?? NOTE_STORAGE_ADDRESS ?? null,
-    feeOracle: envStr(process.env.OFFCHAIN_ORACLE_ADDRESS) ?? fileCfg.addresses?.feeOracle ?? OFFCHAIN_ORACLE_ADDRESS ?? null,
-    relayerStaking: envStr(process.env.RELAYER_STAKING_ADDRESS) ?? fileCfg.addresses?.relayerStaking ?? RELAYER_STAKING_ADDRESS ?? null,
+  const frozen = FROZEN_PRODUCTION_CONFIG || {};
+  const normalizeMaybeAddr = (v) => {
+    if (!v) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    return normalizeEvmAddress(s);
+  };
+  const assertSameAddress = (label, expected, actual) => {
+    const e = normalizeMaybeAddr(expected);
+    const a = normalizeMaybeAddr(actual);
+    if (!a) return;
+    if (!e || e.toLowerCase() !== a.toLowerCase()) {
+      throw new Error(`CONFIG_MISMATCH:${label}: expected ${expected} got ${actual}`);
+    }
   };
 
-  const assetsFromFile = Array.isArray(fileCfg.assets) ? fileCfg.assets : [];
-  const assets = assetsFromFile.length > 0 ? assetsFromFile : (FALLBACK_ASSETS_BY_CHAIN[Number(chainId)] || []);
+  const chainId = Number(frozen.chainId ?? 97);
+  const rpcUrl = String(process.env.RPC_URL ?? fileCfg.rpcUrl ?? RPC_URL ?? "").trim();
+  const addresses = {
+    shieldedPool: normalizeMaybeAddr(frozen.addresses?.shieldedPool),
+    swapAdaptor: normalizeMaybeAddr(frozen.addresses?.swapAdaptor),
+    noteStorage: normalizeMaybeAddr(frozen.addresses?.noteStorage) || null,
+    feeOracle: normalizeMaybeAddr(frozen.addresses?.feeOracle),
+    relayerStaking: normalizeMaybeAddr(frozen.addresses?.relayerStaking),
+    depositHandler: normalizeMaybeAddr(frozen.addresses?.depositHandler),
+    matchingHandler: normalizeMaybeAddr(frozen.addresses?.matchingHandler),
+    protocolToken: normalizeMaybeAddr(frozen.addresses?.protocolToken),
+    fheCoprocessor: normalizeMaybeAddr(frozen.addresses?.fheCoprocessor),
+  };
+
+  const assets = Array.isArray(frozen.assets) ? frozen.assets : [];
+  const deploymentVersion = FROZEN_DEPLOYMENT_VERSION;
+  if (!deploymentVersion) {
+    throw new Error("CONFIG_MISMATCH: missing frozen deployment version");
+  }
+  if (process.env.PHANTOM_EXPECTED_DEPLOYMENT_VERSION && String(process.env.PHANTOM_EXPECTED_DEPLOYMENT_VERSION) !== deploymentVersion) {
+    throw new Error(
+      `CONFIG_MISMATCH: expected deployment version ${process.env.PHANTOM_EXPECTED_DEPLOYMENT_VERSION} but frozen config is ${deploymentVersion}`
+    );
+  }
+  assertSameAddress("pool", addresses.shieldedPool, process.env.SHIELDED_POOL_ADDRESS || SHIELDED_POOL_ADDRESS || fileCfg.addresses?.shieldedPool);
+  assertSameAddress("oracle", addresses.feeOracle, process.env.OFFCHAIN_ORACLE_ADDRESS || OFFCHAIN_ORACLE_ADDRESS || fileCfg.addresses?.feeOracle);
+  assertSameAddress("swapAdaptor", addresses.swapAdaptor, process.env.SWAP_ADAPTOR_ADDRESS || SWAP_ADAPTOR_ADDRESS || fileCfg.addresses?.swapAdaptor);
+  assertSameAddress("relayerStaking", addresses.relayerStaking, process.env.RELAYER_STAKING_ADDRESS || RELAYER_STAKING_ADDRESS || fileCfg.addresses?.relayerStaking);
   const requiredForTx =
     RELAYER_DRY_RUN
       ? ["SHIELDED_POOL_ADDRESS"]
@@ -566,6 +598,7 @@ function getRuntimeConfig() {
       validatorUrlCount: VALIDATOR_URLS.length,
     },
     configFile: filePath || null,
+    deploymentVersion,
     canonicalProfile,
     missingForTx,
   };
@@ -1078,7 +1111,6 @@ async function getDepositFeeBNBWei() {
   }
   const wbnb = CHAIN_ID === 56 ? WBNB_BSC_MAINNET : WBNB_BSC_TESTNET;
   const chainSlug = CHAIN_ID === 56 ? "bsc" : "bsc-testnet";
-  const safetyBps = Math.max(10000, toBps(process.env.PHANTOM_DEPOSIT_FEE_SAFETY_BPS, 10500));
   // Small cushion over the DEX-implied wei, then verify against the same on-chain FeeOracle the pool uses.
   const safetyBps = Math.max(10000, toBps(process.env.PHANTOM_DEPOSIT_FEE_SAFETY_BPS, 10500));
   const minWeiFloor = toBig(process.env.PHANTOM_DEPOSIT_FEE_MIN_WEI, 2500000000000000n);
@@ -1439,6 +1471,52 @@ function noteAuthOwner(req) {
   return String(req.query.ownerAddress || req.headers["x-owner-address"] || "").trim().toLowerCase();
 }
 
+function createConfigNoteError(code, message, details = {}) {
+  const err = new Error(message);
+  err.code = code;
+  err.status = 400;
+  err.details = details;
+  return err;
+}
+
+function getActiveNoteConfig() {
+  const cfg = getRuntimeConfig();
+  return {
+    deploymentVersion: String(cfg.deploymentVersion || ""),
+    poolAddress: String(cfg.addresses?.shieldedPool || "").toLowerCase(),
+    oracleAddress: String(cfg.addresses?.feeOracle || "").toLowerCase(),
+    chainId: Number(cfg.chainId || 0),
+  };
+}
+
+function validateNoteAgainstActiveConfig(noteEnvelope, activeCfg) {
+  const status = String(noteEnvelope?.status || "unknown").toLowerCase();
+  if (status !== "unspent") {
+    throw createConfigNoteError("SPENT_NOTE", "spent note", { status });
+  }
+  const poolAddress = String(noteEnvelope?.poolAddress || "").toLowerCase();
+  if (!poolAddress || poolAddress !== activeCfg.poolAddress) {
+    throw createConfigNoteError("POOL_MISMATCH", "pool mismatch", {
+      notePoolAddress: poolAddress,
+      currentPoolAddress: activeCfg.poolAddress,
+    });
+  }
+  const oracleAddress = String(noteEnvelope?.oracleAddress || "").toLowerCase();
+  if (!oracleAddress || oracleAddress !== activeCfg.oracleAddress) {
+    throw createConfigNoteError("ORACLE_MISMATCH", "oracle mismatch", {
+      noteOracleAddress: oracleAddress,
+      currentOracleAddress: activeCfg.oracleAddress,
+    });
+  }
+  const deploymentVersion = String(noteEnvelope?.deploymentVersion || "");
+  if (!deploymentVersion || deploymentVersion !== activeCfg.deploymentVersion) {
+    throw createConfigNoteError("CONFIG_MISMATCH", "config mismatch", {
+      noteDeploymentVersion: deploymentVersion,
+      currentDeploymentVersion: activeCfg.deploymentVersion,
+    });
+  }
+}
+
 async function parseDepositEventFromReceipt(txHash) {
   if (!RPC_URL || !SHIELDED_POOL_ADDRESS) {
     throw new Error("RPC_URL/SHIELDED_POOL_ADDRESS not configured");
@@ -1482,9 +1560,14 @@ async function persistNoteFromDepositReceipt(txHash, noteInput, ownerAddressOver
 
   const rawEventDepositor = String(depositEvt.args.depositor);
   const ownerAddress = (ownerAddressOverride || rawEventDepositor).toLowerCase();
+  const activeCfg = getActiveNoteConfig();
   const noteId = noteIdFromCanonical(canonical, `${String(receipt.hash).toLowerCase()}:${ownerAddress}`);
   const encryptedPayload = encryptJsonAtRest({
     note: canonical,
+    status: "unspent",
+    poolAddress: activeCfg.poolAddress,
+    oracleAddress: activeCfg.oracleAddress,
+    deploymentVersion: activeCfg.deploymentVersion,
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
     depositor: ownerAddress,
@@ -1545,10 +1628,15 @@ async function persistSwapOutputNotes({ txHash, ownerAddress, noteHints, publicI
   }
 
   const owner = String(ownerAddress).toLowerCase();
+  const activeCfg = getActiveNoteConfig();
   const swapNoteId = noteIdFromCanonical(swapCanonical, `${txHash.toLowerCase()}:${owner}:swap`);
   const changeNoteId = noteIdFromCanonical(changeCanonical, `${txHash.toLowerCase()}:${owner}:change`);
   const swapPayload = encryptJsonAtRest({
     note: swapCanonical,
+    status: "unspent",
+    poolAddress: activeCfg.poolAddress,
+    oracleAddress: activeCfg.oracleAddress,
+    deploymentVersion: activeCfg.deploymentVersion,
     txHash,
     kind: "swap_output",
     commitmentIndex: commitmentIndices[swapCanonical.commitment.toLowerCase()] ?? null,
@@ -1556,6 +1644,10 @@ async function persistSwapOutputNotes({ txHash, ownerAddress, noteHints, publicI
   });
   const changePayload = encryptJsonAtRest({
     note: changeCanonical,
+    status: "unspent",
+    poolAddress: activeCfg.poolAddress,
+    oracleAddress: activeCfg.oracleAddress,
+    deploymentVersion: activeCfg.deploymentVersion,
     txHash,
     kind: "swap_change",
     commitmentIndex: commitmentIndices[changeCanonical.commitment.toLowerCase()] ?? null,
@@ -1661,9 +1753,14 @@ async function persistWithdrawChangeNote({ txHash, ownerAddress, noteHints, publ
     throw new Error("Withdraw change note hint commitment mismatch with proof public input");
   }
   const owner = String(ownerAddress).toLowerCase();
+  const activeCfg = getActiveNoteConfig();
   const changeNoteId = noteIdFromCanonical(changeCanonical, `${txHash.toLowerCase()}:${owner}:withdraw_change`);
   const changePayload = encryptJsonAtRest({
     note: changeCanonical,
+    status: "unspent",
+    poolAddress: activeCfg.poolAddress,
+    oracleAddress: activeCfg.oracleAddress,
+    deploymentVersion: activeCfg.deploymentVersion,
     txHash,
     kind: "withdraw_change",
     commitmentIndex: commitmentIndices[changeCanonical.commitment.toLowerCase()] ?? null,
@@ -2047,31 +2144,83 @@ app.get("/notes/:noteId", async (req, res) => {
   }
 });
 
-app.get("/notes", (req, res) => {
+app.get("/notes", async (req, res) => {
   try {
     const owner = noteAuthOwner(req);
     if (!owner) {
       return res.status(401).json({ error: "ownerAddress is required (query or x-owner-address header)" });
     }
+    const activeCfg = getActiveNoteConfig();
     const limit = Math.min(Number(req.query.limit || 50), 200);
     const rows = listEncryptedNotesByOwner(db, owner, Number.isFinite(limit) ? limit : 50);
-    const notes = rows.map((r) => {
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const pool = new ethers.Contract(
+      SHIELDED_POOL_ADDRESS,
+      ["function isNullifierUsed(bytes32 nullifier) view returns (bool)"],
+      provider
+    );
+    const notes = [];
+    const filteredOut = [];
+    for (const r of rows) {
+      let envelope = null;
       let note = null;
       try {
-        note = decryptJsonAtRest(r.payloadEnc).note;
-      } catch (_) {
-        note = null;
+        envelope = decryptJsonAtRest(r.payloadEnc) || {};
+        note = envelope.note;
+      } catch {
+        filteredOut.push({ noteId: r.noteId, code: "STALE_NOTE", reason: "decrypt_failed" });
+        continue;
       }
-      return {
+      if (!note) {
+        filteredOut.push({ noteId: r.noteId, code: "STALE_NOTE", reason: "missing_note_payload" });
+        continue;
+      }
+      try {
+        validateNoteAgainstActiveConfig(envelope, activeCfg);
+      } catch (e) {
+        filteredOut.push({ noteId: r.noteId, code: e.code || "STALE_NOTE", reason: e.message });
+        continue;
+      }
+      const nullifier = String(note.nullifier || "").trim();
+      if (!nullifier) {
+        filteredOut.push({ noteId: r.noteId, code: "STALE_NOTE", reason: "missing_nullifier" });
+        continue;
+      }
+      const isSpent = await pool.isNullifierUsed(nullifier);
+      if (isSpent) {
+        filteredOut.push({ noteId: r.noteId, code: "SPENT_NOTE", reason: "on_chain_nullifier_used" });
+        continue;
+      }
+      notes.push({
         noteId: r.noteId,
         commitment: r.commitment,
         txHash: r.txHash,
         createdAt: r.createdAt,
+        status: "unspent",
+        poolAddress: activeCfg.poolAddress,
+        oracleAddress: activeCfg.oracleAddress,
+        deploymentVersion: activeCfg.deploymentVersion,
         note,
-      };
+      });
+    }
+    if (filteredOut.length > 0) {
+      const counts = filteredOut.reduce((acc, x) => {
+        const k = String(x.code || "UNKNOWN");
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+      console.warn("[notes] filtered stale/spent notes", counts);
+    }
+    return res.json({
+      ownerAddress: owner,
+      count: notes.length,
+      notes,
+      filteredOutCount: filteredOut.length,
+      filteredOut: filteredOut.slice(0, 50),
+      activeConfig: activeCfg,
     });
-    return res.json({ ownerAddress: owner, count: notes.length, notes });
   } catch (err) {
+    console.error("[notes] failed", err?.code || "UNKNOWN", err?.message || err);
     return res.status(400).json({ error: err.message || "Failed to list notes" });
   }
 });
@@ -2219,6 +2368,7 @@ app.get("/config", (req, res) => {
   res.json({
     mode: cfg.mode,
     chainId: cfg.chainId,
+    deploymentVersion: cfg.deploymentVersion,
     rpcUrl: cfg.rpcUrl,
     addresses: cfg.addresses,
     assets: cfg.assets,
@@ -2228,6 +2378,7 @@ app.get("/config", (req, res) => {
     configFile: cfg.configFile,
     canonicalProfile: cfg.canonicalProfile,
     configWarnings: cfg.configWarnings || [],
+    frozenConfig: true,
     notesAtRest: {
       encryption: "AES-256-GCM",
       keySource: notesKeySource,

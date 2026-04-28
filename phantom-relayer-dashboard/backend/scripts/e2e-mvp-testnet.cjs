@@ -50,6 +50,7 @@ const path = require("path");
 const fs = require("fs");
 const { ethers } = require("ethers");
 const { canonicalizeNote, computeNullifier } = require(path.join(__dirname, "..", "src", "noteModel"));
+const FROZEN_CONFIG = require(path.join(__dirname, "..", "..", "..", "frozenProductionConfig.json"));
 
 let API_URL = (process.env.API_URL || "").trim().replace(/\/$/, "");
 const E2E_USER_PRIVATE_KEY = String(process.env.E2E_USER_PRIVATE_KEY || "").trim();
@@ -192,6 +193,37 @@ async function pollMerkle(commitment) {
   throw new Error("Merkle path not available in time — indexer / chain lag?");
 }
 
+function assertEq(label, actual, expected) {
+  if (String(actual) !== String(expected)) {
+    throw new Error(`${label} mismatch: expected=${expected} actual=${actual}`);
+  }
+}
+
+async function fetchUsableNotes(apiUrl, ownerAddress) {
+  const out = await requestJson(
+    "GET",
+    `${apiUrl}/notes?ownerAddress=${encodeURIComponent(ownerAddress)}&limit=200`
+  );
+  if (out.status !== 200) {
+    throw new Error(`/notes failed: ${out.status} ${out.raw || ""}`);
+  }
+  return out.json;
+}
+
+function assertNotesPinnedToFrozenConfig(notesResp, cfg) {
+  const currentPool = String(cfg.addresses?.shieldedPool || "").toLowerCase();
+  const currentOracle = String(cfg.addresses?.feeOracle || "").toLowerCase();
+  const currentVersion = String(cfg.deploymentVersion || "");
+  for (const n of notesResp.notes || []) {
+    if (String(n.status || "").toLowerCase() !== "unspent") {
+      throw new Error(`note ${n.noteId} is not unspent`);
+    }
+    assertEq(`note ${n.noteId} poolAddress`, String(n.poolAddress || "").toLowerCase(), currentPool);
+    assertEq(`note ${n.noteId} oracleAddress`, String(n.oracleAddress || "").toLowerCase(), currentOracle);
+    assertEq(`note ${n.noteId} deploymentVersion`, String(n.deploymentVersion || ""), currentVersion);
+  }
+}
+
 async function main() {
   const { discoverRelayerApiUrl } = require("./lib/relayerApiDiscover.cjs");
   const d = await discoverRelayerApiUrl(API_URL || process.env.API_URL);
@@ -233,7 +265,26 @@ async function main() {
   const pool = cfg.json.addresses?.shieldedPool;
   const rpcUrl = String(cfg.json.rpcUrl || process.env.RPC_URL || "").trim();
   if (!pool) throw new Error("config.addresses.shieldedPool missing");
+  if (!cfg.json.frozenConfig) throw new Error("config is not marked as frozenConfig");
+  if (!cfg.json.deploymentVersion) throw new Error("config.deploymentVersion missing");
+  assertEq("config.version", cfg.json.deploymentVersion, FROZEN_CONFIG.version);
+  assertEq("config.chainId", Number(cfg.json.chainId), Number(FROZEN_CONFIG.chainId));
+  assertEq(
+    "config.pool",
+    String(cfg.json.addresses?.shieldedPool || "").toLowerCase(),
+    String(FROZEN_CONFIG.addresses?.shieldedPool || "").toLowerCase()
+  );
+  assertEq(
+    "config.oracle",
+    String(cfg.json.addresses?.feeOracle || "").toLowerCase(),
+    String(FROZEN_CONFIG.addresses?.feeOracle || "").toLowerCase()
+  );
   if (rpcUrl) await assertPoolNotMockOnChain(rpcUrl, pool);
+
+  const notesAtStart = await fetchUsableNotes(API_URL, wallet.address);
+  if ((notesAtStart.count || 0) !== 0) {
+    throw new Error(`fresh wallet gate failed: expected 0 usable notes, found ${notesAtStart.count}`);
+  }
 
   if (E2E_MODE === "bnb") {
     const capRaw = cfg.json.module4RelayerDeposit?.maxBnbWei ?? cfg.json.maxBnbWei;
@@ -318,6 +369,11 @@ async function main() {
   );
   if (sub.status !== 200) throw new Error(`deposit submit failed: ${sub.status} ${JSON.stringify(sub.json || sub.text)}`);
   console.log("[e2e] deposit OK", JSON.stringify(sub.json, null, 0));
+  const afterDepositNotes = await fetchUsableNotes(API_URL, wallet.address);
+  if ((afterDepositNotes.count || 0) < 1) {
+    throw new Error("deposit assertion failed: /notes returned no usable note");
+  }
+  assertNotesPinnedToFrozenConfig(afterDepositNotes, cfg.json);
 
   const merkle = await pollMerkle(commitment);
   console.log("[e2e] merkle root", merkle.merkleRoot);
@@ -485,6 +541,11 @@ async function main() {
   const swapOut = await requestJson("POST", `${API_URL}/swap`, { intentId, intent, intentSig, swapData });
   if (swapOut.status !== 200) throw new Error(`swap ${swapOut.status} ${swapOut.raw}`);
   console.log("[e2e] swap OK tx", swapOut.json?.txHash || swapOut.json);
+  const afterSwapNotes = await fetchUsableNotes(API_URL, wallet.address);
+  if ((afterSwapNotes.count || 0) < 1) {
+    throw new Error("swap assertion failed: /notes returned no usable note");
+  }
+  assertNotesPinnedToFrozenConfig(afterSwapNotes, cfg.json);
 
   const postSwapWaitMs = Number(process.env.E2E_POST_SWAP_WAIT_MS || 3000);
   if (postSwapWaitMs > 0) {
@@ -568,8 +629,20 @@ async function main() {
   const wdOut = await requestJson("POST", `${API_URL}/withdraw`, { withdrawData });
   if (wdOut.status !== 200) throw new Error(`withdraw ${wdOut.status} ${wdOut.raw}`);
   console.log("[e2e] withdraw OK tx", wdOut.json?.txHash || wdOut.json);
+  const afterWithdrawNotes = await fetchUsableNotes(API_URL, wallet.address);
+  assertNotesPinnedToFrozenConfig(afterWithdrawNotes, cfg.json);
 
-  console.log("\n[e2e] MVP flow completed (deposit → swap → withdraw).");
+  const secondWd = await requestJson("POST", `${API_URL}/withdraw`, { withdrawData });
+  if (secondWd.status === 200) {
+    throw new Error("second withdraw negative test failed: second withdraw unexpectedly succeeded");
+  }
+  const secondErr = String(secondWd.json?.error || secondWd.text || "");
+  if (!/spent|nullifier|already/i.test(secondErr)) {
+    throw new Error(`second withdraw negative test failed: unexpected error ${secondErr}`);
+  }
+  console.log("[e2e] second withdraw negative test OK");
+
+  console.log("\n[e2e] MVP flow completed (deposit → swap → withdraw + second-withdraw negative).");
 }
 
 main().catch((e) => {

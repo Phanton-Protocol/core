@@ -7,6 +7,7 @@ import { canUseClientProver, generateSwapProofClient } from "../lib/clientProver
 import { encryptForRelayer } from "../lib/relayEnvelope";
 import { API_URLS, CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../config";
 import { nullifierToBytes32Hex, SHADOW_SWEEP_GAS_BUFFER_WEI_DEFAULT } from "../lib/relayerDefaults.js";
+import FROZEN_CONFIG from "../../frozenProductionConfig.json";
 import {
   addressToOwnerPublicKey,
   commitmentToBytes32,
@@ -290,27 +291,25 @@ function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
     return [];
   }
   const notes = vaultData?.notes || [];
-  const taggedMatches = [];
-  const untaggedMatches = [];
   const poolLower = String(relayerConfig?.addresses?.shieldedPool || "").toLowerCase();
+  const oracleLower = String(relayerConfig?.addresses?.feeOracle || "").toLowerCase();
+  const version = String(relayerConfig?.deploymentVersion || "");
+  const out = [];
   notes.forEach((n, vaultIdx) => {
     const raw = n.payload ?? n;
+    if (String(n?.source || "").toLowerCase() !== "relayer") return;
+    if (String(n?.status || "").toLowerCase() !== "unspent") return;
     const verOk = Number(raw?.version) === 1;
     if (!verOk || Number(raw.assetID) !== aid) return;
-    if (poolLower) {
-      const notePool = String(raw.poolAddress || "").toLowerCase();
-      if (notePool && notePool !== poolLower) return;
-      if (notePool === poolLower) {
-        taggedMatches.push({ vaultIdx, note: raw });
-        return;
-      }
-      untaggedMatches.push({ vaultIdx, note: raw });
-      return;
-    }
-    taggedMatches.push({ vaultIdx, note: raw });
+    const notePool = String(n?.poolAddress || raw.poolAddress || "").toLowerCase();
+    if (!notePool || notePool !== poolLower) return;
+    const noteOracle = String(n?.oracleAddress || raw.oracleAddress || "").toLowerCase();
+    if (!noteOracle || noteOracle !== oracleLower) return;
+    const noteVersion = String(n?.deploymentVersion || raw.deploymentVersion || "");
+    if (!noteVersion || noteVersion !== version) return;
+    out.push({ vaultIdx, note: raw });
   });
-  const selected = poolLower && taggedMatches.length > 0 ? taggedMatches : [...taggedMatches, ...untaggedMatches];
-  return selected.sort((a, b) => {
+  return out.sort((a, b) => {
     try {
       const av = BigInt(String(a?.note?.amount || "0"));
       const bv = BigInt(String(b?.note?.amount || "0"));
@@ -706,6 +705,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           fetchJson(`${base}/config`),
           fetchJson(`${base}/health`),
         ]);
+        if (String(c?.deploymentVersion || "") !== String(FROZEN_CONFIG?.version || "")) {
+          throw new Error(
+            `Config mismatch: expected deployment version ${FROZEN_CONFIG?.version || "unknown"} but relayer returned ${c?.deploymentVersion || "missing"}`
+          );
+        }
         if (!cancelled) {
           setCfg(c);
           setHealth(h);
@@ -962,7 +966,15 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       if (!payload) continue;
       const hx = String(payload.commitmentHex || "").toLowerCase();
       if (!hx || haveHex.has(hx)) continue;
-      notes.unshift({ t: Date.now(), payload });
+      notes.unshift({
+        t: Date.now(),
+        source: "relayer",
+        status: String(row?.status || "unspent"),
+        poolAddress: String(row?.poolAddress || ""),
+        oracleAddress: String(row?.oracleAddress || ""),
+        deploymentVersion: String(row?.deploymentVersion || ""),
+        payload,
+      });
       haveHex.add(hx);
       imported += 1;
     }
@@ -1324,10 +1336,24 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           throw new Error(e.message === "Invalid swap JSON" ? e.message : "Invalid swap JSON in Advanced.");
         }
       } else {
+        if (vaultRef.current?.unlocked && vaultRef.current?.key && wallet?.address) {
+          try {
+            const merged = await mergeRelayerBackedNotesIntoVault({
+              key: vaultRef.current.key,
+              data: vaultRef.current.data,
+              ownerAddress: wallet.address,
+            });
+            if (merged.imported > 0) {
+              setVault({ unlocked: true, key: merged.key, data: merged.data });
+            }
+          } catch (mergeErr) {
+            console.warn("[swap] relayer note sync failed", mergeErr);
+          }
+        }
         const entry = autoSpendEntry || spendable[0];
         if (!entry?.note) {
           throw new Error(
-            "No spendable note for this input token. Unlock the vault, deposit (commitment is now circuit-derived), then swap—or paste full swap JSON under Advanced."
+            "No usable notes for this asset on current pool/config. Re-sync notes and use an unspent note from /notes, or paste full swap JSON under Advanced."
           );
         }
         const note = entry.note;
@@ -1662,7 +1688,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
         const spend = spendableNoteEntries(vaultRef.current?.data, withdrawForm.token, cfg);
         if (!spend.length) {
-          throw new Error("No spendable note for this token. Unlock the vault, deposit first, or paste full withdraw JSON under Advanced.");
+          throw new Error("No usable notes for this token on current pool/config. Re-sync notes from relayer or paste full withdraw JSON under Advanced.");
         }
         const amt = String(withdrawForm.amount || "").trim();
         if (!amt) throw new Error("Enter withdraw amount (payout to recipient, same decimals as note).");
