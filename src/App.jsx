@@ -26,7 +26,6 @@ import BlogArticlePage from './components/BlogArticlePage';
 import WhitepaperPage from './components/WhitepaperPage';
 import OnePagerPage from './components/OnePagerPage';
 import PrivacyVisibilityPage from './components/PrivacyVisibilityPage';
-import PitchDeckPage from './components/PitchDeckPage';
 import BankingSystemPage from './components/BankingSystemPage';
 import { blogPosts } from './data/blogPosts';
 import logoUrl from './assets/logo-pro.svg';
@@ -563,7 +562,7 @@ function App() {
         }
       />
       <Route path="/banking-system" element={<BankingSystemPage />} />
-      <Route path="/pitchdeck" element={<PitchDeckPage />} />
+      <Route path="/pitchdeck" element={<PitchDeckRedirect />} />
       <Route path="*" element={<UnknownRoutePage />} />
     </Routes>
   );
