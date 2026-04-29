@@ -39,6 +39,8 @@ const PRECHECK_REASON = Object.freeze({
   ATTESTATION_MISSING: "ATTESTATION_MISSING",
   ATTESTATION_INVALID: "ATTESTATION_INVALID",
   ATTESTATION_QUORUM_INSUFFICIENT: "ATTESTATION_QUORUM_INSUFFICIENT",
+  DECISION_ARTIFACT_MISSING: "DECISION_ARTIFACT_MISSING",
+  DECISION_ARTIFACT_INVALID: "DECISION_ARTIFACT_INVALID",
 });
 
 function b(v) {
@@ -95,6 +97,19 @@ function defaultSubmitter({ payload }) {
   return { txHash: hash, mode: "dry_run" };
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashDecisionArtifact(artifact) {
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(artifact || {})));
+}
+
 function buildSettlementPayload(match, fills, policy) {
   const qty = b(match.quantity);
   const meta = match.metadataJson || {};
@@ -102,6 +117,7 @@ function buildSettlementPayload(match, fills, policy) {
   const witness = meta.witness || null;
 
   const inputAmount = qty;
+  const decisionArtifact = meta.decisionArtifact || null;
   const protocolFee = (inputAmount * BigInt(Math.max(policy.protocolFeeBps, 0))) / 10000n;
   const gasRefund = b(policy.gasRefundWei);
   const changeAmount = b(meta.changeAmount ?? "0");
@@ -128,6 +144,7 @@ function buildSettlementPayload(match, fills, policy) {
       fheDecisionHash: match.fheDecisionHash || null,
       fheResultHash: match.fheResultHash || null,
       fheAttestationRef: match.fheAttestationRef || null,
+      decisionArtifact,
     },
     amounts: {
       inputAmount: inputAmount.toString(),
@@ -143,6 +160,41 @@ function buildSettlementPayload(match, fills, policy) {
   };
 }
 
+function validateDecisionArtifact(payload) {
+  const artifact = payload?.fheBinding?.decisionArtifact;
+  if (!artifact || typeof artifact !== "object") {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_MISSING, details: { missing: "decisionArtifact" } };
+  }
+  const expectedHash = String(payload?.fheBinding?.fheDecisionHash || "");
+  if (!expectedHash) {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_MISSING, details: { missing: "fheDecisionHash" } };
+  }
+  const actualHash = hashDecisionArtifact(artifact);
+  if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
+    return {
+      ok: false,
+      reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID,
+      details: { expectedHash, actualHash, reason: "hash_mismatch" },
+    };
+  }
+  if (String(artifact?.bindings?.matchHash || "") !== String(payload.matchHash || "")) {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID, details: { reason: "match_hash_mismatch" } };
+  }
+  if (String(artifact?.bindings?.executionKey || "") !== String(payload.executionKey || "")) {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID, details: { reason: "execution_key_mismatch" } };
+  }
+  if (String(artifact?.orders?.taker?.orderId || "") !== String(payload.takerOrderId || "")) {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID, details: { reason: "taker_order_mismatch" } };
+  }
+  if (String(artifact?.orders?.maker?.orderId || "") !== String(payload.makerOrderId || "")) {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID, details: { reason: "maker_order_mismatch" } };
+  }
+  if (String(artifact?.result?.decision || "") !== "match_approved") {
+    return { ok: false, reasonCode: PRECHECK_REASON.DECISION_ARTIFACT_INVALID, details: { reason: "decision_not_match_approved" } };
+  }
+  return { ok: true, decisionHash: actualHash };
+}
+
 function runPrechecks(payload, policy) {
   if (!Array.isArray(payload.noteRefs) || payload.noteRefs.length === 0) {
     return { ok: false, reasonCode: PRECHECK_REASON.MISSING_NOTE_REFERENCES, details: {} };
@@ -152,6 +204,10 @@ function runPrechecks(payload, policy) {
   }
   if (policy.requireFheLinkage && (!payload.fheBinding.fheDecisionHash || !payload.fheBinding.fheResultHash)) {
     return { ok: false, reasonCode: PRECHECK_REASON.FHE_LINKAGE_REQUIRED_MISSING, details: {} };
+  }
+  const decision = validateDecisionArtifact(payload);
+  if (!decision.ok) {
+    return { ok: false, reasonCode: decision.reasonCode, details: decision.details || {} };
   }
   const lhs = b(payload.conservation.lhs);
   const rhs = b(payload.conservation.rhs);

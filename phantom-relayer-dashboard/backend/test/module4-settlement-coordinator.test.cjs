@@ -17,14 +17,43 @@ function withDb(t) {
 function seedMatch(db, overrides = {}) {
   const matchHash = overrides.matchHash || ethers.keccak256(ethers.toUtf8Bytes(`m4:${Math.random()}`));
   const matchId = overrides.id || cryptoRandomId();
+  const executionKey = overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes(`exec:${matchHash}`));
+  const makerOrderId = "0x" + "11".repeat(32);
+  const takerOrderId = "0x" + "22".repeat(32);
+  const decisionArtifact = buildDecisionArtifact({
+    matchHash,
+    executionKey,
+    makerOrderId,
+    takerOrderId,
+    pairBase: "BUSD",
+    pairQuote: "WBNB",
+    makerSide: "sell",
+    takerSide: "buy",
+    fheResultHash: overrides.fheResultHash || "0x" + "33".repeat(32),
+  });
+  const baseMetadata = {
+    noteRefs: [{ noteId: "n1" }],
+    witness: { merkleRoot: "0x" + "55".repeat(32) },
+    changeAmount: "0",
+    decisionArtifact,
+  };
+  const metadataJson = overrides.metadataJson
+    ? {
+        ...overrides.metadataJson,
+        decisionArtifact:
+          overrides.metadataJson.decisionArtifact === undefined
+            ? decisionArtifact
+            : overrides.metadataJson.decisionArtifact,
+      }
+    : baseMetadata;
   saveMatch(db, {
     id: matchId,
     matchHash,
-    executionKey: overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes(`exec:${matchHash}`)),
+    executionKey,
     pairBase: "BUSD",
     pairQuote: "WBNB",
-    makerOrderId: "0x" + "11".repeat(32),
-    takerOrderId: "0x" + "22".repeat(32),
+    makerOrderId,
+    takerOrderId,
     makerSide: "sell",
     takerSide: "buy",
     executionPrice: "10",
@@ -32,13 +61,9 @@ function seedMatch(db, overrides = {}) {
     status: "finalized",
     decisionReasonCode: "FHE_ACCEPTED",
     fheResultHash: overrides.fheResultHash || "0x" + "33".repeat(32),
-    fheDecisionHash: overrides.fheDecisionHash || "0x" + "44".repeat(32),
+    fheDecisionHash: overrides.fheDecisionHash || hashDecisionArtifact(decisionArtifact),
     fheAttestationRef: "att:1",
-    metadataJson: overrides.metadataJson || {
-      noteRefs: [{ noteId: "n1" }],
-      witness: { merkleRoot: "0x" + "55".repeat(32) },
-      changeAmount: "0",
-    },
+    metadataJson,
     createdAt: Date.now(),
   });
   saveFill(db, {
@@ -61,11 +86,57 @@ function seedMatch(db, overrides = {}) {
     isMaker: false,
     createdAt: Date.now(),
   });
-  return { matchHash, executionKey: overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes(`exec:${matchHash}`)) };
+  return { matchHash, executionKey };
 }
 
 function cryptoRandomId() {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashDecisionArtifact(artifact) {
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(artifact || {})));
+}
+
+function buildDecisionArtifact({
+  matchHash,
+  executionKey,
+  makerOrderId,
+  takerOrderId,
+  pairBase,
+  pairQuote,
+  makerSide,
+  takerSide,
+  fheResultHash,
+}) {
+  return {
+    schema: "phantom.match.decision.v1",
+    domain: {
+      protocol: "phantom-internal-matching",
+      chainId: 97,
+      verifyingContract: ethers.ZeroAddress,
+      engine: "test",
+      engineMode: "remote",
+      decisionDomain: "default",
+    },
+    orders: {
+      taker: { orderId: takerOrderId, side: takerSide, pairBase, pairQuote, nonce: "0", replayKey: "0x" + "aa".repeat(32) },
+      maker: { orderId: makerOrderId, side: makerSide, pairBase, pairQuote, nonce: "0", replayKey: "0x" + "bb".repeat(32) },
+    },
+    constraints: { pair: `${pairBase}/${pairQuote}`, takerSide, makerSide, priceCompatible: true, policyMode: "strict", degradedAllowUnavailable: false },
+    timing: { traceId: "test-trace", decidedAtMs: Date.now(), decisionNonce: "test-nonce" },
+    result: { decision: "match_approved", reasonCode: "FHE_ACCEPTED", fheResultHash },
+    attestation: { reference: "att:1", signature: "sig:test", payloadHash: "0x" + "cc".repeat(32) },
+    bindings: { matchHash, executionKey },
+  };
 }
 
 test("module4 conservation and fee math precheck passes coherent payload", async (t) => {
@@ -159,4 +230,32 @@ test("module4 explicit fallback enabled routes deterministically and persists re
   const status = coordinator.getStatus(matchHash);
   assert.ok(status.execution.fallbackMode === "shieldedSwapJoinSplit");
   assert.ok(status.events.some((e) => e.eventType === "settlement_fallback_routed"));
+});
+
+test("module4 settlement rejects missing decision artifact", async (t) => {
+  const db = withDb(t);
+  const { matchHash } = seedMatch(db, {
+    metadataJson: {
+      noteRefs: [{ noteId: "n1" }],
+      witness: { merkleRoot: "0x" + "55".repeat(32) },
+      changeAmount: "0",
+      decisionArtifact: null,
+    },
+    fheDecisionHash: "0x" + "44".repeat(32),
+  });
+  const coordinator = createSettlementCoordinator({ db });
+  const out = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
+  assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
+  assert.equal(out.decisionReasonCode, PRECHECK_REASON.DECISION_ARTIFACT_MISSING);
+});
+
+test("module4 settlement rejects invalid decision artifact hash", async (t) => {
+  const db = withDb(t);
+  const { matchHash } = seedMatch(db, {
+    fheDecisionHash: "0x" + "ff".repeat(32),
+  });
+  const coordinator = createSettlementCoordinator({ db });
+  const out = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
+  assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
+  assert.equal(out.decisionReasonCode, PRECHECK_REASON.DECISION_ARTIFACT_INVALID);
 });

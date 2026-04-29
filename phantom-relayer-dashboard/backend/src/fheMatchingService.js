@@ -199,7 +199,98 @@ function computeFheResultHash(result) {
   );
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashDecisionArtifact(artifact) {
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(artifact || {})));
+}
+
+function buildCanonicalMatchDecisionArtifact({
+  traceId,
+  taker,
+  maker,
+  matchHash,
+  executionKey,
+  policy,
+  decisionReasonCode,
+  fheResultHash,
+  fheAttestationRef,
+  fheAttestationSignature,
+  fheAttestationPayloadHash,
+  decidedAtMs = Date.now(),
+  decisionNonce = null,
+  decisionDomain = null,
+}) {
+  const artifact = {
+    schema: "phantom.match.decision.v1",
+    domain: {
+      protocol: "phantom-internal-matching",
+      chainId: Number(process.env.CHAIN_ID || 97),
+      verifyingContract: String(process.env.SHIELDED_POOL_ADDRESS || ethers.ZeroAddress),
+      engine: "fheMatchingService",
+      engineMode: FHE_MODE,
+      decisionDomain: decisionDomain ? String(decisionDomain) : "default",
+    },
+    orders: {
+      taker: {
+        orderId: String(taker?.id || ""),
+        side: String(taker?.side || ""),
+        pairBase: String(taker?.pairBase || ""),
+        pairQuote: String(taker?.pairQuote || ""),
+        nonce: String(taker?.nonce || ""),
+        replayKey: String(taker?.replayKey || ""),
+      },
+      maker: {
+        orderId: String(maker?.id || ""),
+        side: String(maker?.side || ""),
+        pairBase: String(maker?.pairBase || ""),
+        pairQuote: String(maker?.pairQuote || ""),
+        nonce: String(maker?.nonce || ""),
+        replayKey: String(maker?.replayKey || ""),
+      },
+    },
+    constraints: {
+      pair: `${String(taker?.pairBase || "")}/${String(taker?.pairQuote || "")}`,
+      takerSide: String(taker?.side || ""),
+      makerSide: String(maker?.side || ""),
+      priceCompatible: true,
+      policyMode: String(policy?.mode || "degraded"),
+      degradedAllowUnavailable: Boolean(policy?.degradedAllowUnavailable),
+    },
+    timing: {
+      traceId: String(traceId || ""),
+      decidedAtMs: Number(decidedAtMs || Date.now()),
+      decisionNonce: decisionNonce != null ? String(decisionNonce) : `${String(taker?.nonce || "")}:${String(maker?.nonce || "")}:${String(traceId || "")}`,
+    },
+    result: {
+      decision: "match_approved",
+      reasonCode: String(decisionReasonCode || "FHE_ACCEPTED"),
+      fheResultHash: String(fheResultHash || ""),
+    },
+    attestation: {
+      reference: fheAttestationRef ? String(fheAttestationRef) : null,
+      signature: fheAttestationSignature ? String(fheAttestationSignature) : null,
+      payloadHash: fheAttestationPayloadHash ? String(fheAttestationPayloadHash) : null,
+    },
+    bindings: {
+      matchHash: String(matchHash || ""),
+      executionKey: String(executionKey || ""),
+    },
+  };
+  return { artifact, decisionHash: hashDecisionArtifact(artifact) };
+}
+
 function computeFheDecisionHash(payload) {
+  if (payload?.decisionArtifact && typeof payload.decisionArtifact === "object") {
+    return hashDecisionArtifact(payload.decisionArtifact);
+  }
   return ethers.keccak256(
     ethers.toUtf8Bytes(
       JSON.stringify({
@@ -467,6 +558,7 @@ function persistMatchAndFills(db, payload) {
       finalDecisionReasonCode: payload.decisionReasonCode ?? null,
       makerRemainingBefore: payload.maker.remainingAmount,
       takerRemainingBefore: payload.taker.remainingAmount,
+      decisionArtifact: payload.decisionArtifact || null,
     },
     createdAt: now,
   });
@@ -506,6 +598,10 @@ async function evaluateFheCompatibility(taker, maker, traceId) {
         compatible: Boolean(out?.compatible),
         code: String(out?.code || (out?.compatible ? "ok" : "reject")),
         attestationRef: out?.attestationRef ? String(out.attestationRef) : null,
+        attestationSignature: out?.attestationSignature ? String(out.attestationSignature) : null,
+        attestationPayloadHash: out?.attestationPayloadHash ? String(out.attestationPayloadHash) : null,
+        decisionNonce: out?.decisionNonce != null ? String(out.decisionNonce) : null,
+        decisionDomain: out?.decisionDomain ? String(out.decisionDomain) : null,
       };
     } catch (e) {
       return { availability: "unavailable", compatible: false, code: "evaluator_error", attestationRef: null, error: e?.message || String(e) };
@@ -545,6 +641,10 @@ async function evaluateFheCompatibility(taker, maker, traceId) {
       compatible: Boolean(body?.compatible),
       code: String(body?.code || (body?.compatible ? "ok" : "reject")),
       attestationRef: body?.attestationRef ? String(body.attestationRef) : null,
+      attestationSignature: body?.attestationSignature ? String(body.attestationSignature) : null,
+      attestationPayloadHash: body?.attestationPayloadHash ? String(body.attestationPayloadHash) : null,
+      decisionNonce: body?.decisionNonce != null ? String(body.decisionNonce) : null,
+      decisionDomain: body?.decisionDomain ? String(body.decisionDomain) : null,
     };
   } catch (e) {
     return {
@@ -757,6 +857,21 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
   });
 
   const tx = () => {
+    const decisionArtifactBundle = buildCanonicalMatchDecisionArtifact({
+      traceId,
+      taker: takerReservedRow,
+      maker: makerReservedRow,
+      matchHash,
+      executionKey,
+      policy,
+      decisionReasonCode: selected.decisionReasonCode,
+      fheResultHash: selected.fheResultHash,
+      fheAttestationRef: selected.fheAttestationRef,
+      fheAttestationSignature: selected.fheDetails?.attestationSignature || null,
+      fheAttestationPayloadHash: selected.fheDetails?.attestationPayloadHash || null,
+      decisionNonce: selected.fheDetails?.decisionNonce || null,
+      decisionDomain: selected.fheDetails?.decisionDomain || null,
+    });
     const persisted = persistMatchAndFills(db, {
       matchHash,
       executionKey,
@@ -768,16 +883,9 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       quantity: fillQty,
       decisionReasonCode: selected.decisionReasonCode,
       fheResultHash: selected.fheResultHash,
-      fheDecisionHash: computeFheDecisionHash({
-        matchHash,
-        executionKey,
-        policyMode: policy.mode,
-        degradedAllowUnavailable: policy.degradedAllowUnavailable,
-        reasonCode: selected.decisionReasonCode,
-        fheResultHash: selected.fheResultHash,
-        fheAttestationRef: selected.fheAttestationRef,
-      }),
+      fheDecisionHash: decisionArtifactBundle.decisionHash,
       fheAttestationRef: selected.fheAttestationRef,
+      decisionArtifact: decisionArtifactBundle.artifact,
     });
 
     const takerAfter = derivePostFillState(takerReservedRow, fillQty, executionKey, actor);
@@ -848,7 +956,14 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       fheDecisionHash: persisted.match?.fheDecisionHash || null,
       fheResultHash: persisted.match?.fheResultHash || null,
       fheAttestationRef: persisted.match?.fheAttestationRef || null,
-      detailsJson: { matched: true, workerId, fheCode: selected.fheDetails?.code || null },
+      detailsJson: {
+        matched: true,
+        workerId,
+        fheCode: selected.fheDetails?.code || null,
+        attestationSignature: selected.fheDetails?.attestationSignature || null,
+        attestationPayloadHash: selected.fheDetails?.attestationPayloadHash || null,
+        decisionNonce: selected.fheDetails?.decisionNonce || null,
+      },
     });
 
     return {

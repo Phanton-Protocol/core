@@ -42,6 +42,17 @@ function seedOnchainMatch(db) {
     merklePath: Array(10).fill("0"),
     merklePathIndices: Array(10).fill("0"),
   };
+  const decisionArtifact = buildDecisionArtifact({
+    matchHash,
+    executionKey,
+    makerOrderId: "0x" + "aa".repeat(32),
+    takerOrderId: "0x" + "bb".repeat(32),
+    pairBase: "BUSD",
+    pairQuote: "WBNB",
+    makerSide: "sell",
+    takerSide: "buy",
+    fheResultHash: "0x" + "22".repeat(32),
+  });
   saveMatch(db, {
     id: matchId,
     matchHash,
@@ -57,12 +68,13 @@ function seedOnchainMatch(db) {
     status: "finalized",
     decisionReasonCode: "FHE_ACCEPTED",
     fheResultHash: "0x" + "22".repeat(32),
-    fheDecisionHash: "0x" + "23".repeat(32),
+    fheDecisionHash: hashDecisionArtifact(decisionArtifact),
     fheAttestationRef: "att:m5",
     metadataJson: {
       noteRefs: [{ noteId: "n1" }, { noteId: "n2" }],
       witness: { merkleRoot: pi.merkleRoot },
       changeAmount: "0",
+      decisionArtifact,
       onchain: {
         internalMatchData: {
           takerProof: { a: "0x", b: "0x", c: "0x" },
@@ -106,6 +118,52 @@ function seedOnchainMatch(db) {
     createdAt: now,
   });
   return { matchHash };
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashDecisionArtifact(artifact) {
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(artifact || {})));
+}
+
+function buildDecisionArtifact({
+  matchHash,
+  executionKey,
+  makerOrderId,
+  takerOrderId,
+  pairBase,
+  pairQuote,
+  makerSide,
+  takerSide,
+  fheResultHash,
+}) {
+  return {
+    schema: "phantom.match.decision.v1",
+    domain: {
+      protocol: "phantom-internal-matching",
+      chainId: 97,
+      verifyingContract: ethers.ZeroAddress,
+      engine: "test",
+      engineMode: "remote",
+      decisionDomain: "default",
+    },
+    orders: {
+      taker: { orderId: takerOrderId, side: takerSide, pairBase, pairQuote, nonce: "0", replayKey: "0x" + "aa".repeat(32) },
+      maker: { orderId: makerOrderId, side: makerSide, pairBase, pairQuote, nonce: "0", replayKey: "0x" + "bb".repeat(32) },
+    },
+    constraints: { pair: `${pairBase}/${pairQuote}`, takerSide, makerSide, priceCompatible: true, policyMode: "strict", degradedAllowUnavailable: false },
+    timing: { traceId: "test-trace", decidedAtMs: Date.now(), decisionNonce: "test-nonce" },
+    result: { decision: "match_approved", reasonCode: "FHE_ACCEPTED", fheResultHash },
+    attestation: { reference: "att:m5", signature: "sig:test", payloadHash: "0x" + "cc".repeat(32) },
+    bindings: { matchHash, executionKey },
+  };
 }
 
 test("module5 coordinator persists tx receipt fields in execution journal", async (t) => {
