@@ -9,6 +9,12 @@ import { API_URLS, CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../con
 import { nullifierToBytes32Hex, SHADOW_SWEEP_GAS_BUFFER_WEI_DEFAULT } from "../lib/relayerDefaults.js";
 import FROZEN_CONFIG from "../../frozenProductionConfig.json";
 import {
+  cancelInternalIntent,
+  createInternalIntent,
+  getInternalIntent,
+  listInternalIntents,
+} from "../api/phantomApi";
+import {
   addressToOwnerPublicKey,
   commitmentToBytes32,
   noteCommitment,
@@ -32,6 +38,58 @@ function stringifyErr(x) {
     }
   }
   return String(x);
+}
+
+function looksLikeEndpointUnavailable(errText) {
+  const s = String(errText || "").toLowerCase();
+  return (
+    s.includes("404") ||
+    s.includes("not found") ||
+    s.includes("failed to fetch") ||
+    s.includes("networkerror") ||
+    s.includes("network error") ||
+    s.includes("ecconnrefused") ||
+    s.includes("cannot")
+  );
+}
+
+function normalizeInternalIntent(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = raw.id ?? raw.orderId ?? raw.intentId ?? raw._id;
+  if (id == null) return null;
+  const baseToken = String(raw.baseToken ?? raw.base ?? raw.baseAsset ?? "N/A").toUpperCase();
+  const quoteToken = String(raw.quoteToken ?? raw.quote ?? raw.quoteAsset ?? "N/A").toUpperCase();
+  const side = String(raw.side || "").toLowerCase() === "buy" ? "buy" : "sell";
+  const status = String(raw.status || "UNKNOWN").toUpperCase();
+  const amountRaw = raw.amount ?? raw.size ?? raw.qty ?? "";
+  const priceRaw = raw.price ?? raw.limitPrice ?? "";
+  const amount = amountRaw === "" || amountRaw == null ? "-" : String(amountRaw);
+  const price = priceRaw === "" || priceRaw == null ? "-" : String(priceRaw);
+  const createdBy = String(raw.owner ?? raw.ownerAddress ?? raw.creator ?? raw.userAddress ?? "").toLowerCase();
+  const total =
+    amount !== "-" && price !== "-" && Number.isFinite(Number(amount)) && Number.isFinite(Number(price))
+      ? (Number(amount) * Number(price)).toString()
+      : "-";
+  return {
+    id: String(id),
+    side,
+    pair: `${baseToken}/${quoteToken}`,
+    amount,
+    price,
+    total,
+    status,
+    raw,
+    createdBy,
+  };
+}
+
+function extractIntentList(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.intents)) return payload.intents;
+  if (Array.isArray(payload?.orders)) return payload.orders;
+  if (Array.isArray(payload?.data)) return payload.data;
+  return [];
 }
 
 const BLOCKED_RELAYER_BASES = new Set([
@@ -619,7 +677,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     amount: "",
     price: "",
   });
-  const [localOrders, setLocalOrders] = useState([]);
+  const [internalOrders, setInternalOrders] = useState([]);
+  const [internalListLoading, setInternalListLoading] = useState(false);
+  const [internalActionBusy, setInternalActionBusy] = useState(false);
+  const [internalJoinBusyId, setInternalJoinBusyId] = useState(null);
+  const [internalApiUnavailable, setInternalApiUnavailable] = useState(false);
+  const [internalLastSyncAt, setInternalLastSyncAt] = useState(null);
+  const [selectedIntentId, setSelectedIntentId] = useState("");
+  const [selectedIntentStatus, setSelectedIntentStatus] = useState(null);
 
   useEffect(() => {
     const sanitized = sanitizeRelayerBaseRaw(apiBase, API_URLS.join(", "));
@@ -1914,7 +1979,35 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setActionSuccess(null);
   }
 
-  function placeInternalOrder() {
+  async function refreshInternalIntents() {
+    setInternalListLoading(true);
+    try {
+      const listed = await listInternalIntents({ status: "OPEN", limit: 100, offset: 0 });
+      const rows = extractIntentList(listed).map(normalizeInternalIntent).filter(Boolean);
+      setInternalOrders(rows);
+      setInternalApiUnavailable(false);
+      setInternalLastSyncAt(Date.now());
+      return rows;
+    } catch (e) {
+      const msg = stringifyErr(e?.message ?? e);
+      if (looksLikeEndpointUnavailable(msg)) {
+        setInternalApiUnavailable(true);
+      } else {
+        setActionError(msg);
+      }
+      setInternalOrders([]);
+      return [];
+    } finally {
+      setInternalListLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (uiVariant !== "trade" || tab !== "internal" || tradeNeedsUnlock) return;
+    refreshInternalIntents();
+  }, [uiVariant, tab, tradeNeedsUnlock]);
+
+  async function placeInternalOrder() {
     const amountNum = Number(orderForm.amount);
     const priceNum = Number(orderForm.price);
     if (!Number.isFinite(amountNum) || amountNum <= 0 || !Number.isFinite(priceNum) || priceNum <= 0) {
@@ -1923,54 +2016,93 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     }
     setActionError(null);
     setActionSuccess(null);
-    const next = {
-      id: Date.now(),
-      side: orderForm.side,
-      pair: `${orderForm.baseToken}/${orderForm.quoteToken}`,
-      amount: amountNum.toFixed(4),
-      price: priceNum.toFixed(4),
-      total: (amountNum * priceNum).toFixed(4),
-      status: "OPEN",
-    };
-    setLocalOrders((prev) => [next, ...prev].slice(0, 12));
-    setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
-    setActionSuccess("Internal match intent created. Other users can now join this order.");
+    setInternalActionBusy(true);
+    try {
+      const payload = {
+        side: orderForm.side,
+        baseToken: String(orderForm.baseToken || "").trim().toUpperCase(),
+        quoteToken: String(orderForm.quoteToken || "").trim().toUpperCase(),
+        amount: String(orderForm.amount || "").trim(),
+        price: String(orderForm.price || "").trim(),
+        ownerAddress: wallet?.address || undefined,
+      };
+      const created = await createInternalIntent(payload);
+      if (!created) throw new Error("Backend did not return a created internal intent.");
+      setInternalApiUnavailable(false);
+      setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
+      await refreshInternalIntents();
+      setActionSuccess("Internal match intent created on backend.");
+    } catch (e) {
+      const msg = stringifyErr(e?.message ?? e);
+      if (looksLikeEndpointUnavailable(msg)) {
+        setInternalApiUnavailable(true);
+        setActionError("Internal matching backend is unavailable in this environment (non-production path disabled).");
+      } else {
+        setActionError(msg);
+      }
+    } finally {
+      setInternalActionBusy(false);
+    }
   }
 
-  function joinInternalOrder() {
-    if (!localOrders.length) {
+  async function joinInternalOrder(intentId) {
+    if (!intentId) {
       setActionError("No active internal match intents found yet. Create one first.");
       return;
     }
-    const firstOpen = localOrders.find((order) => order.status === "OPEN");
-    if (!firstOpen) {
-      setActionError("No OPEN intents are available right now.");
-      return;
-    }
-    setLocalOrders((prev) =>
-      prev.map((order) => (order.id === firstOpen.id ? { ...order, status: "MATCHED" } : order))
-    );
+    setInternalJoinBusyId(String(intentId));
     setActionError(null);
-    setActionSuccess(`Matched internal order ${firstOpen.pair} at ${firstOpen.price}.`);
+    setActionSuccess(null);
+    try {
+      const detail = await getInternalIntent(intentId);
+      if (!detail) throw new Error("Unable to fetch selected internal intent from backend.");
+      const norm = normalizeInternalIntent(detail?.intent || detail?.data || detail);
+      setSelectedIntentId(String(intentId));
+      setSelectedIntentStatus(norm?.status || String(detail?.status || "UNKNOWN").toUpperCase());
+      setInternalApiUnavailable(false);
+      setActionSuccess(`Intent ${intentId} fetched from backend. Complete join/match on the server-side matching flow.`);
+      await refreshInternalIntents();
+    } catch (e) {
+      const msg = stringifyErr(e?.message ?? e);
+      if (looksLikeEndpointUnavailable(msg)) {
+        setInternalApiUnavailable(true);
+        setActionError("Internal matching backend is unavailable in this environment (non-production path disabled).");
+      } else {
+        setActionError(msg);
+      }
+    } finally {
+      setInternalJoinBusyId(null);
+    }
   }
 
-  function cancelInternalOrder(orderId) {
-    setLocalOrders((prev) =>
-      prev.map((order) => (order.id === orderId ? { ...order, status: "CANCELLED" } : order))
-    );
+  async function cancelInternalOrder(orderId) {
+    if (!orderId) return;
+    setInternalActionBusy(true);
     setActionError(null);
-    setActionSuccess("Internal match intent cancelled.");
+    setActionSuccess(null);
+    try {
+      await cancelInternalIntent({ orderId, ownerAddress: wallet?.address || undefined });
+      setInternalApiUnavailable(false);
+      setActionSuccess("Internal match intent cancelled on backend.");
+      await refreshInternalIntents();
+    } catch (e) {
+      const msg = stringifyErr(e?.message ?? e);
+      if (looksLikeEndpointUnavailable(msg)) {
+        setInternalApiUnavailable(true);
+        setActionError("Internal matching backend is unavailable in this environment (non-production path disabled).");
+      } else {
+        setActionError(msg);
+      }
+    } finally {
+      setInternalActionBusy(false);
+    }
   }
 
   const showSwapPanel = tab === "swap" || (tab === "all" && uiVariant !== "trade");
-  const hasOpenInternalOrder = useMemo(
-    () => localOrders.some((order) => order.status === "OPEN"),
-    [localOrders]
-  );
   const tradeNeedsUnlock = uiVariant === "trade" && !vault.unlocked;
   const openInternalOrders = useMemo(
-    () => localOrders.filter((order) => order.status === "OPEN"),
-    [localOrders]
+    () => internalOrders.filter((order) => order.status === "OPEN"),
+    [internalOrders]
   );
   const noteBalanceRows = useMemo(() => {
     const notes = Array.isArray(vault.data?.notes) ? vault.data.notes : [];
@@ -2737,6 +2869,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
       {uiVariant === "trade" && tab === "internal" && !tradeNeedsUnlock && (
         <div style={{ marginTop: 14, borderRadius: 20, border: `1px solid ${PC.border}`, background: PC.card, padding: 16 }}>
+          {internalApiUnavailable && (
+            <div style={{ marginBottom: 12, borderRadius: 10, border: "1px solid rgba(248,113,113,0.45)", background: "rgba(127,29,29,0.22)", color: "#fecaca", padding: "10px 12px", fontSize: 12 }}>
+              Internal matching backend endpoint is unavailable in this environment. Local simulation is disabled; no non-production fake match is performed.
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
             {[
               { id: "create", label: "Create match" },
@@ -2761,6 +2898,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 {mode.label}
               </button>
             ))}
+          </div>
+          <div style={{ marginBottom: 12, fontSize: 11, color: PC.muted }}>
+            Last synced: {internalLastSyncAt ? new Date(internalLastSyncAt).toLocaleTimeString() : "Never"}
           </div>
 
           {internalMatchMode === "create" && (
@@ -2796,8 +2936,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 <input value={orderForm.amount} onChange={(e) => setOrderForm((prev) => ({ ...prev, amount: e.target.value }))} placeholder="Amount" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
                 <input value={orderForm.price} onChange={(e) => setOrderForm((prev) => ({ ...prev, price: e.target.value }))} placeholder="Limit price" style={{ borderRadius: 10, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "10px 12px", fontSize: 13 }} />
               </div>
-              <button type="button" onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: "rgba(30,41,59,0.92)", color: "#f8fafc", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: "pointer" }}>
-                Create internal match intent
+              <button type="button" disabled={internalActionBusy || internalApiUnavailable} onClick={placeInternalOrder} style={{ marginTop: 10, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: !internalActionBusy && !internalApiUnavailable ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)", color: "#f8fafc", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: !internalActionBusy && !internalApiUnavailable ? "pointer" : "not-allowed" }}>
+                {internalActionBusy ? "Creating…" : "Create internal match intent"}
               </button>
             </div>
           )}
@@ -2809,21 +2949,36 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 11, color: PC.muted }}>
                   <span>Price</span><span>Size</span><span>Side</span>
                 </div>
-                {openInternalOrders.length === 0 ? (
+                {internalListLoading ? (
+                  <div style={{ fontSize: 12, color: PC.muted, padding: "6px 0" }}>Loading open intents from backend…</div>
+                ) : openInternalOrders.length === 0 ? (
                   <div style={{ fontSize: 12, color: PC.muted, padding: "6px 0" }}>
                     No live internal intents yet. Create a match intent first.
                   </div>
                 ) : openInternalOrders.map((order) => (
-                  <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", fontSize: 12, color: "#fff" }}>
+                  <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, fontSize: 12, color: "#fff", alignItems: "center" }}>
                     <span>{order.price}</span>
                     <span>{order.amount}</span>
                     <span style={{ color: order.side === "sell" ? "#fca5a5" : "#bbf7d0", textTransform: "uppercase" }}>{order.side}</span>
+                    <button
+                      type="button"
+                      onClick={() => joinInternalOrder(order.id)}
+                      disabled={!!internalJoinBusyId || internalApiUnavailable}
+                      style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: !internalJoinBusyId && !internalApiUnavailable ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: !internalJoinBusyId && !internalApiUnavailable ? "pointer" : "not-allowed" }}
+                    >
+                      {internalJoinBusyId === String(order.id) ? "Fetching…" : "Select"}
+                    </button>
                   </div>
                 ))}
               </div>
-              <button type="button" onClick={joinInternalOrder} style={{ marginTop: 12, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: hasOpenInternalOrder ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)", color: hasOpenInternalOrder ? "#f8fafc" : PC.muted, padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: hasOpenInternalOrder ? "pointer" : "not-allowed" }} disabled={!hasOpenInternalOrder}>
-                Match first open intent
+              <button type="button" onClick={refreshInternalIntents} style={{ marginTop: 12, width: "100%", borderRadius: 12, border: "1px solid rgba(148,163,184,0.22)", background: !internalListLoading ? "rgba(30,41,59,0.92)" : "rgba(51,65,85,0.45)", color: "#f8fafc", padding: "12px 14px", fontSize: 14, fontWeight: 800, cursor: !internalListLoading ? "pointer" : "not-allowed" }} disabled={internalListLoading}>
+                {internalListLoading ? "Refreshing…" : "Refresh intents"}
               </button>
+              {selectedIntentId && (
+                <div style={{ marginTop: 8, fontSize: 11, color: PC.muted }}>
+                  Selected intent: {selectedIntentId} ({selectedIntentStatus || "UNKNOWN"})
+                </div>
+              )}
             </div>
           )}
 
@@ -2831,9 +2986,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             <div style={{ borderRadius: 14, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
               <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>My internal intents</div>
               <div style={{ display: "grid", gap: 8 }}>
-                {localOrders.length === 0 ? (
+                {internalListLoading ? (
+                  <div style={{ fontSize: 12, color: PC.muted }}>Loading intents from backend…</div>
+                ) : internalOrders.length === 0 ? (
                   <div style={{ fontSize: 12, color: PC.muted }}>No internal intents yet. Create one in the first tab.</div>
-                ) : localOrders.map((order) => (
+                ) : internalOrders.map((order) => (
                   <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr auto", gap: 8, alignItems: "center", fontSize: 12, color: "#fff" }}>
                     <span>{order.pair}</span>
                     <span>{order.amount}</span>
@@ -2841,15 +2998,23 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                     <span style={{ color: order.status === "OPEN" ? "rgba(226,232,240,0.92)" : PC.muted }}>{order.status}</span>
                     <button
                       type="button"
-                      disabled={order.status !== "OPEN"}
+                      disabled={order.status !== "OPEN" || internalActionBusy || internalApiUnavailable}
                       onClick={() => cancelInternalOrder(order.id)}
-                      style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: order.status === "OPEN" ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: order.status === "OPEN" ? "pointer" : "not-allowed" }}
+                      style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "pointer" : "not-allowed" }}
                     >
-                      Cancel
+                      {internalActionBusy ? "Cancelling…" : "Cancel"}
                     </button>
                   </div>
                 ))}
               </div>
+              <button
+                type="button"
+                onClick={refreshInternalIntents}
+                disabled={internalListLoading}
+                style={{ marginTop: 10, borderRadius: 10, border: `1px solid ${PC.border}`, background: internalListLoading ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.08)", color: "#fff", padding: "8px 10px", fontSize: 12, fontWeight: 700, cursor: internalListLoading ? "not-allowed" : "pointer" }}
+              >
+                {internalListLoading ? "Refreshing…" : "Refresh list"}
+              </button>
             </div>
           )}
         </div>
