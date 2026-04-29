@@ -44,6 +44,9 @@ const { logRelayerOnchainFailure, logProofFailure } = require("./relayerLog");
 const { assertNoMockRuntimeGate } = require("./noMockRuntimeGate");
 const { pushTransaction, getSnapshot } = require("./relayerActivityBuffer");
 const { computeCanonicalAlignmentWarnings } = require("./configAlignment");
+const { createInternalOrderRouter } = require("./internalOrderRoutes");
+const { createSettlementCoordinator, createOnchainInternalMatchSubmitter } = require("./settlementCoordinator");
+const { createComplianceEngine } = require("./complianceEngine");
 const {
   assertRelayerRegistered,
   sendDepositForErc20,
@@ -364,6 +367,25 @@ const VALIDATOR_URLS = process.env.VALIDATOR_URLS
 const RELAYER_REQUIRE_VALIDATOR_QUORUM = process.env.RELAYER_REQUIRE_VALIDATOR_QUORUM === "true"; 
 
 const validatorNetwork = new ValidatorNetwork(VALIDATOR_URLS, 6600); 
+const complianceEngine = createComplianceEngine({ db });
+let settlementSubmitter;
+if (String(process.env.SETTLEMENT_SUBMISSION_MODE || "").toLowerCase() === "live_internal_match") {
+  try {
+    settlementSubmitter = createOnchainInternalMatchSubmitter({
+      rpcUrl: process.env.RPC_URL,
+      privateKey: process.env.RELAYER_PRIVATE_KEY,
+      shieldedPoolAddress: process.env.SHIELDED_POOL_ADDRESS,
+    });
+  } catch (e) {
+    console.warn("[settlement] live internal-match submitter unavailable; falling back to coordinator default:", e.message || e);
+  }
+}
+const settlementCoordinator = createSettlementCoordinator({
+  db,
+  submitter: settlementSubmitter,
+  complianceEngine,
+  validatorNetwork,
+});
 
 const INTENT_DOMAIN = {
   name: "ShadowDeFiRelayer",
@@ -404,6 +426,12 @@ const DEPOSIT_TYPES = {
 const receipts = new Map();
 const intents = new Map();
 const replayCache = new Map();
+const internalOrderRouter = createInternalOrderRouter({
+  db,
+  chainId: CHAIN_ID,
+  verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
+  complianceEngine,
+});
 
 const shadowDeposits = new Map();
 const SHADOW_DEPOSITS_FILE = path.join(process.cwd(), "shadow-deposits.json");
@@ -2324,7 +2352,14 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  const cfg = getRuntimeConfig();
+  let cfg = null;
+  let cfgError = null;
+  try {
+    cfg = getRuntimeConfig();
+  } catch (e) {
+    cfgError = e?.message || String(e);
+  }
+  const seeCfg = getSeeConfig();
   let notesEncryptionConfigured = true;
   try {
     getNotesEncryptionKey();
@@ -2334,12 +2369,13 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     uptimeSec: Math.floor(process.uptime()),
-    mode: cfg.mode,
-    chainId: cfg.chainId,
-    poolConfigured: !!cfg.addresses?.shieldedPool,
+    mode: cfg?.mode || "unknown",
+    chainId: cfg?.chainId ?? null,
+    poolConfigured: !!cfg?.addresses?.shieldedPool,
     notesEncryptionConfigured,
-    missingForTx: cfg.missingForTx,
-    configWarningCount: Array.isArray(cfg.configWarnings) ? cfg.configWarnings.length : 0,
+    missingForTx: cfg?.missingForTx || [],
+    configWarningCount: Array.isArray(cfg?.configWarnings) ? cfg.configWarnings.length : 0,
+    configError: cfgError,
     module4: {
       sessionTtlMs: MODULE4_SESSION_TTL_MS,
       publicSubmit: MODULE4_PUBLIC_SUBMIT,
@@ -2357,7 +2393,52 @@ app.get("/health", (req, res) => {
       noMockGateSkipped: process.env.PHANTOM_SKIP_NO_MOCK_GATE === "true",
       mockFingerprintFile: "config/module7-mock-bytecode-hashes.json",
     },
+    internalRoutes: {
+      intentInternal: true,
+      settlementInternal: true,
+      seeMode: seeCfg.mode,
+      endpoints: [
+        "/intent/internal",
+        "/intent/internal/cancel",
+        "/intent/internal/:id",
+        "/settlement/internal/:matchHash/start",
+        "/settlement/internal/:matchHash/retry",
+        "/settlement/internal/:matchHash/status",
+      ],
+    },
   });
+});
+
+app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
+
+app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, async (req, res) => {
+  const matchHash = String(req.params.matchHash || "").trim();
+  if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
+  try {
+    const out = await settlementCoordinator.start(matchHash, req.body || {});
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: "settlement_start_failed", message: e.message || String(e) });
+  }
+});
+
+app.post("/settlement/internal/:matchHash/retry", requireSeeForSensitiveFlow, async (req, res) => {
+  const matchHash = String(req.params.matchHash || "").trim();
+  if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
+  try {
+    const out = await settlementCoordinator.retry(matchHash, req.body || {});
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: "settlement_retry_failed", message: e.message || String(e) });
+  }
+});
+
+app.get("/settlement/internal/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
+  const matchHash = String(req.params.matchHash || "").trim();
+  if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
+  const snapshot = settlementCoordinator.getStatus(matchHash);
+  if (!snapshot) return res.status(404).json({ error: "settlement_execution_not_found", matchHash });
+  return res.json(snapshot);
 });
 
 app.get("/config", (req, res) => {
