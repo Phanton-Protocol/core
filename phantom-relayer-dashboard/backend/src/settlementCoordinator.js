@@ -566,45 +566,116 @@ function normalizeJoinSplitInputsTuple(pi) {
   ];
 }
 
+function normalizeSwapParamsTuple(sp = {}) {
+  return [
+    sp?.tokenIn || ethers.ZeroAddress,
+    sp?.tokenOut || ethers.ZeroAddress,
+    toU256(sp?.amountIn),
+    toU256(sp?.minAmountOut),
+    Number(sp?.fee ?? 0),
+    toU256(sp?.sqrtPriceLimitX96),
+    sp?.path || "0x",
+  ];
+}
+
+function normalizeJoinSplitSwapDataTuple(data = {}, defaults = {}) {
+  const deadline = toU256(data?.deadline ?? defaults?.deadline ?? Math.floor(Date.now() / 1000) + 900);
+  const nonce = toU256(data?.nonce ?? defaults?.nonce ?? 0);
+  return [
+    normalizeProofTuple(data?.proof),
+    normalizeJoinSplitInputsTuple(data?.publicInputs),
+    normalizeSwapParamsTuple(data?.swapParams),
+    data?.relayer || defaults?.relayer || ethers.ZeroAddress,
+    data?.encryptedPayload || defaults?.encryptedPayload || "0x",
+    toBytes32(data?.commitment ?? defaults?.commitment ?? ethers.ZeroHash),
+    deadline,
+    nonce,
+    data?.relayerAttestationSig || defaults?.relayerAttestationSig || "0x",
+    toU256(data?.relayerAttestationDeadline ?? defaults?.relayerAttestationDeadline ?? deadline),
+    toU256(data?.relayerAttestationNonce ?? defaults?.relayerAttestationNonce ?? nonce),
+  ];
+}
+
 function createOnchainInternalMatchSubmitter({
   rpcUrl = process.env.RPC_URL,
   privateKey = process.env.RELAYER_PRIVATE_KEY,
   shieldedPoolAddress = process.env.SHIELDED_POOL_ADDRESS,
+  providerFactory,
+  signerFactory,
+  contractFactory,
 } = {}) {
   if (!rpcUrl || !privateKey || !shieldedPoolAddress) {
     throw new Error("onchain_submitter_env_missing");
   }
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const signer = new ethers.Wallet(privateKey, provider);
+  const provider = providerFactory ? providerFactory(rpcUrl) : new ethers.JsonRpcProvider(rpcUrl);
+  const signer = signerFactory ? signerFactory(privateKey, provider) : new ethers.Wallet(privateKey, provider);
   const abi = [
-    "function internalMatchSettle(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),address,bytes32,bytes32,bytes)) external",
+    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256)) external",
   ];
-  const contract = new ethers.Contract(shieldedPoolAddress, abi, signer);
+  const contract = contractFactory
+    ? contractFactory(shieldedPoolAddress, abi, signer)
+    : new ethers.Contract(shieldedPoolAddress, abi, signer);
 
   return async function onchainSubmitter({ payload }) {
     const data = payload?.onchain?.internalMatchData;
     if (!data) throw new Error("internal_match_data_missing");
-    const tx = await contract.internalMatchSettle([
-      normalizeProofTuple(data.takerProof),
-      normalizeJoinSplitInputsTuple(data.takerInputs),
-      normalizeProofTuple(data.makerProof),
-      normalizeJoinSplitInputsTuple(data.makerInputs),
-      data.relayer || signer.address,
-      toBytes32(data.matchHash || payload.matchHash),
-      toBytes32(data.executionKey || payload.executionKey),
-      data.encryptedPayload || "0x",
-    ]);
-    const receipt = await tx.wait();
+    const legs = [];
+    if (data.takerSwapData || data.makerSwapData) {
+      if (data.takerSwapData) legs.push(data.takerSwapData);
+      if (data.makerSwapData) legs.push(data.makerSwapData);
+    } else if (data.takerInputs || data.makerInputs) {
+      if (data.takerInputs) {
+        legs.push({
+          proof: data.takerProof,
+          publicInputs: data.takerInputs,
+          swapParams: data.takerSwapParams || data.swapParams || {},
+        });
+      }
+      if (data.makerInputs) {
+        legs.push({
+          proof: data.makerProof,
+          publicInputs: data.makerInputs,
+          swapParams: data.makerSwapParams || data.swapParams || {},
+        });
+      }
+    } else if (data.swapData) {
+      legs.push(data.swapData);
+    }
+    if (!legs.length) throw new Error("internal_match_settlement_data_missing_legs");
+
+    const receipts = [];
+    let txHash = null;
+    for (const leg of legs) {
+      const tuple = normalizeJoinSplitSwapDataTuple(leg, {
+        relayer: data.relayer || signer.address,
+        encryptedPayload: data.encryptedPayload || "0x",
+        commitment: data.commitment || ethers.ZeroHash,
+        deadline: data.deadline,
+        nonce: data.nonce,
+        relayerAttestationSig: data.relayerAttestationSig || "0x",
+        relayerAttestationDeadline: data.relayerAttestationDeadline,
+        relayerAttestationNonce: data.relayerAttestationNonce,
+      });
+      const tx = await contract.shieldedSwapJoinSplit(tuple);
+      const receipt = await tx.wait();
+      txHash = receipt?.hash || tx.hash;
+      receipts.push(
+        receipt
+          ? {
+              blockNumber: receipt.blockNumber,
+              status: receipt.status,
+              gasUsed: receipt.gasUsed != null ? String(receipt.gasUsed) : null,
+              txHash,
+            }
+          : { txHash }
+      );
+    }
     return {
-      txHash: receipt?.hash || tx.hash,
-      receipt: receipt
-        ? {
-            blockNumber: receipt.blockNumber,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed != null ? String(receipt.gasUsed) : null,
-          }
-        : null,
+      txHash,
+      receipt: receipts[receipts.length - 1] || null,
+      legReceipts: receipts,
       mode: "live_internal_match",
+      settlementFunction: "shieldedSwapJoinSplit",
     };
   };
 }

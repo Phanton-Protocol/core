@@ -5,7 +5,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { ethers } = require("ethers");
 const { initDb, saveMatch, saveFill } = require("../src/db");
-const { createSettlementCoordinator, SETTLEMENT_STATUS } = require("../src/settlementCoordinator");
+const {
+  createSettlementCoordinator,
+  createOnchainInternalMatchSubmitter,
+  SETTLEMENT_STATUS,
+} = require("../src/settlementCoordinator");
 
 function withDb(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "phantom-m5-"));
@@ -139,4 +143,96 @@ test("module5 coordinator idempotency avoids duplicate live submits", async (t) 
   assert.equal(a.settlementStatus, SETTLEMENT_STATUS.SUBMITTED);
   assert.equal(b.idempotent, true);
   assert.equal(calls, 1);
+});
+
+test("module5 onchain submitter calls shieldedSwapJoinSplit legs", async () => {
+  const calls = [];
+  const submitter = createOnchainInternalMatchSubmitter({
+    rpcUrl: "http://localhost:8545",
+    privateKey: "0x" + "11".repeat(32),
+    shieldedPoolAddress: "0x" + "22".repeat(20),
+    providerFactory: () => ({}),
+    signerFactory: () => ({ address: "0x" + "33".repeat(20) }),
+    contractFactory: () => ({
+      shieldedSwapJoinSplit: async (tuple) => {
+        calls.push(tuple);
+        return {
+          hash: "0x" + "aa".repeat(32),
+          wait: async () => ({
+            hash: "0x" + "aa".repeat(32),
+            blockNumber: 7,
+            status: 1,
+            gasUsed: 123456n,
+          }),
+        };
+      },
+    }),
+  });
+
+  const payload = {
+    matchHash: "0x" + "44".repeat(32),
+    executionKey: "0x" + "55".repeat(32),
+    onchain: {
+      internalMatchData: {
+        relayer: "0x" + "66".repeat(20),
+        encryptedPayload: "0x",
+        swapParams: {
+          tokenIn: "0x" + "77".repeat(20),
+          tokenOut: "0x" + "88".repeat(20),
+          amountIn: "100",
+          minAmountOut: "95",
+          fee: 3000,
+          sqrtPriceLimitX96: 0,
+          path: "0x",
+        },
+        takerProof: { a: "0x", b: "0x", c: "0x" },
+        makerProof: { a: "0x", b: "0x", c: "0x" },
+        takerInputs: {
+          nullifier: "0x" + "01".repeat(32),
+          inputCommitment: "0x" + "02".repeat(32),
+          outputCommitmentSwap: "0x" + "03".repeat(32),
+          outputCommitmentChange: "0x" + "04".repeat(32),
+          merkleRoot: "0x" + "05".repeat(32),
+          inputAssetID: "0",
+          outputAssetIDSwap: "1",
+          outputAssetIDChange: "0",
+          inputAmount: "100",
+          swapAmount: "95",
+          changeAmount: "5",
+          outputAmountSwap: "95",
+          minOutputAmountSwap: "95",
+          gasRefund: "0",
+          protocolFee: "0",
+          merklePath: Array(10).fill("0"),
+          merklePathIndices: Array(10).fill("0"),
+        },
+        makerInputs: {
+          nullifier: "0x" + "06".repeat(32),
+          inputCommitment: "0x" + "07".repeat(32),
+          outputCommitmentSwap: "0x" + "08".repeat(32),
+          outputCommitmentChange: "0x" + "09".repeat(32),
+          merkleRoot: "0x" + "0a".repeat(32),
+          inputAssetID: "1",
+          outputAssetIDSwap: "0",
+          outputAssetIDChange: "1",
+          inputAmount: "100",
+          swapAmount: "95",
+          changeAmount: "5",
+          outputAmountSwap: "95",
+          minOutputAmountSwap: "95",
+          gasRefund: "0",
+          protocolFee: "0",
+          merklePath: Array(10).fill("0"),
+          merklePathIndices: Array(10).fill("0"),
+        },
+      },
+    },
+  };
+
+  const out = await submitter({ payload });
+  assert.equal(calls.length, 2);
+  assert.equal(out.mode, "live_internal_match");
+  assert.equal(out.settlementFunction, "shieldedSwapJoinSplit");
+  assert.equal(out.receipt.status, 1);
+  assert.equal(out.legReceipts.length, 2);
 });

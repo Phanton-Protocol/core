@@ -1162,7 +1162,7 @@ function saveMatch(db, row) {
     `INSERT INTO matches(
       id, matchHash, executionKey, pairBase, pairQuote, makerOrderId, takerOrderId,
       makerSide, takerSide, executionPrice, quantity, status, decisionReasonCode, fheResultHash, fheDecisionHash, fheAttestationRef, metadataJson, createdAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   stmt.run(
     row.id,
