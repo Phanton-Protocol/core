@@ -54,12 +54,10 @@ function FHEMatching() {
         timestamp: Date.now(),
       };
       setStatus('Encrypting…');
-      let encrypted = payload;
-      try {
-        const encResult = await encryptFhe(payload);
-        encrypted = encResult.ciphertext ?? encResult.encrypted ?? encResult;
-      } catch {
-        encrypted = { ...payload, encrypted: false };
+      const encResult = await encryptFhe(payload);
+      const encrypted = encResult.ciphertext ?? encResult.encrypted ?? encResult;
+      if (!encrypted) {
+        throw new Error('FHE encryption unavailable. Order submission is blocked.');
       }
       setStatus('Submitting…');
       const result = await submitFheOrder(encrypted);

@@ -24,6 +24,9 @@ const FHE_SERVICE_URL = (process.env.FHE_SERVICE_URL || '').replace(/\/$/, '');
 const FHE_SERVICE_TIMEOUT_MS = Number(process.env.FHE_SERVICE_TIMEOUT_MS || 30000);
 const FHE_REMOTE_CONFIGURED = Boolean(FHE_SERVICE_URL);
 const FHE_REMOTE_ENABLED = FHE_MODE === "remote" && FHE_REMOTE_CONFIGURED;
+const NODE_ENV = String(process.env.NODE_ENV || "").toLowerCase();
+const DEPLOYMENT_TIER = String(process.env.PHANTOM_DEPLOYMENT_TIER || "").trim().toLowerCase();
+const FHE_PRODUCTION_MODE = NODE_ENV === "production" || DEPLOYMENT_TIER === "production";
 
 let lastRemoteHealth = {
   checkedAt: 0,
@@ -114,6 +117,37 @@ const REASON_CODES = Object.freeze({
   NO_COMPATIBLE_COUNTERPARTY: "NO_COMPATIBLE_COUNTERPARTY",
   INTERNAL_ERROR: "INTERNAL_ERROR",
 });
+
+function deriveFheSecurityPolicy(env = process.env) {
+  const nodeEnv = String(env.NODE_ENV || "").toLowerCase();
+  const tier = String(env.PHANTOM_DEPLOYMENT_TIER || "").trim().toLowerCase();
+  const production = nodeEnv === "production" || tier === "production";
+  const modeRaw = String(env.FHE_MODE || "mock").trim().toLowerCase();
+  const mode = modeRaw === "remote" ? "remote" : "mock";
+  const serviceUrlConfigured = Boolean(String(env.FHE_SERVICE_URL || "").trim());
+  const policyMode = String(env.MATCHING_FHE_POLICY_MODE || "degraded").trim().toLowerCase() === "strict"
+    ? "strict"
+    : "degraded";
+  const degradedAllowUnavailable = String(env.MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE || "").toLowerCase() !== "false";
+  return { production, mode, serviceUrlConfigured, policyMode, degradedAllowUnavailable };
+}
+
+function assertFheProductionSafety(policy = deriveFheSecurityPolicy()) {
+  if (!policy.production) return;
+  if (policy.mode !== "remote") {
+    throw new Error("Production startup blocked: FHE_MODE must be 'remote' (mock is forbidden).");
+  }
+  if (!policy.serviceUrlConfigured) {
+    throw new Error("Production startup blocked: FHE_SERVICE_URL is required for remote FHE.");
+  }
+  if (policy.policyMode !== "strict") {
+    throw new Error("Production startup blocked: MATCHING_FHE_POLICY_MODE must be 'strict'.");
+  }
+  if (policy.degradedAllowUnavailable) {
+    throw new Error("Production startup blocked: MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE must be false.");
+  }
+}
+assertFheProductionSafety();
 
 function orderBookKey(inputAssetID, outputAssetID) {
   return `${Number(inputAssetID)}-${Number(outputAssetID)}`;
@@ -235,13 +269,20 @@ async function withJsonLock(task) {
 }
 
 function configureMatchingEngine(opts = {}) {
+  const nextPolicyMode = String(opts.fhePolicyMode || DEFAULT_FHE_POLICY_MODE).toLowerCase() === "strict"
+    ? "strict"
+    : "degraded";
+  const nextDegradedAllowUnavailable = typeof opts.degradedAllowUnavailable === "boolean"
+    ? opts.degradedAllowUnavailable
+    : DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE;
+  if (FHE_PRODUCTION_MODE && (nextPolicyMode !== "strict" || nextDegradedAllowUnavailable)) {
+    throw new Error("Production matching engine requires strict policy and degraded fallback disabled.");
+  }
   matchingContext = {
     db: opts.db || null,
     reservationTtlMs: Number(opts.reservationTtlMs || DEFAULT_RESERVATION_TTL_MS),
-    fhePolicyMode: String(opts.fhePolicyMode || DEFAULT_FHE_POLICY_MODE).toLowerCase() === "strict" ? "strict" : "degraded",
-    degradedAllowUnavailable: typeof opts.degradedAllowUnavailable === "boolean"
-      ? opts.degradedAllowUnavailable
-      : DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE,
+    fhePolicyMode: nextPolicyMode,
+    degradedAllowUnavailable: nextDegradedAllowUnavailable,
     fheCompatibilityEvaluator: typeof opts.fheCompatibilityEvaluator === "function" ? opts.fheCompatibilityEvaluator : null,
   };
 }
@@ -962,6 +1003,10 @@ async function matchOrdersFHE(order1, order2) {
     }
   }
 
+  if (FHE_PRODUCTION_MODE) {
+    throw new Error("fhe_remote_required_in_production");
+  }
+
   const a1 = Number(order1.inputAssetID);
   const a2 = Number(order1.outputAssetID);
   const b1 = Number(order2.inputAssetID);
@@ -1023,6 +1068,12 @@ router.post('/match', async (req, res) => {
         const code = e.status >= 400 && e.status < 600 ? e.status : 502;
         return res.status(code).json({ error: e.message || 'FHE service error' });
       }
+    }
+    if (FHE_PRODUCTION_MODE) {
+      return res.status(503).json({
+        error: "fhe_remote_required_in_production",
+        detail: "Mock/plaintext matching fallback is disabled in production.",
+      });
     }
 
     const result = await matchOrdersFHE(n1, n2);
@@ -1119,6 +1170,12 @@ router.get('/health', async (req, res) => {
     fheServiceError: remoteHealth.error,
     fheServiceCheckedAt: remoteHealth.checkedAt,
     fhePolicy: getFhePolicy(),
+    productionPolicy: {
+      production: FHE_PRODUCTION_MODE,
+      mockForbidden: FHE_PRODUCTION_MODE,
+      plaintextFallbackForbidden: FHE_PRODUCTION_MODE,
+      failClosedOnUnavailable: FHE_PRODUCTION_MODE,
+    },
   });
 });
 
@@ -1142,6 +1199,12 @@ router.post('/compute', async (req, res) => {
         const code = e.status >= 400 && e.status < 600 ? e.status : 502;
         return res.status(code).json({ error: e.message || 'FHE service error' });
       }
+    }
+    if (FHE_PRODUCTION_MODE) {
+      return res.status(503).json({
+        error: "fhe_remote_required_in_production",
+        detail: "Local compute fallback is disabled in production.",
+      });
     }
 
     console.log(`🔄 FHE computation: ${operation}`);
@@ -1169,6 +1232,12 @@ router.get('/public-key', async (req, res) => {
       return res.status(code).json({ error: e.message || 'FHE service error' });
     }
   }
+  if (FHE_PRODUCTION_MODE) {
+    return res.status(503).json({
+      error: "fhe_remote_required_in_production",
+      detail: "Mock public key fallback is disabled in production.",
+    });
+  }
   res.json({ publicKey: ethers.hexlify(ethers.randomBytes(32)) });
 });
 
@@ -1187,6 +1256,12 @@ router.post('/encrypt', async (req, res) => {
         return res.status(code).json({ error: e.message || 'FHE service error' });
       }
     }
+    if (FHE_PRODUCTION_MODE) {
+      return res.status(503).json({
+        error: "fhe_remote_required_in_production",
+        detail: "Plaintext passthrough encryption fallback is disabled in production.",
+      });
+    }
     res.json({ ciphertext: req.body });
   } catch (e) {
     res.status(500).json({ error: e.message || 'encrypt failed' });
@@ -1195,6 +1270,12 @@ router.post('/encrypt', async (req, res) => {
 
 router.post('/order', async (req, res) => {
   try {
+    if (FHE_PRODUCTION_MODE) {
+      return res.status(403).json({
+        error: "plaintext_order_submission_disabled_in_production",
+        detail: "Use remote encrypted order submission path only.",
+      });
+    }
     const encrypted = req.body?.ciphertext ?? req.body?.encrypted ?? req.body;
     if (!encrypted) {
       return res.status(400).json({ error: 'Missing order payload' });
@@ -1253,4 +1334,7 @@ module.exports.reconcileStaleReservations = reconcileStaleReservations;
 module.exports.computeStableMatchHash = computeStableMatchHash;
 module.exports.computeFheDecisionHash = computeFheDecisionHash;
 module.exports.REASON_CODES = REASON_CODES;
+module.exports.deriveFheSecurityPolicy = deriveFheSecurityPolicy;
+module.exports.assertFheProductionSafety = assertFheProductionSafety;
+module.exports.FHE_PRODUCTION_MODE = FHE_PRODUCTION_MODE;
 loadOrderBook();

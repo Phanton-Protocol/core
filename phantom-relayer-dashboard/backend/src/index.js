@@ -37,7 +37,7 @@ const ValidatorNetwork = require("./validatorNetwork");
 const { generateSwapProof, generateWithdrawProof, generatePortfolioProof, getProofStats } = require("./zkProofs");
 const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
-const { registerOrderAndTryMatch, getFheMatchMode } = require("./fheMatchingService");
+const { registerOrderAndTryMatch, getFheMatchMode, assertFheProductionSafety } = require("./fheMatchingService");
 const { createEnterpriseRouter } = require("./enterpriseRoutes");
 const { getSeeConfig, verifyAttestation, requireSeeForSensitiveFlow } = require("./seeGuard");
 const { logRelayerOnchainFailure, logProofFailure } = require("./relayerLog");
@@ -356,6 +356,7 @@ function assertProductionReadiness() {
   if (seeMode !== "disabled" && !process.env.SEE_SHARED_SECRET) {
     throw new Error("Production startup blocked: SEE_SHARED_SECRET is required when SEE_MODE is enabled.");
   }
+  assertFheProductionSafety();
 }
 assertStagingProductionBypassPolicy();
 assertProductionReadiness();
