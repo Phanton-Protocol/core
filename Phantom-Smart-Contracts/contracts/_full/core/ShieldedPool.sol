@@ -124,6 +124,17 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     bytes32 public constant RELAYER_ATTESTATION_NAME_HASH = keccak256("PhantomRelayerAttestation");
     bytes32 public constant RELAYER_ATTESTATION_VERSION_HASH = keccak256("1");
     mapping(address => mapping(uint256 => bool)) public relayerAttestationNonceUsed;
+    bytes32 public constant INTERNAL_MATCH_ATTESTATION_TYPEHASH = keccak256(
+        "InternalMatchAttestation(bytes32 decisionHash,bytes32 matchHash,bytes32 executionKey,address relayer,bytes32 signerSetHash,uint256 deadline,uint256 nonce)"
+    );
+    bytes32 public constant INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 public constant INTERNAL_MATCH_ATTESTATION_NAME_HASH = keccak256("PhantomInternalMatchAttestation");
+    bytes32 public constant INTERNAL_MATCH_ATTESTATION_VERSION_HASH = keccak256("1");
+    mapping(address => mapping(uint256 => bool)) public internalMatchAttestationNonceUsed;
+    mapping(bytes32 => bool) public usedInternalMatchHashes;
+    mapping(bytes32 => bool) public usedInternalDecisionHashes;
     
     // ============ Compliance Module ============
     /// @notice Compliance module for Chainalysis checks
@@ -197,6 +208,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     event NullifierMarked(bytes32 indexed nullifier);
     event GasRefunded(address indexed relayer, uint256 amount);
     event RelayerAttestationVerified(address indexed relayer, uint256 indexed nonce, bytes32 digest);
+    event InternalMatchSettled(
+        bytes32 indexed matchHash,
+        bytes32 indexed decisionHash,
+        bytes32 indexed executionKey,
+        bytes32 makerOrderId,
+        bytes32 takerOrderId,
+        address relayer
+    );
     event RelayerBlacklisted(address indexed relayer);
     event RelayerUnblacklisted(address indexed relayer);
 
@@ -526,6 +545,61 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     function shieldedSwapJoinSplit(
         JoinSplitSwapData calldata swapData
     ) external override nonReentrant {
+        _executeShieldedSwapJoinSplit(swapData);
+    }
+
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata settlementData
+    ) external override nonReentrant onlyRelayer {
+        if (usedInternalMatchHashes[settlementData.matchHash]) revert PoolErr(52);
+        if (usedInternalDecisionHashes[settlementData.decisionHash]) revert PoolErr(53);
+        if (settlementData.attestationDeadline < block.timestamp) revert PoolErr(54);
+        if (internalMatchAttestationNonceUsed[msg.sender][settlementData.attestationNonce]) revert PoolErr(55);
+
+        bytes32 decisionHash = _computeInternalDecisionHash(settlementData.artifact);
+        if (decisionHash != settlementData.decisionHash) revert PoolErr(56);
+        if (!settlementData.artifact.approved) revert PoolErr(57);
+
+        if (settlementData.artifact.makerInputCommitment != settlementData.makerSwapData.publicInputs.inputCommitment) revert PoolErr(56);
+        if (settlementData.artifact.takerInputCommitment != settlementData.takerSwapData.publicInputs.inputCommitment) revert PoolErr(56);
+        if (settlementData.artifact.makerInputAssetID != settlementData.makerSwapData.publicInputs.inputAssetID) revert PoolErr(56);
+        if (settlementData.artifact.takerInputAssetID != settlementData.takerSwapData.publicInputs.inputAssetID) revert PoolErr(56);
+        if (settlementData.artifact.executionPrice == 0 || settlementData.artifact.quantity == 0) revert PoolErr(56);
+        if (!settlementData.artifact.makerIsSell || !settlementData.artifact.takerIsBuy) revert PoolErr(56);
+        if (settlementData.artifact.quantity > settlementData.takerSwapData.publicInputs.swapAmount) revert PoolErr(56);
+        if (settlementData.artifact.quantity > settlementData.makerSwapData.publicInputs.swapAmount) revert PoolErr(56);
+
+        bytes32 digest = _computeInternalMatchAttestationDigest(
+            settlementData.decisionHash,
+            settlementData.matchHash,
+            settlementData.executionKey,
+            msg.sender,
+            settlementData.artifact.signerSetHash,
+            settlementData.attestationDeadline,
+            settlementData.attestationNonce
+        );
+        address recovered = _recoverAttestationSigner(digest, settlementData.attestationSig);
+        if (recovered != msg.sender) revert PoolErr(51);
+        if (settlementData.artifact.signerSetHash != keccak256(abi.encodePacked(msg.sender))) revert PoolErr(56);
+
+        internalMatchAttestationNonceUsed[msg.sender][settlementData.attestationNonce] = true;
+
+        usedInternalMatchHashes[settlementData.matchHash] = true;
+        usedInternalDecisionHashes[settlementData.decisionHash] = true;
+
+        emit InternalMatchSettled(
+            settlementData.matchHash,
+            settlementData.decisionHash,
+            settlementData.executionKey,
+            settlementData.artifact.makerOrderId,
+            settlementData.artifact.takerOrderId,
+            msg.sender
+        );
+    }
+
+    function _executeShieldedSwapJoinSplit(
+        JoinSplitSwapData calldata swapData
+    ) internal {
         // ============ MEV & FRONTRUNNING PROTECTION ============
         // Optional: Only verify if commitment is provided (backward compatibility)
         if (swapData.commitment != bytes32(0)) {
@@ -666,12 +740,63 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             emit EncryptedPayload(inputs.nullifier, swapData.encryptedPayload);
         }
         
-        // Log transaction for history
-        // Note: User address would be extracted from proof in production
-        if (relayer != address(0)) {
-            // Transaction logging handled off-chain to reduce stack depth
-            // _logTransaction(relayer, 1, inputs.outputCommitmentSwap, false);
-        }
+        // Log transaction for history intentionally off-chain.
+    }
+
+    function _computeInternalDecisionHash(
+        InternalMatchDecisionArtifact calldata artifact
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                artifact.makerOrderId,
+                artifact.takerOrderId,
+                artifact.makerInputCommitment,
+                artifact.takerInputCommitment,
+                artifact.makerInputAssetID,
+                artifact.takerInputAssetID,
+                artifact.executionPrice,
+                artifact.quantity,
+                artifact.makerIsSell,
+                artifact.takerIsBuy,
+                artifact.approved,
+                artifact.decidedAt,
+                artifact.decisionNonce,
+                artifact.signerSetHash
+            )
+        );
+    }
+
+    function _computeInternalMatchAttestationDigest(
+        bytes32 decisionHash,
+        bytes32 matchHash,
+        bytes32 executionKey,
+        address relayer,
+        bytes32 signerSetHash,
+        uint256 deadline,
+        uint256 nonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                INTERNAL_MATCH_ATTESTATION_TYPEHASH,
+                decisionHash,
+                matchHash,
+                executionKey,
+                relayer,
+                signerSetHash,
+                deadline,
+                nonce
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH,
+                INTERNAL_MATCH_ATTESTATION_NAME_HASH,
+                INTERNAL_MATCH_ATTESTATION_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
     function _verifyRelayerSwapAttestation(

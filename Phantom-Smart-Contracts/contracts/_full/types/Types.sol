@@ -160,6 +160,42 @@ struct JoinSplitSwapData {
 }
 
 /**
+ * @notice Canonical internal-match decision artifact (hashable, auditable).
+ * @dev Must be bound to maker/taker identities, commitments, terms and domain.
+ */
+struct InternalMatchDecisionArtifact {
+    bytes32 makerOrderId;
+    bytes32 takerOrderId;
+    bytes32 makerInputCommitment;
+    bytes32 takerInputCommitment;
+    uint256 makerInputAssetID;
+    uint256 takerInputAssetID;
+    uint256 executionPrice;
+    uint256 quantity;
+    bool makerIsSell;
+    bool takerIsBuy;
+    bool approved;
+    uint256 decidedAt;
+    uint256 decisionNonce;
+    bytes32 signerSetHash;
+}
+
+/**
+ * @notice Atomic internal-match settlement payload (dual leg + decision attestation).
+ */
+struct InternalMatchSettlementData {
+    JoinSplitSwapData takerSwapData;
+    JoinSplitSwapData makerSwapData;
+    bytes32 matchHash;
+    bytes32 executionKey;
+    bytes32 decisionHash;
+    InternalMatchDecisionArtifact artifact;
+    bytes attestationSig;
+    uint256 attestationDeadline;
+    uint256 attestationNonce;
+}
+
+/**
  * @notice Public inputs for portfolio-note swaps/updates
  */
 struct PortfolioSwapPublicInputs {

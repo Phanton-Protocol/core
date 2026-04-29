@@ -203,8 +203,8 @@ test("module5 coordinator idempotency avoids duplicate live submits", async (t) 
   assert.equal(calls, 1);
 });
 
-test("module5 onchain submitter calls shieldedSwapJoinSplit legs", async () => {
-  const calls = [];
+test("module5 onchain submitter calls internalMatchSettle", async () => {
+  let callTuple = null;
   const submitter = createOnchainInternalMatchSubmitter({
     rpcUrl: "http://localhost:8545",
     privateKey: "0x" + "11".repeat(32),
@@ -212,8 +212,8 @@ test("module5 onchain submitter calls shieldedSwapJoinSplit legs", async () => {
     providerFactory: () => ({}),
     signerFactory: () => ({ address: "0x" + "33".repeat(20) }),
     contractFactory: () => ({
-      shieldedSwapJoinSplit: async (tuple) => {
-        calls.push(tuple);
+      internalMatchSettle: async (tuple) => {
+        callTuple = tuple;
         return {
           hash: "0x" + "aa".repeat(32),
           wait: async () => ({
@@ -245,6 +245,10 @@ test("module5 onchain submitter calls shieldedSwapJoinSplit legs", async () => {
         },
         takerProof: { a: "0x", b: "0x", c: "0x" },
         makerProof: { a: "0x", b: "0x", c: "0x" },
+        decisionHash: "0x" + "99".repeat(32),
+        attestationSig: "0x1234",
+        attestationDeadline: String(Math.floor(Date.now() / 1000) + 600),
+        attestationNonce: "9",
         takerInputs: {
           nullifier: "0x" + "01".repeat(32),
           inputCommitment: "0x" + "02".repeat(32),
@@ -285,12 +289,31 @@ test("module5 onchain submitter calls shieldedSwapJoinSplit legs", async () => {
         },
       },
     },
+    fheBinding: {
+      fheDecisionHash: "0x" + "99".repeat(32),
+      decisionArtifact: {
+        makerOrderId: "0x" + "aa".repeat(32),
+        takerOrderId: "0x" + "bb".repeat(32),
+        makerInputCommitment: "0x" + "07".repeat(32),
+        takerInputCommitment: "0x" + "02".repeat(32),
+        makerInputAssetID: "1",
+        takerInputAssetID: "0",
+        executionPrice: "10",
+        quantity: "95",
+        makerIsSell: true,
+        takerIsBuy: true,
+        approved: true,
+        decidedAt: String(Math.floor(Date.now() / 1000)),
+        decisionNonce: "9",
+        signerSetHash: "0x" + "11".repeat(32),
+      },
+    },
   };
 
   const out = await submitter({ payload });
-  assert.equal(calls.length, 2);
+  assert.ok(callTuple);
   assert.equal(out.mode, "live_internal_match");
-  assert.equal(out.settlementFunction, "shieldedSwapJoinSplit");
+  assert.equal(out.settlementFunction, "internalMatchSettle");
   assert.equal(out.receipt.status, 1);
-  assert.equal(out.legReceipts.length, 2);
+  assert.equal(out.legReceipts.length, 1);
 });

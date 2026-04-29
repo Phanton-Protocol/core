@@ -682,6 +682,12 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         }
     }
 
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata
+    ) external pure override {
+        revert("internalMatchSettle unsupported on upgradeable path");
+    }
+
     function _verifyRelayerSwapAttestation(
         JoinSplitSwapData calldata swapData,
         JoinSplitPublicInputs memory inputs,

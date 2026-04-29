@@ -551,6 +551,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         emit CommitmentAdded(inputs.outputCommitmentChange, changeIndex);
     }
 
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata
+    ) external pure override {
+        revert("internalMatchSettle unsupported on reduced path");
+    }
+
 
     // ============ Withdraw Functions ============
     function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant {

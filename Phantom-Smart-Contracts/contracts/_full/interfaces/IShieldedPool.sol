@@ -90,6 +90,13 @@ interface IShieldedPool {
     ) external;
 
     /**
+     * @notice Executes atomic internal settlement (maker+taker legs) with decision attestation.
+     */
+    function internalMatchSettle(
+        InternalMatchSettlementData calldata settlementData
+    ) external;
+
+    /**
      * @notice Executes a shielded withdrawal from the pool
      * @dev Spends 1 input note, withdraws to external address, creates 1 change note
      * 

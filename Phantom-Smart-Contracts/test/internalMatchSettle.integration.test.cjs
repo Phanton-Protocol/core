@@ -1,10 +1,8 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { merkleProofForFirstLeaf, emptyProof } = require("./helpers/poolFixtures.cjs");
 
 async function deployPoolWithConfigurableVerifier() {
   const [deployer] = await ethers.getSigners();
-
   const ConfigurableVerifier = await ethers.getContractFactory("ConfigurableMockVerifier");
   const verifier = await ConfigurableVerifier.deploy();
   await verifier.waitForDeployment();
@@ -14,7 +12,7 @@ async function deployPoolWithConfigurableVerifier() {
   const swapAdaptor = await MockSwapAdaptor.deploy();
   await swapAdaptor.waitForDeployment();
 
-  const FeeOracle = await ethers.getContractFactory("FeeOracle");
+  const FeeOracle = await ethers.getContractFactory("MockFeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
 
@@ -33,128 +31,237 @@ async function deployPoolWithConfigurableVerifier() {
     await relayerRegistry.getAddress()
   );
   await pool.waitForDeployment();
-
-  const DepositHandler = await ethers.getContractFactory("DepositHandler");
-  const depositHandler = await DepositHandler.deploy(
-    await pool.getAddress(),
-    await feeOracle.getAddress(),
-    await relayerRegistry.getAddress()
-  );
-  await depositHandler.waitForDeployment();
-  await (await pool.setDepositHandler(await depositHandler.getAddress())).wait();
-
-  const TransactionHistory = await ethers.getContractFactory("TransactionHistory");
-  const txHistory = await TransactionHistory.deploy(await pool.getAddress());
-  await txHistory.waitForDeployment();
-  await (await pool.setTransactionHistory(await txHistory.getAddress())).wait();
-
-  return { deployer, pool, verifier, feeOracle };
+  return { deployer, pool };
 }
 
-async function buildInternalMatchData(pool, feeOracle, overrides = {}) {
-  const commitment = overrides.commitment || ethers.keccak256(ethers.toUtf8Bytes(`m5-note-${Math.random()}`));
-  const inputAmount = overrides.inputAmount || ethers.parseEther("10");
-  await pool.deposit(ethers.ZeroAddress, inputAmount, commitment, 0n, { value: inputAmount });
-  const { root, path, indices } = await merkleProofForFirstLeaf(commitment);
-  const fee = (await feeOracle.calculateFee.staticCall(ethers.ZeroAddress, inputAmount)) + (inputAmount * 10n) / 10000n;
-  const swapAmount = overrides.swapAmount || ethers.parseEther("2");
-  const changeAmount = inputAmount - swapAmount - fee;
-  const baseLeg = {
-    inputCommitment: commitment,
-    merkleRoot: root,
-    inputAssetID: 0n,
-    outputAssetIDSwap: 0n,
-    outputAssetIDChange: 0n,
-    inputAmount,
-    swapAmount,
-    changeAmount,
-    outputAmountSwap: swapAmount,
-    minOutputAmountSwap: swapAmount,
-    gasRefund: 0n,
-    protocolFee: fee,
-    merklePath: path,
-    merklePathIndices: indices,
+function decisionHashFromArtifact(artifact) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const encoded = coder.encode(
+    [
+      "bytes32", "bytes32", "bytes32", "bytes32", "uint256", "uint256", "uint256", "uint256",
+      "bool", "bool", "bool", "uint256", "uint256", "bytes32",
+    ],
+    [
+      artifact.makerOrderId,
+      artifact.takerOrderId,
+      artifact.makerInputCommitment,
+      artifact.takerInputCommitment,
+      artifact.makerInputAssetID,
+      artifact.takerInputAssetID,
+      artifact.executionPrice,
+      artifact.quantity,
+      artifact.makerIsSell,
+      artifact.takerIsBuy,
+      artifact.approved,
+      artifact.decidedAt,
+      artifact.decisionNonce,
+      artifact.signerSetHash,
+    ]
+  );
+  return ethers.keccak256(encoded);
+}
+
+async function signInternalMatchAttestation({
+  signer,
+  poolAddress,
+  chainId,
+  decisionHash,
+  matchHash,
+  executionKey,
+  relayer,
+  signerSetHash,
+  deadline,
+  nonce,
+}) {
+  const domain = {
+    name: "PhantomInternalMatchAttestation",
+    version: "1",
+    chainId,
+    verifyingContract: poolAddress,
   };
-  const takerInputs = {
-    ...baseLeg,
-    nullifier: overrides.takerNullifier || ethers.keccak256(ethers.toUtf8Bytes("m5-taker-nullifier")),
-    outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("m5-taker-swap")),
-    outputCommitmentChange: ethers.keccak256(ethers.toUtf8Bytes("m5-taker-change")),
-    ...(overrides.takerInputs || {}),
+  const types = {
+    InternalMatchAttestation: [
+      { name: "decisionHash", type: "bytes32" },
+      { name: "matchHash", type: "bytes32" },
+      { name: "executionKey", type: "bytes32" },
+      { name: "relayer", type: "address" },
+      { name: "signerSetHash", type: "bytes32" },
+      { name: "deadline", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+    ],
   };
-  const makerInputs = {
-    ...baseLeg,
-    nullifier: overrides.makerNullifier || ethers.keccak256(ethers.toUtf8Bytes("m5-maker-nullifier")),
-    outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("m5-maker-swap")),
-    outputCommitmentChange: ethers.keccak256(ethers.toUtf8Bytes("m5-maker-change")),
-    ...(overrides.makerInputs || {}),
+  return signer.signTypedData(domain, types, {
+    decisionHash,
+    matchHash,
+    executionKey,
+    relayer,
+    signerSetHash,
+    deadline,
+    nonce,
+  });
+}
+
+async function buildSettlementData({ pool, deployer, overrides = {} }) {
+  const network = await ethers.provider.getNetwork();
+  const relayer = deployer.address;
+  const matchHash = overrides.matchHash || ethers.keccak256(ethers.toUtf8Bytes("m6-match"));
+  const executionKey = overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes("m6-exec"));
+  const makerOrderId = overrides.makerOrderId || ethers.keccak256(ethers.toUtf8Bytes("m6-maker"));
+  const takerOrderId = overrides.takerOrderId || ethers.keccak256(ethers.toUtf8Bytes("m6-taker"));
+  const makerInputCommitment = overrides.makerInputCommitment || ethers.keccak256(ethers.toUtf8Bytes("m6-maker-in"));
+  const takerInputCommitment = overrides.takerInputCommitment || ethers.keccak256(ethers.toUtf8Bytes("m6-taker-in"));
+  const signerSetHash = overrides.signerSetHash || ethers.keccak256(ethers.solidityPacked(["address"], [relayer]));
+  const artifact = {
+    makerOrderId,
+    takerOrderId,
+    makerInputCommitment,
+    takerInputCommitment,
+    makerInputAssetID: overrides.makerInputAssetID ?? 1n,
+    takerInputAssetID: overrides.takerInputAssetID ?? 0n,
+    executionPrice: overrides.executionPrice ?? 10n,
+    quantity: overrides.quantity ?? 100n,
+    makerIsSell: overrides.makerIsSell ?? true,
+    takerIsBuy: overrides.takerIsBuy ?? true,
+    approved: overrides.approved ?? true,
+    decidedAt: overrides.decidedAt ?? BigInt(Math.floor(Date.now() / 1000)),
+    decisionNonce: overrides.decisionNonce ?? 9n,
+    signerSetHash,
+  };
+  const decisionHash = overrides.decisionHash || decisionHashFromArtifact(artifact);
+  const attestationDeadline = overrides.attestationDeadline ?? BigInt(Math.floor(Date.now() / 1000) + 900);
+  const attestationNonce = overrides.attestationNonce ?? 33n;
+  const attestationSig = overrides.attestationSig || await signInternalMatchAttestation({
+    signer: deployer,
+    poolAddress: await pool.getAddress(),
+    chainId: Number(network.chainId),
+    decisionHash,
+    matchHash,
+    executionKey,
+    relayer,
+    signerSetHash,
+    deadline: attestationDeadline,
+    nonce: attestationNonce,
+  });
+  const blankLeg = {
+    proof: { a: "0x", b: "0x", c: "0x" },
+    publicInputs: {
+      nullifier: ethers.ZeroHash,
+      inputCommitment: takerInputCommitment,
+      outputCommitmentSwap: ethers.ZeroHash,
+      outputCommitmentChange: ethers.ZeroHash,
+      merkleRoot: ethers.ZeroHash,
+      inputAssetID: 0,
+      outputAssetIDSwap: 1,
+      outputAssetIDChange: 0,
+      inputAmount: 100,
+      swapAmount: 100,
+      changeAmount: 0,
+      outputAmountSwap: 100,
+      minOutputAmountSwap: 100,
+      gasRefund: 0,
+      protocolFee: 0,
+      merklePath: Array(10).fill(0),
+      merklePathIndices: Array(10).fill(0),
+    },
+    swapParams: {
+      tokenIn: ethers.ZeroAddress,
+      tokenOut: relayer,
+      amountIn: 0,
+      minAmountOut: 0,
+      fee: 3000,
+      sqrtPriceLimitX96: 0,
+      path: "0x",
+    },
+    relayer,
+    encryptedPayload: "0x",
+    commitment: ethers.ZeroHash,
+    deadline: Number(attestationDeadline),
+    nonce: Number(attestationNonce),
+    relayerAttestationSig: "0x",
+    relayerAttestationDeadline: Number(attestationDeadline),
+    relayerAttestationNonce: Number(attestationNonce),
+  };
+  const makerLeg = {
+    ...blankLeg,
+    publicInputs: {
+      ...blankLeg.publicInputs,
+      inputCommitment: makerInputCommitment,
+      inputAssetID: Number(artifact.makerInputAssetID),
+      swapAmount: Number(artifact.quantity),
+    },
+    nonce: Number(attestationNonce) + 1,
+    relayerAttestationNonce: Number(attestationNonce) + 1,
+  };
+  const takerLeg = {
+    ...blankLeg,
+    publicInputs: {
+      ...blankLeg.publicInputs,
+      inputCommitment: takerInputCommitment,
+      inputAssetID: Number(artifact.takerInputAssetID),
+      swapAmount: Number(artifact.quantity),
+    },
   };
   return {
-    takerProof: emptyProof(),
-    takerInputs,
-    makerProof: emptyProof(),
-    makerInputs,
-    relayer: ethers.ZeroAddress,
-    matchHash: overrides.matchHash || ethers.keccak256(ethers.toUtf8Bytes("m5-match")),
-    executionKey: overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes("m5-exec")),
-    encryptedPayload: "0x",
+    takerSwapData: takerLeg,
+    makerSwapData: makerLeg,
+    matchHash,
+    executionKey,
+    decisionHash,
+    artifact,
+    attestationSig,
+    attestationDeadline,
+    attestationNonce,
   };
 }
 
-describe("ShieldedPool.internalMatchSettle (Module 5)", function () {
-  it("settles atomic internal match and marks both nullifiers", async function () {
-    const { pool, feeOracle } = await deployPoolWithConfigurableVerifier();
-    const data = await buildInternalMatchData(pool, feeOracle);
-    await expect(pool.internalMatchSettle(data)).to.emit(pool, "InternalMatchSettled");
-    expect(await pool.nullifiers(data.takerInputs.nullifier)).to.equal(true);
-    expect(await pool.nullifiers(data.makerInputs.nullifier)).to.equal(true);
+describe("ShieldedPool.internalMatchSettle (Module 6)", function () {
+  it("accepts valid internal settlement artifact and emits traceable event", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({ pool, deployer });
+    await expect(pool.internalMatchSettle(data))
+      .to.emit(pool, "InternalMatchSettled")
+      .withArgs(data.matchHash, data.decisionHash, data.executionKey, data.artifact.makerOrderId, data.artifact.takerOrderId, deployer.address);
   });
 
-  it("reverts on used nullifier (PoolErr 4)", async function () {
-    const { pool, feeOracle } = await deployPoolWithConfigurableVerifier();
-    const data = await buildInternalMatchData(pool, feeOracle);
-    await pool.internalMatchSettle(data);
-    const currentRoot = await pool.merkleRoot();
-    const secondAttempt = {
-      ...data,
-      takerInputs: { ...data.takerInputs, merkleRoot: currentRoot },
-      makerInputs: { ...data.makerInputs, merkleRoot: currentRoot },
-    };
-    await expect(pool.internalMatchSettle(secondAttempt)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(4);
+  it("rejects bad signature/attestation", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const attacker = ethers.Wallet.createRandom().connect(ethers.provider);
+    const data = await buildSettlementData({ pool, deployer, overrides: { attestationSig: await attacker.signMessage("bad") } });
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(51);
   });
 
-  it("reverts on stale/invalid root (PoolErr 46)", async function () {
-    const { pool, feeOracle } = await deployPoolWithConfigurableVerifier();
-    const data = await buildInternalMatchData(pool, feeOracle, {
-      takerInputs: { merkleRoot: ethers.keccak256(ethers.toUtf8Bytes("bad-root")) },
+  it("rejects stale deadline", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: { attestationDeadline: BigInt(Math.floor(Date.now() / 1000) - 1) },
     });
-    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(46);
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(54);
   });
 
-  it("reverts on invalid proof path (PoolErr 40)", async function () {
-    const { pool, feeOracle, verifier } = await deployPoolWithConfigurableVerifier();
-    const data = await buildInternalMatchData(pool, feeOracle);
-    await verifier.setValid(false);
-    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(40);
-  });
-
-  it("reverts on fee mismatch (PoolErr 5)", async function () {
-    const { pool, feeOracle } = await deployPoolWithConfigurableVerifier();
-    const fee = (await feeOracle.calculateFee.staticCall(ethers.ZeroAddress, ethers.parseEther("10"))) + (ethers.parseEther("10") * 10n) / 10000n;
-    const data = await buildInternalMatchData(pool, feeOracle, {
-      takerInputs: {
-        protocolFee: fee - 1n,
-        changeAmount: ethers.parseEther("10") - ethers.parseEther("2") - (fee - 1n),
+  it("rejects replayed matchHash", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const first = await buildSettlementData({ pool, deployer });
+    await pool.internalMatchSettle(first);
+    const second = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: {
+        matchHash: first.matchHash,
+        decisionNonce: 77n,
       },
     });
-    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(5);
+    await expect(pool.internalMatchSettle(second)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(52);
   });
 
-  it("reverts on conservation violation (PoolErr 43)", async function () {
-    const { pool, feeOracle } = await deployPoolWithConfigurableVerifier();
-    const data = await buildInternalMatchData(pool, feeOracle, {
-      makerInputs: { changeAmount: 1n },
+  it("rejects tampered decisionHash", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: { decisionHash: "0x" + "ff".repeat(32) },
     });
-    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(43);
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(56);
   });
 });

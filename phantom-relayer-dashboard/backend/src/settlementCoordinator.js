@@ -652,6 +652,27 @@ function normalizeJoinSplitSwapDataTuple(data = {}, defaults = {}) {
   ];
 }
 
+function normalizeInternalDecisionArtifactTuple(artifact = {}, payload = {}) {
+  const takerOrderId = payload?.takerOrderId || artifact?.takerOrderId || ethers.ZeroHash;
+  const makerOrderId = payload?.makerOrderId || artifact?.makerOrderId || ethers.ZeroHash;
+  return [
+    toBytes32(makerOrderId),
+    toBytes32(takerOrderId),
+    toBytes32(artifact?.makerInputCommitment),
+    toBytes32(artifact?.takerInputCommitment),
+    toU256(artifact?.makerInputAssetID),
+    toU256(artifact?.takerInputAssetID),
+    toU256(artifact?.executionPrice),
+    toU256(artifact?.quantity),
+    Boolean(artifact?.makerIsSell),
+    Boolean(artifact?.takerIsBuy),
+    Boolean(artifact?.approved ?? true),
+    toU256(artifact?.decidedAt ?? Math.floor(Date.now() / 1000)),
+    toU256(artifact?.decisionNonce ?? 0),
+    toBytes32(artifact?.signerSetHash),
+  ];
+}
+
 function createOnchainInternalMatchSubmitter({
   rpcUrl = process.env.RPC_URL,
   privateKey = process.env.RELAYER_PRIVATE_KEY,
@@ -666,7 +687,7 @@ function createOnchainInternalMatchSubmitter({
   const provider = providerFactory ? providerFactory(rpcUrl) : new ethers.JsonRpcProvider(rpcUrl);
   const signer = signerFactory ? signerFactory(privateKey, provider) : new ethers.Wallet(privateKey, provider);
   const abi = [
-    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256)) external",
+    "function internalMatchSettle((((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256),((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256),bytes32,bytes32,bytes32,(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,bytes32),bytes,uint256,uint256)) external",
   ];
   const contract = contractFactory
     ? contractFactory(shieldedPoolAddress, abi, signer)
@@ -699,39 +720,60 @@ function createOnchainInternalMatchSubmitter({
     }
     if (!legs.length) throw new Error("internal_match_settlement_data_missing_legs");
 
-    const receipts = [];
-    let txHash = null;
-    for (const leg of legs) {
-      const tuple = normalizeJoinSplitSwapDataTuple(leg, {
-        relayer: data.relayer || signer.address,
-        encryptedPayload: data.encryptedPayload || "0x",
-        commitment: data.commitment || ethers.ZeroHash,
-        deadline: data.deadline,
-        nonce: data.nonce,
-        relayerAttestationSig: data.relayerAttestationSig || "0x",
-        relayerAttestationDeadline: data.relayerAttestationDeadline,
-        relayerAttestationNonce: data.relayerAttestationNonce,
-      });
-      const tx = await contract.shieldedSwapJoinSplit(tuple);
-      const receipt = await tx.wait();
-      txHash = receipt?.hash || tx.hash;
-      receipts.push(
-        receipt
-          ? {
-              blockNumber: receipt.blockNumber,
-              status: receipt.status,
-              gasUsed: receipt.gasUsed != null ? String(receipt.gasUsed) : null,
-              txHash,
-            }
-          : { txHash }
-      );
-    }
+    const takerLeg = legs[0];
+    const makerLeg = legs[1] || legs[0];
+    const takerTuple = normalizeJoinSplitSwapDataTuple(takerLeg, {
+      relayer: data.relayer || signer.address,
+      encryptedPayload: data.encryptedPayload || "0x",
+      commitment: data.commitment || ethers.ZeroHash,
+      deadline: data.deadline,
+      nonce: data.nonce,
+      relayerAttestationSig: data.relayerAttestationSig || "0x",
+      relayerAttestationDeadline: data.relayerAttestationDeadline,
+      relayerAttestationNonce: data.relayerAttestationNonce,
+    });
+    const makerTuple = normalizeJoinSplitSwapDataTuple(makerLeg, {
+      relayer: data.relayer || signer.address,
+      encryptedPayload: data.encryptedPayload || "0x",
+      commitment: data.commitment || ethers.ZeroHash,
+      deadline: data.deadline,
+      nonce: data.nonce,
+      relayerAttestationSig: data.relayerAttestationSig || "0x",
+      relayerAttestationDeadline: data.relayerAttestationDeadline,
+      relayerAttestationNonce: data.relayerAttestationNonce != null ? toU256(data.relayerAttestationNonce) + 1n : undefined,
+    });
+    const decisionArtifact = payload?.fheBinding?.decisionArtifact || data?.decisionArtifact || {};
+    const settlementTuple = [
+      takerTuple,
+      makerTuple,
+      toBytes32(data.matchHash || payload.matchHash),
+      toBytes32(data.executionKey || payload.executionKey),
+      toBytes32(data.decisionHash || payload?.fheBinding?.fheDecisionHash),
+      normalizeInternalDecisionArtifactTuple(decisionArtifact, payload),
+      data.attestationSig || "0x",
+      toU256(data.attestationDeadline ?? Math.floor(Date.now() / 1000) + 900),
+      toU256(data.attestationNonce ?? data.relayerAttestationNonce ?? 0),
+    ];
+
+    const tx = await contract.internalMatchSettle(settlementTuple);
+    const receipt = await tx.wait();
+    const txHash = receipt?.hash || tx.hash;
+    const receipts = [
+      receipt
+        ? {
+            blockNumber: receipt.blockNumber,
+            status: receipt.status,
+            gasUsed: receipt.gasUsed != null ? String(receipt.gasUsed) : null,
+            txHash,
+          }
+        : { txHash },
+    ];
     return {
       txHash,
       receipt: receipts[receipts.length - 1] || null,
       legReceipts: receipts,
       mode: "live_internal_match",
-      settlementFunction: "shieldedSwapJoinSplit",
+      settlementFunction: "internalMatchSettle",
     };
   };
 }
