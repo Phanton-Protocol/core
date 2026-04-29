@@ -235,7 +235,7 @@ describe("ShieldedPool.internalMatchSettle (Module 6)", function () {
     const data = await buildSettlementData({
       pool,
       deployer,
-      overrides: { attestationDeadline: BigInt(Math.floor(Date.now() / 1000) - 1) },
+      overrides: { attestationDeadline: 1n },
     });
     await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(54);
   });
