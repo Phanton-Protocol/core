@@ -360,6 +360,11 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
       existing = getSettlementExecutionByMatchHash(db, matchHash);
     }
 
+    const existingTrace = {
+      decisionHash: existing?.payloadJson?.fheBinding?.fheDecisionHash || null,
+      takerOrderId: existing?.payloadJson?.takerOrderId || null,
+      makerOrderId: existing?.payloadJson?.makerOrderId || null,
+    };
     if (!options.forceRetry && (existing.status === SETTLEMENT_STATUS.SUBMITTED || existing.status === SETTLEMENT_STATUS.CONFIRMED)) {
       return {
         traceId,
@@ -369,6 +374,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
         txHash: existing.txHash || null,
         decisionReasonCode: "IDEMPOTENT_ALREADY_SUBMITTED",
         idempotent: true,
+        ...existingTrace,
       };
     }
 
@@ -384,11 +390,24 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
       };
       updateSettlementExecution(db, updated);
       persistEvent(updated, traceId, "settlement_failed", PRECHECK_REASON.INTERNAL_ERROR, { message: "match_not_found" });
-      return { traceId, matchHash, executionKey: existing.executionKey, settlementStatus: updated.status, txHash: null, decisionReasonCode: PRECHECK_REASON.INTERNAL_ERROR };
+      return {
+        traceId,
+        matchHash,
+        executionKey: existing.executionKey,
+        settlementStatus: updated.status,
+        txHash: null,
+        decisionReasonCode: PRECHECK_REASON.INTERNAL_ERROR,
+        ...existingTrace,
+      };
     }
 
     const fills = listFillsByMatch(db, match.id);
     const payload = buildSettlementPayload(match, fills, policy);
+    const traceFields = {
+      decisionHash: payload?.fheBinding?.fheDecisionHash || null,
+      takerOrderId: payload?.takerOrderId || null,
+      makerOrderId: payload?.makerOrderId || null,
+    };
 
     if (complianceEngine) {
       const gate = await complianceEngine.checkExecution({
@@ -438,6 +457,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
           settlementStatus: nextStatus,
           txHash: null,
           decisionReasonCode: reasonCode,
+          ...traceFields,
         };
       }
     }
@@ -526,6 +546,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
           settlementStatus: updated.status,
           txHash: null,
           decisionReasonCode: reasonCode,
+          ...traceFields,
         };
       }
     }
@@ -563,6 +584,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
         settlementStatus: nextStatus,
         txHash: null,
         decisionReasonCode: nextReason,
+        ...traceFields,
       };
     }
 
@@ -617,6 +639,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
         settlementStatus: submitted.status,
         txHash,
         decisionReasonCode: null,
+        ...traceFields,
       };
     } catch (e) {
       const cls = classifySubmissionError(e);
@@ -636,6 +659,7 @@ function createSettlementCoordinator({ db, submitter, complianceEngine, validato
         settlementStatus: failed.status,
         txHash: null,
         decisionReasonCode: cls.reasonCode,
+        ...traceFields,
       };
     }
   }

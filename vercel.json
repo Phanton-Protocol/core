@@ -95,6 +95,19 @@
   ],
   "headers": [
     {
+      "source": "/pitchdeck.pdf",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        },
+        {
+          "key": "Content-Disposition",
+          "value": "inline; filename=\"pitchdeck.pdf\""
+        }
+      ]
+    },
+    {
       "source": "/sitemap.xml",
       "headers": [
         {

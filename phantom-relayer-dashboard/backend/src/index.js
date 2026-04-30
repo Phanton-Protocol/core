@@ -37,7 +37,7 @@ const ValidatorNetwork = require("./validatorNetwork");
 const { generateSwapProof, generateWithdrawProof, generatePortfolioProof, getProofStats } = require("./zkProofs");
 const { assertWithdrawJoinSplitPublicInputs } = require("./withdrawValidate");
 const fheMatchingRouter = require("./fheMatchingService");
-const { registerOrderAndTryMatch, getFheMatchMode, assertFheProductionSafety } = require("./fheMatchingService");
+const { registerOrderAndTryMatch, getFheMatchMode, assertFheProductionSafety, deriveFheSecurityPolicy } = require("./fheMatchingService");
 const { createEnterpriseRouter } = require("./enterpriseRoutes");
 const { getSeeConfig, verifyAttestation, requireSeeForSensitiveFlow } = require("./seeGuard");
 const { logRelayerOnchainFailure, logProofFailure } = require("./relayerLog");
@@ -54,6 +54,7 @@ const {
   logModule4
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs, canonicalNullifierHex } = require("./swapIntentBinding");
+const { evaluateInternalMatchingGuardrails } = require("./internalMatchingGuardrails");
 const FROZEN_PRODUCTION_CONFIG = require(path.join(__dirname, "..", "..", "..", "frozenProductionConfig.json"));
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
@@ -338,6 +339,13 @@ function assertStagingProductionBypassPolicy() {
 
 function assertProductionReadiness() {
   if (NODE_ENV !== "production") return;
+  const guardrailErrors = evaluateInternalMatchingGuardrails(process.env, {
+    seeConfig: getSeeConfig(),
+    deriveFheSecurityPolicy,
+  });
+  if (!guardrailErrors.ok) {
+    throw new Error(`Production startup blocked by internal matching guardrails: ${guardrailErrors.errors.join(" | ")}`);
+  }
   if (DEV_BYPASS_VALIDATORS || DEV_BYPASS_PROOFS) {
     throw new Error("Production startup blocked: DEV_BYPASS_VALIDATORS/DEV_BYPASS_PROOFS must be false.");
   }
@@ -2410,6 +2418,44 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.get("/internal-matching/health", (req, res) => {
+  const seeCfg = getSeeConfig();
+  const guardrails = evaluateInternalMatchingGuardrails(process.env, {
+    seeConfig: seeCfg,
+    deriveFheSecurityPolicy,
+  });
+  const validatorUrls = String(process.env.VALIDATOR_URLS || "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+  const payload = {
+    status: guardrails.ok ? "ok" : "degraded",
+    production:
+      String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
+      String(process.env.PHANTOM_DEPLOYMENT_TIER || "").toLowerCase() === "production",
+    guardrails,
+    config: {
+      settlementMode: String(process.env.SETTLEMENT_SUBMISSION_MODE || "dry_run").toLowerCase(),
+      validatorUrlCount: validatorUrls.length,
+      attestationRequired: String(process.env.ATTESTATION_REQUIRED || "").toLowerCase() === "true",
+      attestationQuorumBps: Number(process.env.ATTESTATION_REQUIRED_QUORUM_BPS || 0),
+      compliancePolicyMode: String(process.env.COMPLIANCE_POLICY_MODE || "enforced").toLowerCase(),
+      seeMode: seeCfg.mode,
+      fheMode: String(process.env.FHE_MODE || "mock").toLowerCase(),
+      fhePolicyMode: String(process.env.MATCHING_FHE_POLICY_MODE || "degraded").toLowerCase(),
+    },
+    routeCoverage: [
+      "/intent/internal",
+      "/intent/internal/cancel",
+      "/intent/internal/:id",
+      "/settlement/internal/:matchHash/start",
+      "/settlement/internal/:matchHash/retry",
+      "/settlement/internal/:matchHash/status",
+    ],
+  };
+  return res.status(guardrails.ok ? 200 : 503).json(payload);
+});
+
 app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
 
 app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, async (req, res) => {
@@ -2417,7 +2463,18 @@ app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, as
   if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
   try {
     const out = await settlementCoordinator.start(matchHash, req.body || {});
-    return res.json(out);
+    return res.json({
+      ...out,
+      trace: {
+        traceId: out.traceId || null,
+        matchHash: out.matchHash || matchHash,
+        decisionHash: out.decisionHash || null,
+        txHash: out.txHash || null,
+        orderId: out.takerOrderId || out.makerOrderId || null,
+        takerOrderId: out.takerOrderId || null,
+        makerOrderId: out.makerOrderId || null,
+      },
+    });
   } catch (e) {
     return res.status(500).json({ error: "settlement_start_failed", message: e.message || String(e) });
   }
@@ -2428,7 +2485,18 @@ app.post("/settlement/internal/:matchHash/retry", requireSeeForSensitiveFlow, as
   if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
   try {
     const out = await settlementCoordinator.retry(matchHash, req.body || {});
-    return res.json(out);
+    return res.json({
+      ...out,
+      trace: {
+        traceId: out.traceId || null,
+        matchHash: out.matchHash || matchHash,
+        decisionHash: out.decisionHash || null,
+        txHash: out.txHash || null,
+        orderId: out.takerOrderId || out.makerOrderId || null,
+        takerOrderId: out.takerOrderId || null,
+        makerOrderId: out.makerOrderId || null,
+      },
+    });
   } catch (e) {
     return res.status(500).json({ error: "settlement_retry_failed", message: e.message || String(e) });
   }
@@ -3977,7 +4045,7 @@ if (!process.env.VERCEL && !process.env.FIREBASE_FUNCTIONS) {
   })();
 }
 
-module.exports = { app, processSwapRequestBody };
+module.exports = { app, processSwapRequestBody, evaluateInternalMatchingGuardrails };
 
 async function getDexPriceUsd(tokenAddress, chainSlug) {
   const { data } = await axios.get(`${dexApiToken}${tokenAddress}`);

@@ -29,6 +29,13 @@ test("runtime app mounts internal intent and settlement routes", async (t) => {
   assert.equal(health?.internalRoutes?.settlementInternal, true);
   assert.ok(Array.isArray(health?.internalRoutes?.endpoints));
 
+  const internalHealthRes = await fetch(`${baseUrl}/internal-matching/health`);
+  assert.equal(internalHealthRes.status, 200);
+  const internalHealth = await internalHealthRes.json();
+  assert.ok(internalHealth?.status === "ok" || internalHealth?.status === "degraded");
+  assert.ok(Array.isArray(internalHealth?.routeCoverage));
+  assert.ok(internalHealth?.config);
+
   const listRes = await fetch(`${baseUrl}/intent/internal?limit=1&offset=0`);
   assert.equal(listRes.status, 200);
   const listed = await listRes.json();
