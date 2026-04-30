@@ -766,13 +766,23 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       setCfgErr(null);
       try {
         if (!base) return;
-        const [c, h] = await Promise.all([
+        let [c, h] = await Promise.all([
           fetchJson(`${base}/config`),
           fetchJson(`${base}/health`),
         ]);
-        if (String(c?.deploymentVersion || "") !== String(FROZEN_CONFIG?.version || "")) {
+        const relayerDeploymentVersion = String(c?.deploymentVersion || "").trim();
+        const frozenDeploymentVersion = String(FROZEN_CONFIG?.version || "").trim();
+        if (!relayerDeploymentVersion && frozenDeploymentVersion) {
+          // Backward-compat: older relayers may omit deploymentVersion. Keep UI usable but pin local checks.
+          c = { ...c, deploymentVersion: frozenDeploymentVersion, deploymentVersionBackfilled: true };
+          if (!cancelled) {
+            setCfgErr(
+              `Relayer /config omitted deploymentVersion; using frozen ${frozenDeploymentVersion} locally. Update backend to return deploymentVersion.`
+            );
+          }
+        } else if (relayerDeploymentVersion !== frozenDeploymentVersion) {
           throw new Error(
-            `Config mismatch: expected deployment version ${FROZEN_CONFIG?.version || "unknown"} but relayer returned ${c?.deploymentVersion || "missing"}`
+            `Config mismatch: expected deployment version ${frozenDeploymentVersion || "unknown"} but relayer returned ${c?.deploymentVersion || "missing"}`
           );
         }
         if (!cancelled) {
@@ -2002,6 +2012,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     }
   }
 
+  const showSwapPanel = tab === "swap" || (tab === "all" && uiVariant !== "trade");
+  const tradeNeedsUnlock = uiVariant === "trade" && !vault.unlocked;
+
   useEffect(() => {
     if (uiVariant !== "trade" || tab !== "internal" || tradeNeedsUnlock) return;
     refreshInternalIntents();
@@ -2098,8 +2111,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     }
   }
 
-  const showSwapPanel = tab === "swap" || (tab === "all" && uiVariant !== "trade");
-  const tradeNeedsUnlock = uiVariant === "trade" && !vault.unlocked;
   const openInternalOrders = useMemo(
     () => internalOrders.filter((order) => order.status === "OPEN"),
     [internalOrders]
