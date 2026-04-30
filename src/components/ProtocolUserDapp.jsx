@@ -775,11 +775,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (!relayerDeploymentVersion && frozenDeploymentVersion) {
           // Backward-compat: older relayers may omit deploymentVersion. Keep UI usable but pin local checks.
           c = { ...c, deploymentVersion: frozenDeploymentVersion, deploymentVersionBackfilled: true };
-          if (!cancelled) {
-            setCfgErr(
-              `Relayer /config omitted deploymentVersion; using frozen ${frozenDeploymentVersion} locally. Update backend to return deploymentVersion.`
-            );
-          }
+          console.warn(
+            `[trade-config] relayer /config omitted deploymentVersion; using frozen ${frozenDeploymentVersion} locally`
+          );
         } else if (relayerDeploymentVersion !== frozenDeploymentVersion) {
           throw new Error(
             `Config mismatch: expected deployment version ${frozenDeploymentVersion || "unknown"} but relayer returned ${c?.deploymentVersion || "missing"}`
