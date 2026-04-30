@@ -157,6 +157,7 @@ struct JoinSplitSwapData {
     bytes relayerAttestationSig;      // EIP-712 signature by relayer over swap proof payload
     uint256 relayerAttestationDeadline; // Relayer attestation expiry timestamp
     uint256 relayerAttestationNonce;  // Relayer attestation replay-protection nonce
+    bytes32 proofContextHash;         // Optional settlement-context binding hash for internal matches
 }
 
 /**

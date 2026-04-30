@@ -41,6 +41,8 @@ const PRECHECK_REASON = Object.freeze({
   ATTESTATION_QUORUM_INSUFFICIENT: "ATTESTATION_QUORUM_INSUFFICIENT",
   DECISION_ARTIFACT_MISSING: "DECISION_ARTIFACT_MISSING",
   DECISION_ARTIFACT_INVALID: "DECISION_ARTIFACT_INVALID",
+  PROOF_CONTEXT_BINDING_MISSING: "PROOF_CONTEXT_BINDING_MISSING",
+  PROOF_CONTEXT_BINDING_INVALID: "PROOF_CONTEXT_BINDING_INVALID",
 });
 
 function b(v) {
@@ -195,6 +197,71 @@ function validateDecisionArtifact(payload) {
   return { ok: true, decisionHash: actualHash };
 }
 
+function computeInternalProofContextHash(decisionHash, matchHash, executionKey, inputs = {}) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  return ethers.keccak256(
+    coder.encode(
+      [
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      [
+        ethers.id("PHANTOM_INTERNAL_MATCH_PROOF_CONTEXT_V1"),
+        toBytes32(decisionHash),
+        toBytes32(matchHash),
+        toBytes32(executionKey),
+        toBytes32(inputs?.nullifier),
+        toBytes32(inputs?.inputCommitment),
+        toBytes32(inputs?.outputCommitmentSwap),
+        toBytes32(inputs?.outputCommitmentChange),
+        toU256(inputs?.inputAssetID),
+        toU256(inputs?.outputAssetIDSwap),
+        toU256(inputs?.outputAssetIDChange),
+        toU256(inputs?.swapAmount),
+      ]
+    )
+  );
+}
+
+function validateInternalProofContextBinding(payload = {}) {
+  const data = payload?.onchain?.internalMatchData;
+  if (!data || typeof data !== "object") {
+    return { ok: false, reasonCode: PRECHECK_REASON.PROOF_CONTEXT_BINDING_MISSING, details: { reason: "internal_match_data_missing" } };
+  }
+  const decisionHash = data?.decisionHash || payload?.fheBinding?.fheDecisionHash;
+  const matchHash = data?.matchHash || payload?.matchHash;
+  const executionKey = data?.executionKey || payload?.executionKey;
+  if (!decisionHash || !matchHash || !executionKey) {
+    return { ok: false, reasonCode: PRECHECK_REASON.PROOF_CONTEXT_BINDING_MISSING, details: { reason: "binding_hashes_missing" } };
+  }
+  const takerInputs = data?.takerSwapData?.publicInputs || data?.takerInputs;
+  const makerInputs = data?.makerSwapData?.publicInputs || data?.makerInputs;
+  const takerProofContextHash = data?.takerSwapData?.proofContextHash || data?.takerProofContextHash;
+  const makerProofContextHash = data?.makerSwapData?.proofContextHash || data?.makerProofContextHash;
+  if (!takerInputs || !makerInputs || !takerProofContextHash || !makerProofContextHash) {
+    return { ok: false, reasonCode: PRECHECK_REASON.PROOF_CONTEXT_BINDING_MISSING, details: { reason: "proof_context_fields_missing" } };
+  }
+  const expectedTaker = computeInternalProofContextHash(decisionHash, matchHash, executionKey, takerInputs);
+  const expectedMaker = computeInternalProofContextHash(decisionHash, matchHash, executionKey, makerInputs);
+  if (String(takerProofContextHash).toLowerCase() !== expectedTaker.toLowerCase()) {
+    return { ok: false, reasonCode: PRECHECK_REASON.PROOF_CONTEXT_BINDING_INVALID, details: { leg: "taker", expected: expectedTaker, provided: takerProofContextHash } };
+  }
+  if (String(makerProofContextHash).toLowerCase() !== expectedMaker.toLowerCase()) {
+    return { ok: false, reasonCode: PRECHECK_REASON.PROOF_CONTEXT_BINDING_INVALID, details: { leg: "maker", expected: expectedMaker, provided: makerProofContextHash } };
+  }
+  return { ok: true };
+}
+
 function runPrechecks(payload, policy) {
   if (!Array.isArray(payload.noteRefs) || payload.noteRefs.length === 0) {
     return { ok: false, reasonCode: PRECHECK_REASON.MISSING_NOTE_REFERENCES, details: {} };
@@ -224,6 +291,10 @@ function runPrechecks(payload, policy) {
     const required = payload?.onchain?.internalMatchData;
     if (!required || typeof required !== "object") {
       return { ok: false, reasonCode: PRECHECK_REASON.ONCHAIN_DATA_MISSING, details: {} };
+    }
+    const proofBinding = validateInternalProofContextBinding(payload);
+    if (!proofBinding.ok) {
+      return { ok: false, reasonCode: proofBinding.reasonCode, details: proofBinding.details || {} };
     }
   }
   return { ok: true };
@@ -649,6 +720,7 @@ function normalizeJoinSplitSwapDataTuple(data = {}, defaults = {}) {
     data?.relayerAttestationSig || defaults?.relayerAttestationSig || "0x",
     toU256(data?.relayerAttestationDeadline ?? defaults?.relayerAttestationDeadline ?? deadline),
     toU256(data?.relayerAttestationNonce ?? defaults?.relayerAttestationNonce ?? nonce),
+    toBytes32(data?.proofContextHash ?? defaults?.proofContextHash ?? ethers.ZeroHash),
   ];
 }
 
@@ -687,7 +759,7 @@ function createOnchainInternalMatchSubmitter({
   const provider = providerFactory ? providerFactory(rpcUrl) : new ethers.JsonRpcProvider(rpcUrl);
   const signer = signerFactory ? signerFactory(privateKey, provider) : new ethers.Wallet(privateKey, provider);
   const abi = [
-    "function internalMatchSettle((((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256),((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256),bytes32,bytes32,bytes32,(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,bytes32),bytes,uint256,uint256)) external",
+    "function internalMatchSettle((((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),bytes32,bytes32,bytes32,(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,bytes32),bytes,uint256,uint256)) external",
   ];
   const contract = contractFactory
     ? contractFactory(shieldedPoolAddress, abi, signer)
@@ -719,6 +791,9 @@ function createOnchainInternalMatchSubmitter({
       legs.push(data.swapData);
     }
     if (!legs.length) throw new Error("internal_match_settlement_data_missing_legs");
+    const bindingDecisionHash = data.decisionHash || payload?.fheBinding?.fheDecisionHash;
+    const bindingMatchHash = data.matchHash || payload.matchHash;
+    const bindingExecutionKey = data.executionKey || payload.executionKey;
 
     const takerLeg = legs[0];
     const makerLeg = legs[1] || legs[0];
@@ -731,6 +806,10 @@ function createOnchainInternalMatchSubmitter({
       relayerAttestationSig: data.relayerAttestationSig || "0x",
       relayerAttestationDeadline: data.relayerAttestationDeadline,
       relayerAttestationNonce: data.relayerAttestationNonce,
+      proofContextHash:
+        takerLeg?.proofContextHash ||
+        data?.takerProofContextHash ||
+        computeInternalProofContextHash(bindingDecisionHash, bindingMatchHash, bindingExecutionKey, takerLeg?.publicInputs || {}),
     });
     const makerTuple = normalizeJoinSplitSwapDataTuple(makerLeg, {
       relayer: data.relayer || signer.address,
@@ -741,6 +820,10 @@ function createOnchainInternalMatchSubmitter({
       relayerAttestationSig: data.relayerAttestationSig || "0x",
       relayerAttestationDeadline: data.relayerAttestationDeadline,
       relayerAttestationNonce: data.relayerAttestationNonce != null ? toU256(data.relayerAttestationNonce) + 1n : undefined,
+      proofContextHash:
+        makerLeg?.proofContextHash ||
+        data?.makerProofContextHash ||
+        computeInternalProofContextHash(bindingDecisionHash, bindingMatchHash, bindingExecutionKey, makerLeg?.publicInputs || {}),
     });
     const decisionArtifact = payload?.fheBinding?.decisionArtifact || data?.decisionArtifact || {};
     const settlementTuple = [

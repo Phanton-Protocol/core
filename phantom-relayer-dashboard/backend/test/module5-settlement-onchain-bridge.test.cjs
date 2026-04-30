@@ -18,7 +18,7 @@ function withDb(t) {
   return db;
 }
 
-function seedOnchainMatch(db) {
+function seedOnchainMatch(db, options = {}) {
   const matchHash = ethers.keccak256(ethers.toUtf8Bytes(`m5:${Math.random()}`));
   const executionKey = ethers.keccak256(ethers.toUtf8Bytes(`exec:${matchHash}`));
   const matchId = `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
@@ -53,6 +53,28 @@ function seedOnchainMatch(db) {
     takerSide: "buy",
     fheResultHash: "0x" + "22".repeat(32),
   });
+  const decisionHash = hashDecisionArtifact(decisionArtifact);
+  const makerInputs = {
+    ...pi,
+    nullifier: "0x" + "21".repeat(32),
+    inputCommitment: "0x" + "22".repeat(32),
+    outputCommitmentSwap: "0x" + "23".repeat(32),
+    outputCommitmentChange: "0x" + "24".repeat(32),
+    inputAssetID: "1",
+    outputAssetIDSwap: "0",
+  };
+  const takerProofContextHash = computeProofContextHash({
+    decisionHash,
+    matchHash,
+    executionKey,
+    inputs: pi,
+  });
+  const makerProofContextHash = computeProofContextHash({
+    decisionHash,
+    matchHash,
+    executionKey,
+    inputs: makerInputs,
+  });
   saveMatch(db, {
     id: matchId,
     matchHash,
@@ -68,7 +90,7 @@ function seedOnchainMatch(db) {
     status: "finalized",
     decisionReasonCode: "FHE_ACCEPTED",
     fheResultHash: "0x" + "22".repeat(32),
-    fheDecisionHash: hashDecisionArtifact(decisionArtifact),
+    fheDecisionHash: decisionHash,
     fheAttestationRef: "att:m5",
     metadataJson: {
       noteRefs: [{ noteId: "n1" }, { noteId: "n2" }],
@@ -79,16 +101,10 @@ function seedOnchainMatch(db) {
         internalMatchData: {
           takerProof: { a: "0x", b: "0x", c: "0x" },
           takerInputs: pi,
+          takerProofContextHash: options?.tamperProofContext ? "0x" + "ff".repeat(32) : takerProofContextHash,
           makerProof: { a: "0x", b: "0x", c: "0x" },
-          makerInputs: {
-            ...pi,
-            nullifier: "0x" + "21".repeat(32),
-            inputCommitment: "0x" + "22".repeat(32),
-            outputCommitmentSwap: "0x" + "23".repeat(32),
-            outputCommitmentChange: "0x" + "24".repeat(32),
-            inputAssetID: "1",
-            outputAssetIDSwap: "0",
-          },
+          makerInputs,
+          makerProofContextHash,
           matchHash,
           executionKey,
           encryptedPayload: "0x",
@@ -131,6 +147,42 @@ function stableStringify(value) {
 
 function hashDecisionArtifact(artifact) {
   return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(artifact || {})));
+}
+
+function computeProofContextHash({ decisionHash, matchHash, executionKey, inputs }) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  return ethers.keccak256(
+    coder.encode(
+      [
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      [
+        ethers.id("PHANTOM_INTERNAL_MATCH_PROOF_CONTEXT_V1"),
+        decisionHash,
+        matchHash,
+        executionKey,
+        inputs.nullifier,
+        inputs.inputCommitment,
+        inputs.outputCommitmentSwap,
+        inputs.outputCommitmentChange,
+        BigInt(inputs.inputAssetID),
+        BigInt(inputs.outputAssetIDSwap),
+        BigInt(inputs.outputAssetIDChange),
+        BigInt(inputs.swapAmount),
+      ]
+    )
+  );
 }
 
 function buildDecisionArtifact({
@@ -312,8 +364,23 @@ test("module5 onchain submitter calls internalMatchSettle", async () => {
 
   const out = await submitter({ payload });
   assert.ok(callTuple);
+  assert.notEqual(callTuple[0][11], ethers.ZeroHash);
+  assert.notEqual(callTuple[1][11], ethers.ZeroHash);
   assert.equal(out.mode, "live_internal_match");
   assert.equal(out.settlementFunction, "internalMatchSettle");
   assert.equal(out.receipt.status, 1);
   assert.equal(out.legReceipts.length, 1);
+});
+
+test("module5 coordinator rejects mismatched proof context binding", async (t) => {
+  const db = withDb(t);
+  const { matchHash } = seedOnchainMatch(db, { tamperProofContext: true });
+
+  const coordinator = createSettlementCoordinator({
+    db,
+    submitter: async () => ({ txHash: "0x" + "ab".repeat(32), receipt: { blockNumber: 1, status: 1, gasUsed: "1" } }),
+  });
+  const out = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
+  assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
+  assert.equal(out.decisionReasonCode, "PROOF_CONTEXT_BINDING_INVALID");
 });

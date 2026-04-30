@@ -568,6 +568,24 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (!settlementData.artifact.makerIsSell || !settlementData.artifact.takerIsBuy) revert PoolErr(56);
         if (settlementData.artifact.quantity > settlementData.takerSwapData.publicInputs.swapAmount) revert PoolErr(56);
         if (settlementData.artifact.quantity > settlementData.makerSwapData.publicInputs.swapAmount) revert PoolErr(56);
+        bytes32 expectedTakerContextHash = _computeInternalProofContextHash(
+            settlementData.decisionHash,
+            settlementData.matchHash,
+            settlementData.executionKey,
+            settlementData.takerSwapData.publicInputs
+        );
+        bytes32 expectedMakerContextHash = _computeInternalProofContextHash(
+            settlementData.decisionHash,
+            settlementData.matchHash,
+            settlementData.executionKey,
+            settlementData.makerSwapData.publicInputs
+        );
+        if (settlementData.takerSwapData.proofContextHash == bytes32(0) || settlementData.takerSwapData.proofContextHash != expectedTakerContextHash) {
+            revert PoolErr(58);
+        }
+        if (settlementData.makerSwapData.proofContextHash == bytes32(0) || settlementData.makerSwapData.proofContextHash != expectedMakerContextHash) {
+            revert PoolErr(58);
+        }
 
         bytes32 digest = _computeInternalMatchAttestationDigest(
             settlementData.decisionHash,
@@ -797,6 +815,30 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _computeInternalProofContextHash(
+        bytes32 decisionHash,
+        bytes32 matchHash,
+        bytes32 executionKey,
+        JoinSplitPublicInputs memory inputs
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256("PHANTOM_INTERNAL_MATCH_PROOF_CONTEXT_V1"),
+                decisionHash,
+                matchHash,
+                executionKey,
+                inputs.nullifier,
+                inputs.inputCommitment,
+                inputs.outputCommitmentSwap,
+                inputs.outputCommitmentChange,
+                inputs.inputAssetID,
+                inputs.outputAssetIDSwap,
+                inputs.outputAssetIDChange,
+                inputs.swapAmount
+            )
+        );
     }
 
     function _verifyRelayerSwapAttestation(

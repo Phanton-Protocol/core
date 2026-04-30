@@ -101,6 +101,42 @@ async function signInternalMatchAttestation({
   });
 }
 
+function computeProofContextHash({ decisionHash, matchHash, executionKey, publicInputs }) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  return ethers.keccak256(
+    coder.encode(
+      [
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      [
+        ethers.id("PHANTOM_INTERNAL_MATCH_PROOF_CONTEXT_V1"),
+        decisionHash,
+        matchHash,
+        executionKey,
+        publicInputs.nullifier,
+        publicInputs.inputCommitment,
+        publicInputs.outputCommitmentSwap,
+        publicInputs.outputCommitmentChange,
+        publicInputs.inputAssetID,
+        publicInputs.outputAssetIDSwap,
+        publicInputs.outputAssetIDChange,
+        publicInputs.swapAmount,
+      ]
+    )
+  );
+}
+
 async function buildSettlementData({ pool, deployer, overrides = {} }) {
   const network = await ethers.provider.getNetwork();
   const relayer = deployer.address;
@@ -201,6 +237,18 @@ async function buildSettlementData({ pool, deployer, overrides = {} }) {
       swapAmount: Number(artifact.quantity),
     },
   };
+  takerLeg.proofContextHash = computeProofContextHash({
+    decisionHash,
+    matchHash,
+    executionKey,
+    publicInputs: takerLeg.publicInputs,
+  });
+  makerLeg.proofContextHash = computeProofContextHash({
+    decisionHash,
+    matchHash,
+    executionKey,
+    publicInputs: makerLeg.publicInputs,
+  });
   return {
     takerSwapData: takerLeg,
     makerSwapData: makerLeg,
@@ -263,5 +311,12 @@ describe("ShieldedPool.internalMatchSettle (Module 6)", function () {
       overrides: { decisionHash: "0x" + "ff".repeat(32) },
     });
     await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(56);
+  });
+
+  it("rejects proof context mismatch across internal matches", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({ pool, deployer });
+    data.takerSwapData.proofContextHash = "0x" + "ee".repeat(32);
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(58);
   });
 });
