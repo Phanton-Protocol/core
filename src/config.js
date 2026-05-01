@@ -7,10 +7,14 @@ export const GITHUB_URL = 'https://github.com/Phanton-Protocol';
 /** Operator runbook (Module 7+); same content ships in repo as `RUNBOOK.md`. */
 export const RUNBOOK_URL = `${GITHUB_URL}/core/blob/main/RUNBOOK.md`;
 
-/** Default relayer: Hamza team Vercel production (`backend` project). Override with VITE_API_URL. */
+/**
+ * Default relayer API (no VITE_* override). Render instance is the current stable host with production env.
+ * After Hamza Vercel `backend` has the same env as Render (CORS_ORIGINS, RELAYER_PRIVATE_KEY, RPC_URL, …),
+ * set VITE_API_URL / VITE_API_URLS on the website project or switch this default to that URL.
+ */
 export const API_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
   ? import.meta.env.VITE_API_URL
-  : 'https://backend-self-nu-51.vercel.app';
+  : 'https://relayers-backend.onrender.com';
 
 export const API_URLS = (() => {
   const fromMany = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URLS)
