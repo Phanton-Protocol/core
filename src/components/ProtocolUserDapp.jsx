@@ -810,12 +810,16 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       if (cfg?.mode === "live" && !customJson && autoSpendEntry?.note) {
         try {
           const noteWei = BigInt(autoSpendEntry.note.amount);
+          const gasReserve = BigInt(FALLBACK_GAS_REFUND_WEI);
           if (!amt || Number(amt) <= 0) {
-            amt = ethers.formatUnits(noteWei, 18);
+            const provisional = noteWei - gasReserve - MIN_SWAP_CHANGE_WEI;
+            amt = provisional > 0n ? ethers.formatUnits(provisional, 18) : "";
           } else {
             const want = ethers.parseUnits(amt, 18);
-            if (want > noteWei) {
-              amt = ethers.formatUnits(noteWei, 18);
+            const cap = noteWei - gasReserve - MIN_SWAP_CHANGE_WEI;
+            const maxIn = cap > 0n ? cap : noteWei;
+            if (want > maxIn) {
+              amt = ethers.formatUnits(maxIn, 18);
             }
           }
         } catch {
@@ -871,12 +875,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         let protocolFeeStr = String(q.fees?.totalFee ?? "0");
         if (cfg?.mode === "live" && autoSpendEntry?.note && cfg?.assets?.length) {
           try {
-            const noteWei = autoSpendEntry.note.amount;
             const aid = getAssetIdForToken(intentForm.inputToken, cfg);
-            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${noteWei}`);
+            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${amountWei}`);
             protocolFeeStr = String(feeRes.totalProtocolFee ?? protocolFeeStr);
           } catch {
-            /* quote fees often 0; proof path still resolves fee on-chain */
+            /* keep quote-derived fee; on-chain fee resolved at proof time */
           }
         }
         if (cfg?.mode === "live" && autoSpendEntry?.note) {
@@ -917,12 +920,25 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         }
         setSwapClampHint("");
         setSwapLastQuote(q);
-        setIntentForm((p) => ({
-          ...p,
-          minOutputAmount: String(q.minAmountOut || "0"),
-          protocolFee: protocolFeeStr,
-          gasRefund: refund,
-        }));
+        setIntentForm((p) => {
+          const wasEmpty = !String(p.inputAmount || "").trim() || Number(p.inputAmount) <= 0;
+          const next = {
+            ...p,
+            minOutputAmount: String(q.minAmountOut || "0"),
+            protocolFee: protocolFeeStr,
+            gasRefund: refund,
+          };
+          if (
+            cfg?.mode === "live" &&
+            !customJson &&
+            autoSpendEntry?.note &&
+            wasEmpty &&
+            amt
+          ) {
+            next.inputAmount = amt;
+          }
+          return next;
+        });
         setSwapExpectedLabel(`${ethers.formatUnits(q.amountOut || "0", 18)}`);
         setSwapMinLabel(`${ethers.formatUnits(q.minAmountOut || "0", 18)}`);
       } catch (e) {
@@ -1508,7 +1524,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               tokenInDecimals: 18,
               tokenOutDecimals: 18,
               slippageBps: Number(swapSlippageBps || DEFAULT_SWAP_SLIPPAGE_BPS),
-              chainSlug: Number(cfg.chainId) === 97 ? "bscTestnet" : "bsc",
+              chainSlug: Number(cfg.chainId) === 97 ? "bsc-testnet" : "bsc",
             }),
           });
           const freshOut = BigInt(String(freshQuote?.amountOut || "0"));
