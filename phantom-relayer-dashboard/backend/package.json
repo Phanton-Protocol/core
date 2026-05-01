@@ -4,6 +4,9 @@
   "private": true,
   "main": "firebase-functions/index.js",
   "scripts": {
+    "copy-prover-artifacts": "node scripts/copy-joinsplit-prover-artifacts.mjs",
+    "build": "node scripts/copy-joinsplit-prover-artifacts.mjs",
+    "build:ci": "VERIFY_PROVER_ARTIFACTS=1 node scripts/copy-joinsplit-prover-artifacts.mjs",
     "test": "node scripts/check-syntax.cjs && node --test --test-force-exit test/*.test.cjs",
     "e2e:testnet": "node scripts/e2e-mvp-testnet.cjs",
     "ci:e2e:prod-gate": "npm run mvp:preflight && npm run e2e:testnet",

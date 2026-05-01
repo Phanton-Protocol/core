@@ -1,1 +1,5 @@
 .vercel
+
+# Copied by `npm run build` / Vercel from Phantom-Smart-Contracts (large; do not commit)
+circuits/joinsplit_public9_js/
+circuits/joinsplit_public9_final.zkey

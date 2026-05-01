@@ -3,7 +3,8 @@
   "functions": {
     "api/index.js": {
       "memory": 2048,
-      "maxDuration": 300
+      "maxDuration": 300,
+      "includeFiles": "circuits/**"
     }
   },
   "routes": [
