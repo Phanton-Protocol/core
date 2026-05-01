@@ -7,9 +7,10 @@ export const GITHUB_URL = 'https://github.com/Phanton-Protocol';
 /** Operator runbook (Module 7+); same content ships in repo as `RUNBOOK.md`. */
 export const RUNBOOK_URL = `${GITHUB_URL}/core/blob/main/RUNBOOK.md`;
 
+/** Default relayer: Hamza team Vercel production (`backend` project). Override with VITE_API_URL. */
 export const API_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
   ? import.meta.env.VITE_API_URL
-  : 'https://relayers-backend.onrender.com';
+  : 'https://backend-self-nu-51.vercel.app';
 
 export const API_URLS = (() => {
   const fromMany = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URLS)

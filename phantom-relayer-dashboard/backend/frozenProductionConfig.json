@@ -1,0 +1,34 @@
+{
+  "version": "prod-frozen-v1",
+  "chainId": 97,
+  "addresses": {
+    "shieldedPool": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2",
+    "feeOracle": "0x633D5Edd746B07F8dBBAc95b1F5E36C8a8cb48D2",
+    "swapAdaptor": "0x88521d26561d26E7A91c427bA37Bebe8e1ec4556",
+    "relayerStaking": "0x15701431276D3e90d68ABd559B0a01b65aB10343",
+    "depositHandler": "0x2F6F8A5cBd6dAc9446810527c731676D51EEE1dF",
+    "matchingHandler": "0xB10dFF54Bc6C375026c701747AfbF465B4B86dDe",
+    "protocolToken": "0x46E3f887C17495A806068CB33C261c3EB45FA97f",
+    "fheCoprocessor": "0x5E93F479b70033405ECC686DbAC7adc7cc87EA56"
+  },
+  "assets": [
+    {
+      "assetId": 0,
+      "symbol": "tBNB",
+      "decimals": 18,
+      "address": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "assetId": 1,
+      "symbol": "BUSD",
+      "decimals": 18,
+      "address": "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7"
+    },
+    {
+      "assetId": 2,
+      "symbol": "USDT",
+      "decimals": 18,
+      "address": "0x7EF95A0FE8A5f4f9C1824fbF6656e2f95fA6Bf13"
+    }
+  ]
+}

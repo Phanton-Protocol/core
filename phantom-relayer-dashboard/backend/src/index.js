@@ -55,7 +55,23 @@ const {
 } = require("./module4Deposit");
 const { assertIntentNullifierMatchesSwapPublicInputs, canonicalNullifierHex } = require("./swapIntentBinding");
 const { evaluateInternalMatchingGuardrails } = require("./internalMatchingGuardrails");
-const FROZEN_PRODUCTION_CONFIG = require(path.join(__dirname, "..", "..", "..", "frozenProductionConfig.json"));
+
+/** Vercel deploys only `phantom-relayer-dashboard/backend/`; repo-root JSON is not on the serverless bundle. */
+function loadFrozenProductionConfig() {
+  const candidates = [
+    path.join(__dirname, "..", "frozenProductionConfig.json"),
+    path.join(__dirname, "..", "..", "..", "frozenProductionConfig.json"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, "utf8"));
+    }
+  }
+  throw new Error(
+    "frozenProductionConfig.json not found. For Vercel, keep a copy at phantom-relayer-dashboard/backend/frozenProductionConfig.json (sync with repo root)."
+  );
+}
+const FROZEN_PRODUCTION_CONFIG = loadFrozenProductionConfig();
 
 /** EIP-55 checksum; accepts any casing (fixes mixed-case typos from UIs / APIs). */
 function normalizeEvmAddress(addr) {
