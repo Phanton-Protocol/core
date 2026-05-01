@@ -57,7 +57,8 @@ export async function relayerFetchJson(path, opts = {}, options = {}) {
       }
 
       if (!res.ok) {
-        const msg = body?.error ?? body?.message ?? `HTTP ${res.status}`;
+        // Prefer `message` when the API sets both (e.g. { error: "Proof generation failed", message: "…detail…" }).
+        const msg = body?.message ?? body?.error ?? `HTTP ${res.status}`;
         const err = new Error(String(msg));
         err.status = res.status;
         err.base = target.base;

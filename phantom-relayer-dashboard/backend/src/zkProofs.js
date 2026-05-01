@@ -508,6 +508,13 @@ async function generateSwapProof(swapData) {
   } else {
     console.warn("[zk] legacy joinsplit.wasm prover — must match deployed verifier or proofs will fail on-chain");
   }
+  if (!fs.existsSync(prover.wasmPath) || !fs.existsSync(prover.zkeyPath)) {
+    throw new Error(
+      "Prover wasm/zkey not found on this server. For Vercel/serverless set PROVER_WASM and PROVER_ZKEY to reachable paths, " +
+        "or bundle Phantom-Smart-Contracts/circuits/joinsplit_public9 build artifacts. " +
+        `wasm=${prover.wasmPath} zkey=${prover.zkeyPath}`
+    );
+  }
 
   const fieldAdd = (a, b) => {
     return (a + b) % FIELD;
@@ -842,6 +849,12 @@ async function generateWithdrawProof(withdrawData) {
 
   try {
     const prover = resolveProverPaths();
+    if (!fs.existsSync(prover.wasmPath) || !fs.existsSync(prover.zkeyPath)) {
+      throw new Error(
+        "Prover wasm/zkey not found on this server. Set PROVER_WASM and PROVER_ZKEY or bundle joinsplit_public9 artifacts. " +
+          `wasm=${prover.wasmPath} zkey=${prover.zkeyPath}`
+      );
+    }
     const proverInputs = prover.usePublic9 ? toJoinSplitPublic9ProverInputs(circuitInputs) : circuitInputs;
     const witnessKind = prover.usePublic9 ? "joinsplit_public9" : "joinsplit";
     const result = await proveWithRapidsnarkOrSnarkjs(proverInputs, prover.wasmPath, prover.zkeyPath, witnessKind);
