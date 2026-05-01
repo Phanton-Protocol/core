@@ -25,10 +25,6 @@
       "destination": "/generated-seo/e-paper.html"
     },
     {
-      "source": "/pitchdeck",
-      "destination": "/pitchdeck.pdf"
-    },
-    {
       "source": "/relayer",
       "destination": "/generated-seo/relayer.html"
     },

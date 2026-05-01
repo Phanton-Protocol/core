@@ -1,3 +1,5 @@
+import { filterRelayerUrlList, isBlockedRelayerBase } from "./lib/relayerBlocklist";
+
 export const DAPP_URL = '/user';
 export const RELAYER_DASHBOARD_URL = '/relayer';
 export const WHITEPAPER_URL = '/e-paper';
@@ -12,18 +14,28 @@ export const RUNBOOK_URL = `${GITHUB_URL}/core/blob/main/RUNBOOK.md`;
  * After Hamza Vercel `backend` has the same env as Render (CORS_ORIGINS, RELAYER_PRIVATE_KEY, RPC_URL, …),
  * set VITE_API_URL / VITE_API_URLS on the website project or switch this default to that URL.
  */
-export const API_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
-  ? import.meta.env.VITE_API_URL
-  : 'https://relayers-backend.onrender.com';
+const viteApiUrl =
+  typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL
+    ? String(import.meta.env.VITE_API_URL).trim()
+    : "";
+
+export const API_URL =
+  viteApiUrl && !isBlockedRelayerBase(viteApiUrl)
+    ? viteApiUrl.replace(/\/$/, "")
+    : "https://relayers-backend.onrender.com";
 
 export const API_URLS = (() => {
-  const fromMany = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URLS)
-    ? String(import.meta.env.VITE_API_URLS)
-        .split(/[\n,\s]+/)
-        .map((x) => x.trim())
-        .filter(Boolean)
-    : [];
-  if (fromMany.length > 0) return Array.from(new Set(fromMany));
+  const fromMany =
+    typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URLS
+      ? String(import.meta.env.VITE_API_URLS)
+          .split(/[\n,\s]+/)
+          .map((x) => x.trim())
+          .filter(Boolean)
+      : [];
+  if (fromMany.length > 0) {
+    const cleaned = filterRelayerUrlList(fromMany);
+    return Array.from(new Set(cleaned.length ? cleaned : [API_URL]));
+  }
   return [API_URL];
 })();
 

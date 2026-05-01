@@ -1,4 +1,5 @@
 import { API_URL, API_URLS } from "../config";
+import { filterRelayerUrlList, isBlockedRelayerBase } from "./relayerBlocklist";
 
 let runtimeRelayerBasesRaw = "";
 
@@ -29,8 +30,10 @@ function joinUrl(base, path) {
 }
 
 function buildTargets(path, overrideRaw) {
-  const override = parseRelayerBases(overrideRaw || runtimeRelayerBasesRaw);
-  const defaults = API_URLS?.length ? API_URLS : [API_URL];
+  const override = filterRelayerUrlList(parseRelayerBases(overrideRaw || runtimeRelayerBasesRaw)).filter(
+    (x) => !isBlockedRelayerBase(x)
+  );
+  const defaults = filterRelayerUrlList(API_URLS?.length ? API_URLS : [API_URL]);
   const bases = uniq([...override, ...defaults].map((x) => String(x || "").replace(/\/$/, "")));
   return bases.map((base) => ({ base, url: joinUrl(base, path) }));
 }

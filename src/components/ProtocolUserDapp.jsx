@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ethers } from "ethers";
 import { loadVault, saveVault } from "../lib/noteVault";
 import { relayerFetchJson, setRuntimeRelayerBases } from "../lib/relayerHttp";
+import { isBlockedRelayerBase } from "../lib/relayerBlocklist";
 import { canUseClientProver, generateSwapProofClient } from "../lib/clientProver";
 import { encryptForRelayer } from "../lib/relayEnvelope";
 import { API_URLS, CLIENT_PROVER_WASM_URL, CLIENT_PROVER_ZKEY_URL } from "../config";
@@ -92,19 +93,15 @@ function extractIntentList(payload) {
   return [];
 }
 
-const BLOCKED_RELAYER_BASES = new Set([
-  "https://backend-ashy-ten-75.vercel.app",
-]);
-
 function sanitizeRelayerBaseRaw(raw, fallbackRaw = API_URLS.join(", ")) {
   const parse = (v) =>
     String(v || "")
       .split(/[\n,\s]+/)
       .map((x) => x.trim().replace(/\/$/, ""))
       .filter(Boolean);
-  const picked = parse(raw).filter((b) => !BLOCKED_RELAYER_BASES.has(b.toLowerCase()));
+  const picked = parse(raw).filter((b) => !isBlockedRelayerBase(b));
   if (picked.length > 0) return Array.from(new Set(picked)).join(", ");
-  const fb = parse(fallbackRaw).filter((b) => !BLOCKED_RELAYER_BASES.has(b.toLowerCase()));
+  const fb = parse(fallbackRaw).filter((b) => !isBlockedRelayerBase(b));
   return Array.from(new Set(fb)).join(", ");
 }
 
@@ -355,16 +352,18 @@ function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
   const out = [];
   notes.forEach((n, vaultIdx) => {
     const raw = n.payload ?? n;
-    if (String(n?.source || "").toLowerCase() !== "relayer") return;
-    if (String(n?.status || "").toLowerCase() !== "unspent") return;
+    const src = String(n?.source || "").toLowerCase();
+    if (src && src !== "relayer" && src !== "deposit" && src !== "swap") return;
+    const st = String(n?.status || "unspent").toLowerCase();
+    if (st !== "unspent") return;
     const verOk = Number(raw?.version) === 1;
     if (!verOk || Number(raw.assetID) !== aid) return;
     const notePool = String(n?.poolAddress || raw.poolAddress || "").toLowerCase();
     if (!notePool || notePool !== poolLower) return;
     const noteOracle = String(n?.oracleAddress || raw.oracleAddress || "").toLowerCase();
-    if (!noteOracle || noteOracle !== oracleLower) return;
+    if (noteOracle && oracleLower && noteOracle !== oracleLower) return;
     const noteVersion = String(n?.deploymentVersion || raw.deploymentVersion || "");
-    if (!noteVersion || noteVersion !== version) return;
+    if (noteVersion && version && noteVersion !== version) return;
     out.push({ vaultIdx, note: raw });
   });
   return out.sort((a, b) => {
@@ -977,7 +976,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setVault({ unlocked: false, key: null, data: { notes: [], updatedAt: null } });
   }
 
-  async function flushPendingVaultNoteAfterLoad(loaded) {
+  async function flushPendingVaultNoteAfterLoad(loaded, relayerCfg) {
     try {
       const raw = sessionStorage.getItem(PENDING_VAULT_NOTE_KEY);
       if (!raw) return null;
@@ -1005,8 +1004,24 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         sessionStorage.removeItem(PENDING_VAULT_NOTE_KEY);
         return null;
       }
+      const entry = relayerCfg?.addresses?.shieldedPool
+        ? {
+            t: Date.now(),
+            source: "deposit",
+            status: "unspent",
+            poolAddress: String(relayerCfg.addresses.shieldedPool || ""),
+            oracleAddress: String(relayerCfg.addresses.feeOracle || ""),
+            deploymentVersion: String(relayerCfg.deploymentVersion || ""),
+            payload: {
+              ...sn,
+              poolAddress: String(sn.poolAddress || relayerCfg.addresses.shieldedPool || ""),
+              oracleAddress: String(sn.oracleAddress || relayerCfg.addresses.feeOracle || ""),
+              deploymentVersion: String(sn.deploymentVersion || relayerCfg.deploymentVersion || ""),
+            },
+          }
+        : { t: Date.now(), payload: sn };
       const next = {
-        notes: [{ t: Date.now(), payload: sn }, ...(loaded.data?.notes || [])].slice(0, 200),
+        notes: [entry, ...(loaded.data?.notes || [])].slice(0, 200),
         updatedAt: Date.now(),
       };
       await saveVault({ key: loaded.key, data: next });
@@ -1077,7 +1092,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       const msg = `Unlock Phantom Note Vault\n\nDomain: ${window.location.host}${chainLine}`;
       const signature = await wallet.signer.signMessage(msg);
       const loaded = await loadVault({ signature });
-      const flushed = await flushPendingVaultNoteAfterLoad(loaded);
+      const flushed = await flushPendingVaultNoteAfterLoad(loaded, cfg);
       const merged = flushed ?? { key: loaded.key, data: loaded.data };
       const remote = await mergeRelayerBackedNotesIntoVault({
         key: merged.key,
@@ -1203,6 +1218,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         commitmentDecimal: c.toString(),
         commitmentHex: depositForm.commitment,
         poolAddress: cfg?.addresses?.shieldedPool || "",
+        oracleAddress: cfg?.addresses?.feeOracle || "",
+        deploymentVersion: cfg?.deploymentVersion || "",
       };
       const deadline = Math.floor(Date.now() / 1000) + Number(depositForm.deadlineSec || 900);
       const domain = {
@@ -1320,7 +1337,18 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         try {
           const notePayload = suggestedVaultNote;
           const next = {
-            notes: [{ t: Date.now(), payload: notePayload }, ...(v.data?.notes || [])].slice(0, 200),
+            notes: [
+              {
+                t: Date.now(),
+                source: "deposit",
+                status: "unspent",
+                poolAddress: String(cfg?.addresses?.shieldedPool || ""),
+                oracleAddress: String(cfg?.addresses?.feeOracle || ""),
+                deploymentVersion: String(cfg?.deploymentVersion || ""),
+                payload: notePayload,
+              },
+              ...(v.data?.notes || []),
+            ].slice(0, 200),
             updatedAt: Date.now(),
           };
           await saveVault({ key: v.key, data: next });
@@ -1628,22 +1656,30 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         const pi = swapData?.publicInputs;
         const { swap: swapC, change: changeC } = resolveSwapOutputCommitments(out, pi);
         if (hints?.swap && hints?.change && pi && isNonZeroCommitmentStr(swapC) && isNonZeroCommitmentStr(changeC)) {
-          const swapNotePayload = buildVaultNoteFromSwapHint({
-            assetId: Number(hints.swap.assetId),
-            amountStr: String(pi.outputAmountSwap ?? hints.swap.amount),
-            blindingFactor: hints.swap.blindingFactor,
-            ownerPublicKey: hints.swap.ownerPublicKey,
-            commitmentStr: String(swapC),
-            poolAddress: cfg?.addresses?.shieldedPool || "",
-          });
-          const changeNotePayload = buildVaultNoteFromSwapHint({
-            assetId: Number(hints.change.assetId),
-            amountStr: String(pi.changeAmount ?? hints.change.amount),
-            blindingFactor: hints.change.blindingFactor,
-            ownerPublicKey: hints.change.ownerPublicKey,
-            commitmentStr: String(changeC),
-            poolAddress: cfg?.addresses?.shieldedPool || "",
-          });
+          const swapNotePayload = {
+            ...buildVaultNoteFromSwapHint({
+              assetId: Number(hints.swap.assetId),
+              amountStr: String(pi.outputAmountSwap ?? hints.swap.amount),
+              blindingFactor: hints.swap.blindingFactor,
+              ownerPublicKey: hints.swap.ownerPublicKey,
+              commitmentStr: String(swapC),
+              poolAddress: cfg?.addresses?.shieldedPool || "",
+            }),
+            oracleAddress: String(cfg?.addresses?.feeOracle || ""),
+            deploymentVersion: String(cfg?.deploymentVersion || ""),
+          };
+          const changeNotePayload = {
+            ...buildVaultNoteFromSwapHint({
+              assetId: Number(hints.change.assetId),
+              amountStr: String(pi.changeAmount ?? hints.change.amount),
+              blindingFactor: hints.change.blindingFactor,
+              ownerPublicKey: hints.change.ownerPublicKey,
+              commitmentStr: String(changeC),
+              poolAddress: cfg?.addresses?.shieldedPool || "",
+            }),
+            oracleAddress: String(cfg?.addresses?.feeOracle || ""),
+            deploymentVersion: String(cfg?.deploymentVersion || ""),
+          };
 
           let merged = { key: vaultRef.current.key, data: vaultRef.current.data };
           if (!vaultRef.current.unlocked || !vaultRef.current.key) {
@@ -1657,7 +1693,10 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             }
             merged = u;
           } else {
-            const flushed = await flushPendingVaultNoteAfterLoad({ key: vaultRef.current.key, data: vaultRef.current.data });
+            const flushed = await flushPendingVaultNoteAfterLoad(
+              { key: vaultRef.current.key, data: vaultRef.current.data },
+              cfg
+            );
             if (flushed) merged = flushed;
           }
 
@@ -1678,7 +1717,15 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             const hx = String(payload.commitmentHex || "").toLowerCase();
             if (!hx) return;
             if (notes.some((e) => String(e?.payload?.commitmentHex || "").toLowerCase() === hx)) return;
-            notes.unshift({ t: Date.now(), payload });
+            notes.unshift({
+              t: Date.now(),
+              source: "swap",
+              status: "unspent",
+              poolAddress: String(cfg?.addresses?.shieldedPool || ""),
+              oracleAddress: String(cfg?.addresses?.feeOracle || ""),
+              deploymentVersion: String(cfg?.deploymentVersion || ""),
+              payload,
+            });
           };
           pushUnique(swapNotePayload);
           pushUnique(changeNotePayload);
@@ -1929,7 +1976,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         }
         merged = u;
       } else {
-        const flushed = await flushPendingVaultNoteAfterLoad({ key: vault.key, data: vault.data });
+        const flushed = await flushPendingVaultNoteAfterLoad({ key: vault.key, data: vault.data }, cfg);
         if (flushed) {
           merged = flushed;
           setVault({ unlocked: true, key: merged.key, data: merged.data });
@@ -1949,8 +1996,27 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         setActionSuccess("This note is already in your vault.");
         return;
       }
+      const enriched = cfg?.addresses?.shieldedPool
+        ? {
+            ...sn,
+            poolAddress: String(sn.poolAddress || cfg.addresses.shieldedPool || ""),
+            oracleAddress: String(sn.oracleAddress || cfg.addresses.feeOracle || ""),
+            deploymentVersion: String(sn.deploymentVersion || cfg.deploymentVersion || ""),
+          }
+        : sn;
       const next = {
-        notes: [{ t: Date.now(), payload: sn }, ...(merged.data?.notes || [])].slice(0, 200),
+        notes: [
+          {
+            t: Date.now(),
+            source: "deposit",
+            status: "unspent",
+            poolAddress: String(cfg?.addresses?.shieldedPool || enriched.poolAddress || ""),
+            oracleAddress: String(cfg?.addresses?.feeOracle || enriched.oracleAddress || ""),
+            deploymentVersion: String(cfg?.deploymentVersion || enriched.deploymentVersion || ""),
+            payload: enriched,
+          },
+          ...(merged.data?.notes || []),
+        ].slice(0, 200),
         updatedAt: Date.now(),
       };
       await saveVault({ key: merged.key, data: next });

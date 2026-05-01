@@ -30,6 +30,7 @@ import BankingSystemPage from './components/BankingSystemPage';
 import { blogPosts } from './data/blogPosts';
 import logoUrl from './assets/logo-pro.svg';
 import { API_URL, SOCIAL_LINKS, RUNBOOK_URL } from './config';
+import { isBlockedRelayerBase } from './lib/relayerBlocklist';
 import { HOME_SCROLL_SECTION_IDS } from './seo/homeScrollSections';
 import GhostChainVisualizer from './components/GhostChainVisualizer';
 import DataInterceptionBackground from './components/DataInterceptionBackground';
@@ -97,7 +98,10 @@ function TradePage() {
 }
 
 function RelayerStakerPage() {
-  const [apiBase, setApiBase] = useState(() => localStorage.getItem('phantom_api') || API_URL);
+  const [apiBase, setApiBase] = useState(() => {
+    const raw = localStorage.getItem('phantom_api') || API_URL;
+    return isBlockedRelayerBase(raw) ? API_URL : raw;
+  });
   const [health, setHealth] = useState(null);
   const [stakingStats, setStakingStats] = useState(null);
   const [relayerStatus, setRelayerStatus] = useState(null);
