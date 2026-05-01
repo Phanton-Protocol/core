@@ -876,7 +876,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (cfg?.mode === "live" && autoSpendEntry?.note && cfg?.assets?.length) {
           try {
             const aid = getAssetIdForToken(intentForm.inputToken, cfg);
-            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${amountWei}`);
+            // Must match relayer generateSwapProof: fee is oracle+DEX on the *full input note*, not swap amountIn.
+            const noteWeiForFee = BigInt(autoSpendEntry.note.amount).toString();
+            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${noteWeiForFee}`);
             protocolFeeStr = String(feeRes.totalProtocolFee ?? protocolFeeStr);
           } catch {
             /* keep quote-derived fee; on-chain fee resolved at proof time */
@@ -1480,7 +1482,16 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         if (!outAmtStr || BigInt(outAmtStr) <= 0n) {
           throw new Error("Refresh the quote so expected output amount is available before proving.");
         }
-        const feeBn = BigInt(String(intentForm.protocolFee || "0"));
+        let feeBn = BigInt(String(intentForm.protocolFee || "0"));
+        if (cfg?.mode === "live" && cfg?.assets?.length) {
+          try {
+            const aid = getAssetIdForToken(intentForm.inputToken, cfg);
+            const feeRes = await fetchJson(`${base}/portfolio/swap-fee?inputAssetId=${aid}&amount=${BigInt(note.amount).toString()}`);
+            feeBn = BigInt(String(feeRes.totalProtocolFee ?? feeBn));
+          } catch {
+            /* use intentForm fee */
+          }
+        }
         const gasBn = BigInt(String(intentForm.gasRefund || "0"));
         const inputAmountBn = BigInt(note.amount);
         let swapAmountBn;
