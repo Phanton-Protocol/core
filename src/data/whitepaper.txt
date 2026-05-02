@@ -350,9 +350,9 @@ Complex multi-leg flows (e.g. rebalance plus payout) are modeled as ordered or a
 
 
 1.8 Fee structure and economics
-Phantom generates revenue directly from usage.
+Phantom’s operations are funded by usage-based fees on supported actions, not by investment proceeds.
 The fee structure includes:
-   * $2 deposit fee - $1.50 goes to the relayer reward pool and $0.50 to the successful relayer
+   * $2 deposit fee - $1.50 goes to the shared relayer fee pool and $0.50 to the successful relayer
    * 0.10% protocol swap fee
    * External DEX fees charged by the AMM of the DEX (External)
    * 0.20% internal matching fee
@@ -360,9 +360,9 @@ The fee structure includes:
    * Payroll Fees (TBD)
    * Banking Saas(TBD)
 Each part of this structure is designed to balance user cost and system sustainability.
-Fixed fees provide predictable revenue, while percentage fees scale with transaction size.
-Internal matching is one of the most important parts of the system. As more liquidity stays inside Phantom, more trades can happen internally. This reduces reliance on external platforms and allows the protocol to capture more value.
-Over time, this makes the system more efficient and increases revenue without needing more users. In addition, applications built on top of Phantom through SDK integrations also contribute to fee generation, further expanding the protocol’s revenue base beyond direct user activity.
+Fixed components give a stable per-operation charge; percentage components scale with transaction size.
+Internal matching is one of the most important parts of the system. As more liquidity stays inside Phantom, more trades can settle on the internal route instead of through external AMMs, so pricing follows Phantom’s published fee rules for those flows rather than relying on outside venues.
+Over time, that can improve efficiency for users and mean more executed volume is billed under the protocol’s fee schedule as activity grows, without presupposing any particular increase in user count. Applications built on Phantom through SDK integrations pay the same usage fees when they submit operations, so total fee funding reflects overall demand for the protocol’s services, not only a single front end.
 
 
 
