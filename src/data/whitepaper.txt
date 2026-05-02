@@ -362,7 +362,7 @@ The fee structure includes:
 Each part of this structure is designed to balance user cost and system sustainability.
 Fixed components give a stable per-operation charge; percentage components scale with transaction size.
 Internal matching is one of the most important parts of the system. As more liquidity stays inside Phantom, more trades can settle on the internal route instead of through external AMMs, so pricing follows Phantom’s published fee rules for those flows rather than relying on outside venues.
-Over time, that can improve efficiency for users and mean more executed volume is billed under the protocol’s fee schedule as activity grows, without presupposing any particular increase in user count. Applications built on Phantom through SDK integrations pay the same usage fees when they submit operations, so total fee funding reflects overall demand for the protocol’s services, not only a single front end.
+Over time, more trades settling on the internal route means users pay Phantom’s published fee schedule for those flows rather than relying on external AMM pricing — the primary benefit is predictable, transparent pricing for users, not a revenue maximization mechanism. Applications built on Phantom through SDK integrations pay the same usage fees when they submit operations, so total fee funding reflects overall demand for the protocol’s services, not only a single front end.
 
 
 
@@ -377,6 +377,8 @@ The protocol requires relayer services to function. The relayer allocation compe
 The treasury allocation funds ongoing protocol development, security audits, grants, and similar protocol-level spending under governance.
 
 Relayer compensation has two parts. First, a fixed amount per successful transaction goes to the relayer that actually executed the user’s operation and made it succeed on-chain—payment for that concrete submission and confirmation work, not a pooled return. Second, a share of the overall relayer fee allocation is distributed according to deployment rules, typically in proportion to each operator’s measured contribution (for example transaction count and value routed), so busier relayers that move more volume receive a larger share of that portion. Exact formulas, any operator commission, and any bonding or registry conditions are deployment- and governance-specific; they describe how service fees are routed, not a promise of investment performance.
+
+Stake alone does not generate rewards. A registered wallet must operate an active relayer node meeting minimum performance thresholds; operators that are offline or fail performance checks are ineligible for reward distribution and subject to slashing conditions defined by governance.
 
 
 
