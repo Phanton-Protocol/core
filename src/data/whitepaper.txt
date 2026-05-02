@@ -371,34 +371,12 @@ Over time, this makes the system more efficient and increases revenue without ne
 All fees are split:
    * 80% to relayers
    * 20% to the treasury
-Relayers earn in two ways.
-First, they receive a fixed $0.50 for each transaction. This gives them a stable base income tied directly to execution.
-Second, they receive a share of the total fees based on how much they contribute. This is distributed proportionally, meaning both transaction volume and transaction value influence earnings.
-This means:
-   * more transactions processed → more earnings
-   * higher value transactions → higher earnings
-For example:
-If the protocol generates $200,000 in fees:
-   * $160,000 goes to relayers
-   * $40,000 goes to the treasury
-A relayer responsible for 10% of activity would earn around $16,000, in addition to their fixed transaction fees.
-This structure rewards both effort and efficiency, ensuring that active and high-performing relayers are compensated accordingly.
-________________
 
+The protocol requires relayer services to function. The relayer allocation compensates operators for services they provide: transaction submission, proof and public-input handling at the relayer layer, gas abstraction where deployed, and compliance screening where enabled. This is payment for execution work and related costs, not profit-sharing or a passive return based on the managerial efforts of others.
 
-In addition to direct relayer earnings, Phantom Protocol supports a delegated participation model, allowing multiple participants to contribute stake to a single relayer and share in its rewards.
-Under this model:
-   * participants allocate $PPT to a relayer
-   * rewards earned by that relayer are distributed proportionally
-   * the relayer operator may take a small commission for managing infrastructure and performance
-This introduces a third layer of participation:
-   * operators, who run relayers and manage execution
-   * delegators, who provide capital and earn a share of rewards
-   * the protocol, which generates revenue from activity
-For example:
-A relayer generating $20,000 in monthly rewards may distribute that income across multiple contributors, with each participant receiving a share based on their stake, after a small operator commission.
-Participants can also allocate their stake across multiple relayers, allowing them to diversify exposure and align with higher-performing operators.
-This model expands access to the network’s economic layer, allowing smaller participants to earn without running infrastructure, while also increasing the total amount of $PPT locked within the system.
+The treasury allocation funds ongoing protocol development, security audits, grants, and similar protocol-level spending under governance.
+
+Relayer compensation has two parts. First, a fixed amount per successful transaction goes to the relayer that actually executed the user’s operation and made it succeed on-chain—payment for that concrete submission and confirmation work, not a pooled return. Second, a share of the overall relayer fee allocation is distributed according to deployment rules, typically in proportion to each operator’s measured contribution (for example transaction count and value routed), so busier relayers that move more volume receive a larger share of that portion. Exact formulas, any operator commission, and any bonding or registry conditions are deployment- and governance-specific; they describe how service fees are routed, not a promise of investment performance.
 
 
 
