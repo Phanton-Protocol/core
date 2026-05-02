@@ -5,7 +5,7 @@ import { EPAPER_PUBLIC_URL } from '../config';
 import logoImg from '../assets/logo-pro.svg';
 
 const primaryLinks = [
-    { name: 'ForInvestors', sectionId: 'investors', oneWordLabel: true },
+    { name: 'Ecosystem Participants', sectionId: 'investors', oneWordLabel: true },
     { name: 'Who it\'s for', sectionId: 'who-its-for' },
     { name: 'Relayers', sectionId: 'relayers' },
     { name: 'Architecture', sectionId: 'architecture' },

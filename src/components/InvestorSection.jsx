@@ -27,7 +27,7 @@ export default function InvestorSection() {
     <section className="section" id="investors">
       <div className="container">
         <motion.div {...fade(0)}>
-          <div className="section-label">For investors & partners</div>
+          <div className="section-label">Ecosystem participants & partners</div>
           <h2 className="display-lg" style={{ maxWidth: '14ch' }}>
             One pool, <em>many rails.</em>
           </h2>

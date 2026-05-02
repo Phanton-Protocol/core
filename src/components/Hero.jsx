@@ -94,7 +94,7 @@ const Hero = () => {
                 Become a relayer
               </Link>
               <a href="#investors" className="btn-outline">
-                For investors
+                Ecosystem Participants
               </a>
             </motion.div>
           </div>

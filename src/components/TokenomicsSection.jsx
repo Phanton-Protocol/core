@@ -3,8 +3,8 @@ import { motion } from 'framer-motion';
 const tokenSummary = [
   { label: 'Total supply', value: '1,000,000,000 PPT' },
   { label: 'Listing price', value: '$0.12' },
-  { label: 'Initial circulating supply', value: '4.12%' },
-  { label: 'Total token raise', value: '$19,000,000' },
+  { label: 'Initial Network Capacity', value: '4.12%' },
+  { label: 'Project Funding for Infrastructure Development', value: '$19,000,000' },
 ];
 
 const allocations = [
