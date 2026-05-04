@@ -14,12 +14,12 @@ const primaryLinks = [
     { name: 'Fees', sectionId: 'fees' },
     { name: 'Roadmap', sectionId: 'roadmap' },
     { name: 'Backers & Partners', sectionId: 'backers-partners' },
+    { name: 'Blog', to: '/blog' },
     { name: 'Newsletter', sectionId: 'newsletter' },
 ];
 
 const moreLinks = [
     { name: 'Trade', to: '/trade' },
-    { name: 'Blog', to: '/blog' },
     { name: 'Privacy & visibility', to: '/privacy-visibility' },
     { name: 'Internal Matching', to: '/trade' },
     { name: 'Relayer (Stake)', to: '/relayer' },
@@ -35,6 +35,7 @@ const Navbar = () => {
     const [activeSection, setActiveSection] = useState('');
     const navigate = useNavigate();
     const location = useLocation();
+    const onBlogRoute = location.pathname === '/blog' || location.pathname.startsWith('/blog/');
 
     useEffect(() => {
         const onScroll = () => setScrolled(window.scrollY > 40);
@@ -177,15 +178,18 @@ const Navbar = () => {
                                     fontSize: 'var(--nav-link-size)',
                                     letterSpacing: '0.06em',
                                     textTransform: 'uppercase',
-                                    color: '#ffffff',
-                                    fontWeight: 500,
+                                    color: onBlogRoute && link.to === '/blog' ? 'var(--color-accent-primary)' : '#ffffff',
+                                    fontWeight: onBlogRoute && link.to === '/blog' ? 600 : 500,
                                     textDecoration: 'none',
                                     transition: 'color 0.3s',
                                     whiteSpace: 'nowrap',
                                     flex: '0 0 auto',
+                                    textShadow: onBlogRoute && link.to === '/blog' ? '0 0 14px rgba(0, 229, 199, 0.35)' : 'none',
                                 }}
-                                onMouseEnter={(e) => { e.target.style.color = '#fff'; }}
-                                onMouseLeave={(e) => { e.target.style.color = '#ffffff'; }}
+                                onMouseEnter={(e) => { e.target.style.color = 'var(--color-accent-primary)'; }}
+                                onMouseLeave={(e) => {
+                                    e.target.style.color = onBlogRoute && link.to === '/blog' ? 'var(--color-accent-primary)' : '#ffffff';
+                                }}
                             >
                                 {link.name}
                             </Link>
@@ -307,23 +311,43 @@ const Navbar = () => {
                         >
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                                 {primaryLinks.map((link) => (
-                                    <a
-                                        key={link.sectionId}
-                                        href={`#${link.sectionId}`}
-                                        onClick={(e) => handleSectionNav(e, link.sectionId)}
-                                        style={{
-                                            fontFamily: 'var(--font-body)',
-                                            fontSize: 'var(--nav-drawer-size)',
-                                            letterSpacing: link.oneWordLabel ? '0.03em' : '0.07em',
-                                            textTransform: link.oneWordLabel ? 'none' : 'uppercase',
-                                            color: location.pathname === '/' && activeSection === link.sectionId ? 'var(--color-accent-primary)' : 'var(--color-text-secondary)',
-                                            fontWeight: location.pathname === '/' && activeSection === link.sectionId ? 600 : 500,
-                                            textDecoration: 'none',
-                                            lineHeight: 1.35,
-                                        }}
-                                    >
-                                        {link.name}
-                                    </a>
+                                    link.to ? (
+                                        <Link
+                                            key={link.name}
+                                            to={link.to}
+                                            onClick={() => setOpen(false)}
+                                            style={{
+                                                fontFamily: 'var(--font-body)',
+                                                fontSize: 'var(--nav-drawer-size)',
+                                                letterSpacing: '0.07em',
+                                                textTransform: 'uppercase',
+                                                color: link.to === '/blog' && onBlogRoute ? 'var(--color-accent-primary)' : 'var(--color-text-secondary)',
+                                                fontWeight: link.to === '/blog' && onBlogRoute ? 600 : 500,
+                                                textDecoration: 'none',
+                                                lineHeight: 1.35,
+                                            }}
+                                        >
+                                            {link.name}
+                                        </Link>
+                                    ) : (
+                                        <a
+                                            key={link.sectionId}
+                                            href={`#${link.sectionId}`}
+                                            onClick={(e) => handleSectionNav(e, link.sectionId)}
+                                            style={{
+                                                fontFamily: 'var(--font-body)',
+                                                fontSize: 'var(--nav-drawer-size)',
+                                                letterSpacing: link.oneWordLabel ? '0.03em' : '0.07em',
+                                                textTransform: link.oneWordLabel ? 'none' : 'uppercase',
+                                                color: location.pathname === '/' && activeSection === link.sectionId ? 'var(--color-accent-primary)' : 'var(--color-text-secondary)',
+                                                fontWeight: location.pathname === '/' && activeSection === link.sectionId ? 600 : 500,
+                                                textDecoration: 'none',
+                                                lineHeight: 1.35,
+                                            }}
+                                        >
+                                            {link.name}
+                                        </a>
+                                    )
                                 ))}
                             </div>
                             <div style={{ height: 1, background: 'var(--color-border)', margin: '0.15rem 0' }} />
