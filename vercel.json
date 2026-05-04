@@ -9,6 +9,11 @@
       "source": "/user",
       "destination": "/trade",
       "permanent": true
+    },
+    {
+      "source": "/blog/what-is-phantom-protocol",
+      "destination": "/blog/partnership-crypto-rafts-pr",
+      "permanent": true
     }
   ],
   "rewrites": [
@@ -73,8 +78,8 @@
       "destination": "/generated-seo/onepager.html"
     },
     {
-      "source": "/blog/what-is-phantom-protocol",
-      "destination": "/generated-seo/blog__what-is-phantom-protocol.html"
+      "source": "/blog/partnership-crypto-rafts-pr",
+      "destination": "/generated-seo/blog__partnership-crypto-rafts-pr.html"
     },
     {
       "source": "/blog/private-defi-for-teams",
@@ -100,6 +105,19 @@
         {
           "key": "Content-Disposition",
           "value": "inline; filename=\"pitchdeck.pdf\""
+        }
+      ]
+    },
+    {
+      "source": "/partnership-crypto-rafts-pr.pdf",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        },
+        {
+          "key": "Content-Disposition",
+          "value": "inline; filename=\"Partnership with Crypto Rafts PR.pdf\""
         }
       ]
     },

@@ -1,25 +1,26 @@
 export const blogPosts = [
   {
-    slug: 'what-is-phantom-protocol',
-    title: 'What is Phantom Protocol? A plain-English guide',
-    excerpt: 'A simple breakdown of shielded pools, notes, relayers, and what privacy actually means in practice.',
-    date: 'APR 07, 2026',
-    readTime: '6 min read',
+    slug: 'partnership-crypto-rafts-pr',
+    title: 'Partnership with Crypto Rafts',
+    excerpt:
+      'Phantom Protocol and Crypto Rafts are teaming up. Read the full partnership release for scope, timing, and what it means for users.',
+    date: 'MAY 04, 2026',
+    readTime: '2 min read',
     category: 'ANNOUNCEMENT',
-    description: 'Understand Phantom Protocol in plain language: shielded notes, relayers, and privacy boundaries explained for builders and operators.',
-    intro: 'Most blockchain tools are transparent by default. That is great for auditability, but it can be painful for teams and traders who do not want every movement exposed in real time. Phantom Protocol is designed to solve that tension: keep public settlement, but reduce unnecessary data exposure.',
+    description:
+      'Official partnership announcement: Phantom Protocol x Crypto Rafts. Summary on the blog; full details in the downloadable PR PDF.',
+    intro:
+      'We are announcing a strategic partnership with Crypto Rafts to extend how builders and communities discover and use privacy-preserving infrastructure. The release below summarizes the collaboration; the PDF contains the complete press statement and quotes.',
+    pdfHref: '/partnership-crypto-rafts-pr.pdf',
+    pdfLabel: 'Partnership release (PDF)',
     sections: [
       {
-        heading: 'The short version',
-        body: 'Phantom uses a shielded pool model. You deposit funds into the pool, receive private notes, and later spend those notes with zero-knowledge proofs. On-chain observers can verify correctness without seeing your full balance history.',
+        heading: 'What this partnership is about',
+        body: 'Crypto Rafts and Phantom Protocol are aligning on education, distribution, and practical paths for teams that want confidential execution without giving up verifiable settlement. Together we focus on clear communication, safer defaults, and real workflows—not hype.',
       },
       {
-        heading: 'What is hidden and what stays public',
-        body: 'Inside the pool, note relationships are hidden behind commitments and nullifiers. At the protocol edges, some things are still public by design: deposits are public funding events, and withdrawals expose recipient and amount when assets leave privacy space.',
-      },
-      {
-        heading: 'Where relayers fit in',
-        body: 'Relayers submit transactions so users do not have to broadcast directly from the same wallet identity every time. This improves operational privacy and UX, and with multi-relayer failover, improves service continuity when one endpoint is unavailable.',
+        heading: 'Read the full release',
+        body: 'The official PR PDF includes the full narrative, partner context, and next steps. Download it from this page or open it in a new tab if you prefer to read inline.',
       },
     ],
   },

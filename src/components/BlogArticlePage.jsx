@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import Navbar from "./Navbar";
 import SeoHead from "./SeoHead";
 
-export default function BlogArticlePage({ title, description, path, date, readTime, intro, sections }) {
+export default function BlogArticlePage({ title, description, path, date, readTime, intro, sections, pdfHref, pdfLabel }) {
   return (
     <div style={{ minHeight: "100vh" }}>
       <SeoHead title={title} description={description} path={path} />
@@ -22,6 +22,11 @@ export default function BlogArticlePage({ title, description, path, date, readTi
             </div>
           ))}
           <div style={{ marginTop: "2rem", display: "flex", gap: "0.8rem", flexWrap: "wrap" }}>
+            {pdfHref ? (
+              <a href={pdfHref} className="btn-outline btn-outline-cyan" target="_blank" rel="noopener noreferrer">
+                {pdfLabel || "Download PDF"}
+              </a>
+            ) : null}
             <Link to="/blog" className="btn-outline">All Articles</Link>
             <Link to="/trade" className="btn-outline btn-outline-cyan">Try InternalMatching</Link>
           </div>

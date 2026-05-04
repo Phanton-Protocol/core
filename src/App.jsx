@@ -437,6 +437,8 @@ function App() {
               readTime={post.readTime}
               intro={post.intro}
               sections={post.sections}
+              pdfHref={post.pdfHref}
+              pdfLabel={post.pdfLabel}
             />
           }
         />
