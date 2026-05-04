@@ -14,6 +14,11 @@
       "source": "/blog/what-is-phantom-protocol",
       "destination": "/blog/partnership-crypto-rafts-pr",
       "permanent": true
+    },
+    {
+      "source": "/blog/private-defi-for-teams",
+      "destination": "/blog/partnership-mj-apparel",
+      "permanent": true
     }
   ],
   "rewrites": [
@@ -82,8 +87,8 @@
       "destination": "/generated-seo/blog__partnership-crypto-rafts-pr.html"
     },
     {
-      "source": "/blog/private-defi-for-teams",
-      "destination": "/generated-seo/blog__private-defi-for-teams.html"
+      "source": "/blog/partnership-mj-apparel",
+      "destination": "/generated-seo/blog__partnership-mj-apparel.html"
     },
     {
       "source": "/blog/relayer-failover-explained",
@@ -105,19 +110,6 @@
         {
           "key": "Content-Disposition",
           "value": "inline; filename=\"pitchdeck.pdf\""
-        }
-      ]
-    },
-    {
-      "source": "/partnership-crypto-rafts-pr.pdf",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        },
-        {
-          "key": "Content-Disposition",
-          "value": "inline; filename=\"Partnership with Crypto Rafts PR.pdf\""
         }
       ]
     },
