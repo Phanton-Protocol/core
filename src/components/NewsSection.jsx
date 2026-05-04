@@ -2,29 +2,31 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { blogPosts } from '../data/blogPosts';
 
+const MotionLink = motion(Link);
+
 const NewsSection = () => {
     const newsItems = blogPosts.slice(0, 3);
 
     return (
-        <section className="section" id="news">
+        <section className="section" id="blog">
             <div className="container">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '4rem', flexWrap: 'wrap', gap: '2rem' }}>
                     <div>
-                        <div className="section-label">System Intel</div>
+                        <div className="section-label">Blog</div>
                         <h2 className="display-lg">
-                            Latest<br /><em>broadcasts.</em>
+                            Latest<br /><em>articles.</em>
                         </h2>
                     </div>
                     <Link to="/blog" className="btn-outline">
-                        View All Logs
+                        View all articles
                     </Link>
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
                     {newsItems.map((news, idx) => (
-                        <motion.a
-                            href={`/blog/${news.slug}`}
-                            key={idx}
+                        <MotionLink
+                            to={`/blog/${news.slug}`}
+                            key={news.slug}
                             initial={{ opacity: 0, y: 20 }}
                             whileInView={{ opacity: 1, y: 0 }}
                             viewport={{ once: true }}
@@ -58,7 +60,7 @@ const NewsSection = () => {
                                     {news.excerpt}
                                 </p>
                             </div>
-                        </motion.a>
+                        </MotionLink>
                     ))}
                     <div className="divider" />
                 </div>

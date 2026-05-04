@@ -6,7 +6,7 @@ export const HOME_SCROLL_SECTION_IDS = new Set([
   'technology',
   'tokenomics',
   'sdk',
-  'news',
+  'blog',
   'architecture',
   'relayers',
   'security',

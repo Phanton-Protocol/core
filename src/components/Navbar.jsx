@@ -19,6 +19,7 @@ const primaryLinks = [
 
 const moreLinks = [
     { name: 'Trade', to: '/trade' },
+    { name: 'Blog', to: '/blog' },
     { name: 'Privacy & visibility', to: '/privacy-visibility' },
     { name: 'Internal Matching', to: '/trade' },
     { name: 'Relayer (Stake)', to: '/relayer' },
