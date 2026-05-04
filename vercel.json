@@ -19,6 +19,11 @@
       "source": "/blog/private-defi-for-teams",
       "destination": "/blog/partnership-mj-apparel",
       "permanent": true
+    },
+    {
+      "source": "/blog/relayer-failover-explained",
+      "destination": "/blog",
+      "permanent": true
     }
   ],
   "rewrites": [
@@ -89,10 +94,6 @@
     {
       "source": "/blog/partnership-mj-apparel",
       "destination": "/generated-seo/blog__partnership-mj-apparel.html"
-    },
-    {
-      "source": "/blog/relayer-failover-explained",
-      "destination": "/generated-seo/blog__relayer-failover-explained.html"
     },
     {
       "source": "/(.*)",

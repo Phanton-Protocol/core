@@ -108,28 +108,4 @@ export const blogPosts = [
       },
     ],
   },
-  {
-    slug: 'relayer-failover-explained',
-    title: 'Relayer failover explained: what happens when one relayer goes down',
-    excerpt: 'A practical explanation of automatic relayer fallback and why it matters for uptime and operations.',
-    date: 'APR 07, 2026',
-    readTime: '5 min read',
-    category: 'USE CASE',
-    description: 'How automatic relayer failover works in Phantom Protocol frontend flows and why it improves reliability.',
-    intro: 'A single relayer is a single point of operational failure. If that relayer is down, users cannot submit transactions through it. The right answer is failover: attempt primary relayer first, then automatically retry on healthy secondary relayers.',
-    sections: [
-      {
-        heading: 'What failover does',
-        body: 'When a request fails due to network issues or retriable server errors, the client can automatically try the next configured relayer endpoint. Users do not need to manually switch URLs every time.',
-      },
-      {
-        heading: 'What failover does not do',
-        body: 'Failover does not change cryptographic validity rules. Proofs still need to verify, and non-retriable errors like invalid input should fail fast. The goal is reliability, not bypassing protocol checks.',
-      },
-      {
-        heading: 'Best practice in production',
-        body: 'Run at least two relayer backends in separate infrastructure zones, monitor health continuously, and keep endpoint rotation simple for clients. Reliability is a protocol-adjacent product feature users feel immediately.',
-      },
-    ],
-  },
 ];
