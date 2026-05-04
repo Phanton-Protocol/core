@@ -436,6 +436,7 @@ function App() {
               date={post.date}
               readTime={post.readTime}
               intro={post.intro}
+              introFigure={post.introFigure}
               sections={post.sections}
             />
           }

@@ -61,50 +61,96 @@ export const blogPosts = [
     slug: 'partnership-mj-apparel',
     title: 'Partnership with MJ Apparel',
     excerpt:
-      'MJ Apparel onboarded to Phantom Protocol—confidential, frictionless commerce for a premier U.S. apparel manufacturer serving streetwear and corporate brands.',
+      'Web2 brands are adopting crypto while staying private. MJ Apparel’s onboarding to Phantom Protocol shows how confidential, frictionless commerce can work for real retail.',
     date: 'MAY 04, 2026',
-    readTime: '9 min read',
+    readTime: '10 min read',
     category: 'ANNOUNCEMENT',
     description:
-      'How MJ Apparel uses Phantom’s shielded pool, ZK verification, and relayer network to serve Web3-native customers with institutional-grade privacy and speed.',
+      'MJ Apparel uses Phantom’s shielded pool, Groth16 verification, relayer network, and compliance firewall to serve Web3-native customers with institutional-grade privacy.',
     intro:
-      'Most people still picture blockchain as traders watching charts—not a customer buying a hoodie. MJ Apparel treated privacy as a commercial advantage, not a “Web3-only” feature. Its onboarding to Phantom Protocol is a concrete example of how confidential, frictionless commerce can extend to any business ready to move first.',
+      'The future is here: Web2 companies are beginning to adopt crypto while remaining private. Most people associate blockchain transactions with cryptocurrency traders monitoring price charts late at night. They do not picture a customer buying a hoodie. This gap in imagination has become MJ Apparel’s competitive advantage because the brand recognized that privacy was never a Web3 problem to begin with. Phantom Protocol’s onboarding of MJ Apparel proves that confidential, frictionless commerce now belongs to any business bold enough to claim it first.',
+    introFigure: {
+      src: '/blog/mj-apparel/hero-screenshot.svg',
+      alt: 'Phantom Protocol and MJ Apparel partnership artwork',
+      wide: true,
+    },
     sections: [
       {
-        heading: 'Web2 brands, private on-chain checkout',
-        figureSrc: '/blog/mj-apparel/page-1.png',
-        figureAlt: 'Opening narrative on MJ Apparel and Phantom Protocol onboarding.',
-        body: 'The future here is straightforward: Web2 companies are beginning to adopt crypto while staying private. Most people associate blockchain transactions with cryptocurrency traders monitoring price charts late at night. They do not picture a customer buying a hoodie. That gap in imagination became MJ Apparel’s competitive advantage, because the brand recognized that privacy was never exclusively a Web3 problem. Phantom Protocol’s work with MJ Apparel shows that confidential, frictionless commerce can belong to any business bold enough to claim it first. MJ Apparel is a premier U.S.-based apparel manufacturer and wholesale supplier specializing in high-quality heavyweight fleece and premium blanks. With roots in the textile industry reaching back to 1976, the company has built a reputation for craftsmanship and fabric integrity. Beyond supplying basic apparel, MJ Apparel serves as a foundational partner for streetwear brands and corporate labels. Its move away from standard, boxy promotional wear toward modern, retail-ready fits lets partners launch high-end merchandise that rivals boutique fashion standards.',
+        heading: 'MJ Apparel at a glance',
+        figureSrc: '/blog/mj-apparel/rfy00544-apparel.svg',
+        figureAlt: 'MJ Apparel product and brand imagery',
+        figureMaxWidth: 596,
+        body: [
+          'MJ Apparel is a premier U.S.-based apparel manufacturer and wholesale supplier specializing in high-quality heavyweight fleece and premium “blanks.” With a legacy in the textile industry reaching back to 1976, the company has built a reputation for superior craftsmanship and fabric integrity. Beyond supplying basic apparel, MJ Apparel serves as a foundational partner for streetwear brands and corporate labels. Their move away from standard, “boxy” promotional wear toward modern, retail-ready fits allows their partners to launch high-end merchandise that rivals boutique fashion standards.',
+          'MJ Apparel serves real people. Yet it processes its transactions through Phantom Protocol, a Confidentiality-as-a-Service (CaaS) layer. Phantom combines zero-knowledge proofs, fully homomorphic encryption, and secure execution environments to deliver private, verifiable, and near-instant on-chain transactions. Consequently, the relevant question is not why Phantom exists. Instead, every retail brand in MJ Apparel’s position should ask why it is not already using this infrastructure.',
+        ],
+        pullQuote:
+          'Privacy is not a feature exclusive to crypto-native companies. Speed and confidentiality are commercial necessities, and blockchain infrastructure now delivers both better than legacy payment rails.',
       },
       {
-        heading: 'Confidentiality-as-a-Service for retail',
-        figureSrc: '/blog/mj-apparel/page-2.png',
-        figureAlt: 'MJ Apparel processing payments through Phantom’s CaaS layer.',
-        body: 'MJ Apparel serves real people—while processing transactions through Phantom Protocol, a Confidentiality-as-a-Service (CaaS) layer. Phantom combines zero-knowledge proofs, fully homomorphic encryption, and secure execution environments to deliver private, verifiable, near-instant on-chain transactions. The relevant question is not why Phantom exists; every retail brand in MJ Apparel’s position should ask why it is not already using this infrastructure. Privacy is not a feature exclusive to crypto-native companies. Speed and confidentiality are commercial necessities—and blockchain infrastructure can deliver both more cleanly than legacy rails in many cross-border and settlement paths. Understanding the integration starts with Phantom’s core architecture: a shielded transaction pool. When a user or business initiates a transaction, funds enter the pool and are represented by a cryptographic note—a private record of asset, amount, and ownership that is not stored in plaintext on-chain. The chain sees a commitment: a hash that proves validity without revealing contents. For MJ Apparel, a customer paying with digital assets can complete a purchase without exposing wallet address, transaction history, or purchase value on the open ledger. The system can offer confidentiality similar to closed card networks—while settling natively on-chain without a traditional gatekeeper.',
+        heading: 'What Phantom Protocol actually delivers to a fashion brand',
+        body: [
+          'Understanding the MJ Apparel integration requires a practical look at Phantom Protocol’s core architecture. At its foundation, Phantom operates a shielded transaction pool. When a user or business initiates a transaction, funds enter the pool and become represented by a cryptographic “note,” which is a private record containing the asset, amount, and ownership data that is never stored in plaintext on-chain. As a result, the blockchain sees only a commitment: a hash that proves the transaction is valid without revealing its contents.',
+          'For MJ Apparel, this architecture delivers a crucial benefit. A customer paying with digital assets can complete a purchase without exposing their wallet address, transaction history, or purchase value to the open ledger. Because the system provides the same confidentiality that traditional card processors offer through closed networks, it now operates natively on-chain without a gatekeeper.',
+        ],
       },
       {
-        heading: 'Transaction flow end to end',
-        figureSrc: '/blog/mj-apparel/page-3.png',
-        figureAlt: 'Diagram-style explanation of shielded pool, commitments, ZK proof, and settlement.',
-        body: 'Customer initiates payment. Funds enter Phantom’s shielded pool from a transparent wallet; the pool obscures the source so identity is protected from the outset. A cryptographic commitment is recorded on the Merkle tree without exposing amount or identity—the ledger verifies existence without compromising privacy. A Groth16 proof confirms value conservation and authorization in a single on-chain check, enabling trustless settlement. Funds exit the pool to MJ Apparel’s treasury in a clean, compliant, instant manner. The flow routes through Phantom’s relayer network so the on-chain sender address decouples from the user’s identity. Gas is handled by the relayer so checkout stays simple. From a customer standpoint the experience can feel as direct as a card swipe; from a privacy standpoint it is closer to a sealed envelope.',
+        heading: 'Transaction flow and causal linkage',
+        bullets: [
+          'Customer initiates payment. The payment enters Phantom’s shielded pool from a transparent wallet. Because the pool obscures the source, the user’s identity remains protected from the outset.',
+          'Commitment is recorded. A cryptographic commitment appends to the Merkle tree, and no amount or identity is exposed. Therefore, the ledger verifies existence without compromising privacy.',
+          'ZK proof is verified. A Groth16 proof confirms value conservation and authorization in a single on-chain check. This verification step ensures that funds are legitimate, which then enables trustless settlement.',
+          'Settlement reaches the brand. Funds exit the pool to MJ Apparel’s treasury in a clean, compliant, and instant manner. Because the entire flow routes through Phantom’s relayer network, the on-chain sender address decouples from the user’s identity entirely. Gas fees are handled by the relayer, so the user simply pays. Consequently, from a customer experience standpoint the process is as simple as a card swipe, while from a privacy standpoint it is cryptographically equivalent to a sealed envelope.',
+        ],
       },
       {
-        heading: 'Speed, reliability, and the Web3 consumer',
-        figureSrc: '/blog/mj-apparel/page-4.png',
-        figureAlt: 'Speed and market reality for on-chain consumer spending in fashion.',
-        body: 'Privacy does not have to mean slow. On BN254 curve–optimized networks, settlement finality can land in seconds rather than the two-to-five business days common in traditional cross-border wires. For a retail brand processing international orders, that difference is structural. Phantom’s high transaction success rate reflects operational focus: the protocol was built for institutional trading desks, banking infrastructure, and enterprise payroll—not as a lab demo. Extending that stack to consumer-facing commerce means MJ Apparel is not a crypto experiment; it is a brand that recognized institutional-grade rails and chose to run on them. There are tens of millions of active DeFi users globally who hold meaningful digital asset wealth and spend it on NFTs, on-chain services, digital goods, and protocol fees. Many want to spend directly from their wallets without routing through banks that do not understand them. Until recently, physical-goods infrastructure in a user-friendly, compliant form was scarce. Phantom’s work with MJ Apparel creates a direct bridge between that high-spending, digitally native segment and a mainstream fashion brand.',
+        heading: 'Speed is not a perk; it is the product',
+        figureSrc: '/blog/mj-apparel/dsc09915-apparel.svg',
+        figureAlt: 'MJ Apparel imagery alongside Phantom commerce narrative',
+        figureMaxWidth: 596,
+        body: [
+          'A persistent myth in digital payments holds that privacy comes at the cost of performance. Phantom Protocol dismantles that assumption because blockchain settlement finality on BN254 curve–optimized networks operates in seconds rather than the two-to-five business days that characterize traditional cross-border wires. For a retail brand like MJ Apparel processing international orders, this difference is not marginal. It represents an architectural shift in how revenue moves.',
+          'Phantom’s 95% transaction success rate directly reflects this reliability. The protocol was not built as a proof-of-concept for cryptography researchers. Instead, it was built to satisfy the operational demands of institutional trading desks, global banking infrastructure, and enterprise payroll. Because it now extends that same infrastructure to consumer-facing commerce, MJ Apparel is not a crypto experiment. It is a brand that recognized institutional-grade rails and chose to run on them.',
+        ],
       },
       {
-        heading: 'What the architecture unlocks for the brand',
-        figureSrc: '/blog/mj-apparel/page-5.png',
-        figureAlt: 'Benefits: DeFi consumer reach, zero chargebacks, compliant privacy, first-mover positioning.',
-        body: 'Phantom’s architecture opens access to a global DeFi consumer base actively looking for Web2 brands that accept on-chain payments—a demographic with strong purchasing power where acceptance exists. On-chain settlement is irreversible and cryptographically verified, eliminating a major class of chargeback leakage familiar to fashion e-commerce. Phantom’s compliance firewall integrates real-time Chainalysis screening at the deposit boundary so the brand does not receive funds from flagged sources. First-mover positioning matters: no major fashion competitor fully serves the on-chain consumer at scale today; the window to own that audience is open now. For MJ Apparel, Phantom is not only a security layer—it is distribution into a demographic legacy checkout cannot reach. Every Web3 user who discovers MJ Apparel accepts on-chain payments is a net-new customer the brand may not acquire through conventional advertising alone. The protocol supplies infrastructure, compliance, cryptographic guarantees, and audience access; the brand supplies product and commercial trust. As Phantom’s merchant roster grows, wallet holders gain a widening set of places to spend—compounding value for early partners.',
+        heading: 'The Web3 consumer: fashion’s most overlooked audience',
+        body: [
+          'Here is the market reality that most retail strategists have not fully priced in. There are tens of millions of active DeFi users globally who hold meaningful digital asset wealth and spend it actively on NFTs, on-chain services, digital goods, and protocol fees. These users are not waiting to convert their holdings into fiat before spending. They want to spend directly from their wallets in the assets they hold without routing through a bank that does not understand them.',
+          'Until now, the infrastructure to serve this audience in a physical goods context simply did not exist in a user-friendly, compliant form. Phantom Protocol changes that because by onboarding MJ Apparel, it creates the first direct bridge between this high-spending, digitally native consumer segment and a mainstream fashion brand. This segment has historically had almost nowhere to spend its on-chain capital on everyday goods, so the new bridge unlocks a previously inaccessible market.',
+        ],
       },
       {
-        heading: 'The competitive clock',
-        figureSrc: '/blog/mj-apparel/page-6.png',
-        figureAlt: 'Closing argument on onboarding Web2 commerce to confidential infrastructure.',
-        body: 'Phantom Protocol’s onboarding of MJ Apparel is an opening phase in a systematic effort to bring Web2 commerce brands onto confidential on-chain infrastructure. The same shielded pool, ZK system, and relayer network that serve institutional clients can onboard a new retail brand without architectural rewrites—low marginal cost to add merchants, high marginal benefit when first-mover access to an underserved consumer base is on the line. That asymmetry closes as more brands join: the DeFi consumer who today has few fashion options will soon have several. Capturing loyalty now typically costs less than fighting for share later. MJ Apparel understood that calculus. Phantom Protocol is actively onboarding Web2 commerce brands; early partners receive preferential positioning and audience access.',
+        heading: 'Key benefits from Phantom’s architecture',
+        figureSrc: '/blog/mj-apparel/rfy00580-apparel.svg',
+        figureAlt: 'MJ Apparel collection imagery',
+        figureMaxWidth: 596,
+        body: [
+          'Phantom’s design translates into concrete advantages for a brand serving both traditional and on-chain buyers.',
+        ],
+        bullets: [
+          'Access to a global DeFi consumer base. These users actively seek Web2 brands willing to accept on-chain payments. Because this demographic has above-average purchasing power and brand loyalty where accepted, MJ Apparel gains a uniquely valuable audience.',
+          'Zero chargebacks. On-chain settlement is irreversible and cryptographically verified. Consequently, one of fashion e-commerce’s most persistent revenue leakages is eliminated.',
+          'Compliant privacy by design. Phantom’s Compliance Firewall integrates real-time Chainalysis screening at the deposit boundary. Therefore, MJ Apparel never receives funds from flagged or illicit sources.',
+          'First-mover positioning in a category that does not yet exist at scale. No major fashion competitor currently serves the on-chain consumer. Because the window to own this audience is open now, early action yields lasting advantage.',
+        ],
+      },
+      {
+        heading: 'For MJ Apparel, Phantom is not a tool; it is a growth channel',
+        body: [
+          'The framing that matters here is not security, because security is table stakes. What Phantom delivers for MJ Apparel is reach, specifically reach into a consumer demographic that existing payment infrastructure cannot touch. Every Web3 user who discovers that MJ Apparel accepts on-chain payments becomes a net new customer that the brand could not have acquired through traditional advertising or conventional checkout flows. This causal chain converts infrastructure into a growth engine.',
+          'The Phantom partnership model operates as follows. The protocol provides the infrastructure, the compliance layer, the cryptographic guarantees, and the audience access. The brand provides the product and the commercial relationship. As a result, the outcome is a distribution channel that compounds over time as the on-chain consumer economy grows and as Phantom’s roster of onboarded brands expands. This expansion creates a network of merchants that any DeFi wallet holder can patronize freely.',
+        ],
+        pullQuote:
+          'The brands that will dominate the next decade of commerce are not the ones that wait for the market to normalize blockchain payments. They are the ones onboarding now, while the audience is hungry and the competition is absent.',
+      },
+      {
+        heading: 'The competitive clock is running',
+        body: [
+          'Phantom Protocol’s onboarding of Paper Industries, and specifically MJ Apparel, represents the opening phase of a systematic effort to bring Web2 commerce brands onto confidential on-chain infrastructure. The protocol’s architecture was designed to scale because the same shielded pool, the same ZK proof system, and the same relayer network that serve institutional clients can onboard a new retail brand without modification. Consequently, the marginal cost of adding the next merchant is low, while the marginal benefit to that merchant (first access to an underserved consumer base) is high.',
+          'This asymmetry closes as more brands join. The DeFi consumer audience that today has almost no fashion options will, within a short horizon, have several. Therefore, the brand that captures their loyalty now does so at a fraction of the customer acquisition cost that it will take later. MJ Apparel understood this calculus. The question for every other brand in the sector is whether they will recognize it in time.',
+          'Get your brand onboarded before your competitor does. Phantom Protocol is actively onboarding Web2 commerce brands. Early partners receive preferential positioning and audience access.',
+        ],
       },
     ],
   },
