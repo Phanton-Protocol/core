@@ -118,6 +118,9 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     bytes32 public constant RELAYER_ATTESTATION_TYPEHASH = keccak256(
         "RelayerSwapAttestation(bytes32 proofHash,bytes32 nullifier,uint256 inputAssetID,uint256 outputAssetIDSwap,uint256 swapAmount,uint256 minOutputAmountSwap,address relayer,address pool,uint256 chainId,uint256 deadline,uint256 nonce)"
     );
+    bytes32 public constant RELAYER_ATTESTATION_HASH_FIRST_TYPEHASH = keccak256(
+        "RelayerSwapAttestationHashFirst(bytes32 proofHash,bytes32 publicInputHash,address relayer,address pool,uint256 chainId,uint256 deadline,uint256 nonce)"
+    );
     bytes32 public constant RELAYER_ATTESTATION_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
@@ -851,6 +854,29 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce]) revert PoolErr(50);
 
         bytes32 proofHash = keccak256(abi.encode(swapData.proof.a, swapData.proof.b, swapData.proof.c));
+        bytes32 publicInputHash = _computeRelayerPublicInputHash(inputs);
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                RELAYER_ATTESTATION_DOMAIN_TYPEHASH,
+                RELAYER_ATTESTATION_NAME_HASH,
+                RELAYER_ATTESTATION_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        bytes32 hashFirstStructHash = keccak256(
+            abi.encode(
+                RELAYER_ATTESTATION_HASH_FIRST_TYPEHASH,
+                proofHash,
+                publicInputHash,
+                relayer,
+                address(this),
+                block.chainid,
+                swapData.relayerAttestationDeadline,
+                swapData.relayerAttestationNonce
+            )
+        );
+        bytes32 hashFirstDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, hashFirstStructHash));
         bytes32 structHash = keccak256(
             abi.encode(
                 RELAYER_ATTESTATION_TYPEHASH,
@@ -867,21 +893,35 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
                 swapData.relayerAttestationNonce
             )
         );
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                RELAYER_ATTESTATION_DOMAIN_TYPEHASH,
-                RELAYER_ATTESTATION_NAME_HASH,
-                RELAYER_ATTESTATION_VERSION_HASH,
-                block.chainid,
-                address(this)
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        address recovered = _recoverAttestationSigner(digest, swapData.relayerAttestationSig);
-        if (recovered != msg.sender || recovered != relayer) revert PoolErr(51);
+        bytes32 legacyDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        address recovered = _recoverAttestationSigner(hashFirstDigest, swapData.relayerAttestationSig);
+        bytes32 usedDigest = hashFirstDigest;
+        if (recovered != msg.sender || recovered != relayer) {
+            recovered = _recoverAttestationSigner(legacyDigest, swapData.relayerAttestationSig);
+            usedDigest = legacyDigest;
+            if (recovered != msg.sender || recovered != relayer) revert PoolErr(51);
+        }
 
         relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce] = true;
-        emit RelayerAttestationVerified(relayer, swapData.relayerAttestationNonce, digest);
+        emit RelayerAttestationVerified(relayer, swapData.relayerAttestationNonce, usedDigest);
+    }
+
+    function _computeRelayerPublicInputHash(
+        JoinSplitPublicInputs memory inputs
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                inputs.nullifier,
+                inputs.inputCommitment,
+                inputs.outputCommitmentSwap,
+                inputs.outputCommitmentChange,
+                inputs.merkleRoot,
+                inputs.inputAssetID,
+                inputs.outputAssetIDSwap,
+                inputs.swapAmount,
+                inputs.minOutputAmountSwap
+            )
+        );
     }
 
     function _recoverAttestationSigner(bytes32 digest, bytes memory signature) internal pure returns (address) {

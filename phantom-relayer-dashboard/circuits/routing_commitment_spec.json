@@ -1,0 +1,22 @@
+{
+  "name": "phantom_join_split_routing_commitment_v1",
+  "description": "Canonical routing commitment derived from join-split public signals for relayer hash-first authorization.",
+  "fields_order": [
+    "nullifier",
+    "inputCommitment",
+    "outputCommitmentSwap",
+    "outputCommitmentChange",
+    "merkleRoot",
+    "inputAssetID",
+    "outputAssetIDSwap",
+    "swapAmount",
+    "minOutputAmountSwap"
+  ],
+  "encoding": "abi.encode(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256)",
+  "hash": "keccak256",
+  "consumers": [
+    "backend/src/zkProofs.js",
+    "backend/src/index.js",
+    "contracts/_full/core/ShieldedPool.sol"
+  ]
+}

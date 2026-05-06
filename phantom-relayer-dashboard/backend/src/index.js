@@ -289,6 +289,7 @@ const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
 const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
 const RELAYER_REQUIRE_ENCRYPTED_ENVELOPE = process.env.RELAYER_REQUIRE_ENCRYPTED_ENVELOPE !== "false";
 const RELAYER_SWAP_ATTESTATION_MODE = String(process.env.RELAYER_SWAP_ATTESTATION_MODE || "hash_first_with_fallback").toLowerCase();
+const RELAYER_PRIVACY_HARD_SWITCH = process.env.RELAYER_PRIVACY_HARD_SWITCH !== "false";
 const PLACEHOLDER_RELAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function toBps(v, fallback) {
@@ -1952,6 +1953,15 @@ function configuredTokenForAssetId(assetId) {
   }
 }
 
+function assertAssetIdConfigured(assetId, field) {
+  const token = configuredTokenForAssetId(assetId);
+  if (!token) {
+    const err = new Error(`${field || "asset_id"}_not_configured_for_pool`);
+    err.status = 400;
+    throw err;
+  }
+}
+
 function canonicalWrappedNative(chainId) {
   if (Number(chainId) === 56) return "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
   return "0xae13d989dac2f0debff460ac112a837c89baa7cd";
@@ -1994,6 +2004,37 @@ function assertSwapRoutingConsistency(swapData) {
       throw err;
     }
   }
+}
+
+function buildCommittedSwapParams(swapData) {
+  const pi = swapData?.publicInputs || {};
+  const sp = swapData?.swapParams || {};
+  const tokenIn = configuredTokenForAssetId(pi.inputAssetID);
+  const tokenOut = configuredTokenForAssetId(pi.outputAssetIDSwap);
+  if (!tokenIn || !tokenOut) {
+    const err = new Error("swap_asset_id_not_configured");
+    err.status = 400;
+    throw err;
+  }
+  let path = sp.path;
+  if (path && path !== "0x" && typeof path === "string" && path.length > 2) {
+    try {
+      ethers.AbiCoder.defaultAbiCoder().decode(["address[]"], path);
+    } catch {
+      path = "0x";
+    }
+  } else {
+    path = "0x";
+  }
+  return {
+    tokenIn: Number(pi.inputAssetID) === 0 ? ethers.ZeroAddress : tokenIn,
+    tokenOut: Number(pi.outputAssetIDSwap) === 0 ? ethers.ZeroAddress : tokenOut,
+    amountIn: String(pi.swapAmount ?? "0"),
+    minAmountOut: String(pi.minOutputAmountSwap ?? "0"),
+    fee: Number(sp.fee || 0),
+    sqrtPriceLimitX96: String(sp.sqrtPriceLimitX96 || 0),
+    path,
+  };
 }
 
 async function screenWithdrawRecipient(addr) {
@@ -2635,6 +2676,7 @@ app.get("/health", (req, res) => {
       encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
       localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
       relayerSwapAttestationMode: RELAYER_SWAP_ATTESTATION_MODE,
+      relayerPrivacyHardSwitch: RELAYER_PRIVACY_HARD_SWITCH,
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
     module7Hardening: {
@@ -2794,6 +2836,7 @@ app.get("/config", (req, res) => {
       encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
       localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
       relayerSwapAttestationMode: RELAYER_SWAP_ATTESTATION_MODE,
+      relayerPrivacyHardSwitch: RELAYER_PRIVACY_HARD_SWITCH,
       feePolicy: "on_chain_oracle_floor_matches_ShieldedPool_shieldedWithdraw (see MODULE6-WITHDRAW.md)",
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
@@ -3155,9 +3198,9 @@ async function processSwapRequestBody(body) {
   }
 
   const { intentId: incomingIntentId, intent: incomingIntent, intentSig, swapData, zkAuthorization } = parsed.data;
-  if (swapData?.swapParams?.tokenIn) assertTokenAllowed(swapData.swapParams.tokenIn, "swap_tokenIn");
-  if (swapData?.swapParams?.tokenOut) assertTokenAllowed(swapData.swapParams.tokenOut, "swap_tokenOut");
   const pi = swapData?.publicInputs || {};
+  assertAssetIdConfigured(pi?.inputAssetID, "swap_inputAssetID");
+  assertAssetIdConfigured(pi?.outputAssetIDSwap, "swap_outputAssetIDSwap");
   const usingLegacyIntent = !!(incomingIntentId && incomingIntent && intentSig);
   let intentId = incomingIntentId || "";
   let intent = null;
@@ -3317,7 +3360,7 @@ async function processSwapRequestBody(body) {
     err.status = 400;
     throw err;
   }
-  assertSwapRoutingConsistency(swapData);
+  if (!RELAYER_PRIVACY_HARD_SWITCH) assertSwapRoutingConsistency(swapData);
   swapData.commitment = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ["bytes32", "bytes32", "uint256", "uint256"],
@@ -4527,27 +4570,8 @@ const submitSelfThresholdValidation = async (signer, proof, publicSignals, label
  *   _getPath() builds the default [WBNB, token] hop list for the pinned V2 router.
  */
 function normalizeJoinSplitSwapParamsForChain(swapData) {
-  const pi = swapData?.publicInputs;
-  const sp = swapData?.swapParams;
-  if (!pi || !sp) return;
-  let path = sp.path;
-  if (path && path !== "0x" && typeof path === "string" && path.length > 2) {
-    try {
-      ethers.AbiCoder.defaultAbiCoder().decode(["address[]"], path);
-    } catch {
-      path = "0x";
-    }
-  } else {
-    path = sp.path || "0x";
-  }
-  const next = { ...sp, path };
-  if (Number(pi.inputAssetID) === 0) {
-    next.tokenIn = ethers.ZeroAddress;
-  }
-  if (Number(pi.outputAssetIDSwap) === 0) {
-    next.tokenOut = ethers.ZeroAddress;
-  }
-  swapData.swapParams = next;
+  if (!swapData?.publicInputs) return;
+  swapData.swapParams = buildCommittedSwapParams(swapData);
 }
 
 async function precheckSwapOutDeterminism(swapData) {
@@ -4660,7 +4684,7 @@ async function submitSwap(swapData) {
   try {
     validationResult = skipValidatorQuorum
       ? { valid: true, signatures: [], reason: DEV_BYPASS_VALIDATORS ? "DEV_BYPASS_VALIDATORS" : "validator_quorum_skipped" }
-      : await validatorNetwork.verifyProof(swapData.proof, publicSignals);
+      : await validatorNetwork.verifyProof(swapData.proof, publicSignals, computeSwapPublicInputHash(pi));
   } catch (e) {
     logProofFailure("validator.verifyProof.swap", e);
     throw e;
@@ -4918,7 +4942,7 @@ async function submitWithdraw(withdrawData) {
   try {
     validationResultWd = skipValidatorQuorumWd
       ? { valid: true, signatures: [], reason: DEV_BYPASS_VALIDATORS ? "DEV_BYPASS_VALIDATORS" : "validator_quorum_skipped" }
-      : await validatorNetwork.verifyProof(withdrawData.proof, publicSignals);
+      : await validatorNetwork.verifyProof(withdrawData.proof, publicSignals, null);
   } catch (e) {
     logProofFailure("validator.verifyProof.withdraw", e);
     throw e;

@@ -151,7 +151,7 @@ function toJoinSplitPublic9ProverInputs(ci) {
 }
 
 function swapCircuitToPublicInputs(ci) {
-  return {
+  const pub = {
     nullifier: String(ci.nullifier),
     inputCommitment: String(ci.inputCommitment),
     outputCommitmentSwap: String(ci.outputCommitmentSwap),
@@ -170,6 +170,33 @@ function swapCircuitToPublicInputs(ci) {
     merklePath: [...ci.merklePath],
     merklePathIndices: [...ci.merklePathIndices],
   };
+  pub.routingCommitment = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      [
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      [
+        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.nullifier)), 32),
+        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.inputCommitment)), 32),
+        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.outputCommitmentSwap)), 32),
+        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.outputCommitmentChange)), 32),
+        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.merkleRoot)), 32),
+        BigInt(pub.inputAssetID),
+        BigInt(pub.outputAssetIDSwap),
+        BigInt(pub.swapAmount),
+        BigInt(pub.minOutputAmountSwap),
+      ]
+    )
+  );
+  return pub;
 }
 
 const proofStats = { swap: [], withdraw: [], portfolio: [], lastError: null };

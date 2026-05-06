@@ -15,12 +15,12 @@ class ValidatorNetwork {
     this.retryBaseMs = Number(process.env.VALIDATOR_RETRY_BASE_MS || 500);
   }
 
-  async verifyProof(proof, publicInputs) {
+  async verifyProof(proof, publicSignals, routingCommitment = null) {
     console.log(`\n📡 Broadcasting to ${this.validators.length} validators...`);
     const startTime = Date.now();
 
     const requests = this.validators.map(url => 
-      this.requestValidation(url, proof, publicInputs)
+      this.requestValidation(url, proof, publicSignals, routingCommitment)
     );
 
     const results = await Promise.allSettled(requests);
@@ -129,12 +129,18 @@ class ValidatorNetwork {
     };
   }
 
-  async requestValidation(validatorUrl, proof, publicInputs) {
+  async requestValidation(validatorUrl, proof, publicSignals, routingCommitment = null) {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         const response = await axios.post(
           `${validatorUrl}/verify`,
-          { proof, publicInputs },
+          {
+            proof,
+            publicSignals,
+            // Backward compatibility for validators still reading `publicInputs`.
+            publicInputs: publicSignals,
+            routingCommitment,
+          },
           { timeout: this.timeout }
         );
         return response.data;
