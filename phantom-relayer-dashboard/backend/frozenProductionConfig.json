@@ -1,15 +1,15 @@
 {
-  "version": "prod-frozen-v1",
+  "version": "prod-frozen-v2",
   "chainId": 97,
   "addresses": {
-    "shieldedPool": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2",
-    "feeOracle": "0x633D5Edd746B07F8dBBAc95b1F5E36C8a8cb48D2",
-    "swapAdaptor": "0x88521d26561d26E7A91c427bA37Bebe8e1ec4556",
-    "relayerStaking": "0x15701431276D3e90d68ABd559B0a01b65aB10343",
-    "depositHandler": "0x2F6F8A5cBd6dAc9446810527c731676D51EEE1dF",
-    "matchingHandler": "0xB10dFF54Bc6C375026c701747AfbF465B4B86dDe",
-    "protocolToken": "0x46E3f887C17495A806068CB33C261c3EB45FA97f",
-    "fheCoprocessor": "0x5E93F479b70033405ECC686DbAC7adc7cc87EA56"
+    "shieldedPool": "0x5816f1fCd39390cBCf76C1736d8587c9a0Cfe21D",
+    "feeOracle": "0x543C9e3763e7c3D3F8e03A7AD24abc2eC92337F0",
+    "swapAdaptor": "0x7890137EB7e045508afe071Fc8699319962aD6e1",
+    "relayerStaking": "0x3E55d1bBda09D7eA0133B77cbEeF86CBe8A3C7b3",
+    "depositHandler": "0x7cE4Af258404784f220e89300B9Eae5607D9B14d",
+    "matchingHandler": "0x67e42769694c983a43Eb1F753cE5355198daC500",
+    "protocolToken": "0x736Cb5EACc36759bc714906a1a2824a3deBE11A5",
+    "fheCoprocessor": "0x0000000000000000000000000000000000000000"
   },
   "assets": [
     {

@@ -1,13 +1,13 @@
 {
   "chainId": 97,
-  "shieldedPoolAddress": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2",
+  "shieldedPoolAddress": "0x5816f1fCd39390cBCf76C1736d8587c9a0Cfe21D",
   "noteStorageAddress": "",
-  "swapAdaptorAddress": "0x88521d26561d26E7A91c427bA37Bebe8e1ec4556",
-  "relayerStakingAddress": "0x15701431276D3e90d68ABd559B0a01b65aB10343",
-  "feeOracleAddress": "0x633D5Edd746B07F8dBBAc95b1F5E36C8a8cb48D2",
-  "depositHandlerAddress": "0x2F6F8A5cBd6dAc9446810527c731676D51EEE1dF",
-  "verifierAddress": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
-  "protocolTokenAddress": "0x46E3f887C17495A806068CB33C261c3EB45FA97f",
+  "swapAdaptorAddress": "0x7890137EB7e045508afe071Fc8699319962aD6e1",
+  "relayerStakingAddress": "0x3E55d1bBda09D7eA0133B77cbEeF86CBe8A3C7b3",
+  "feeOracleAddress": "0x543C9e3763e7c3D3F8e03A7AD24abc2eC92337F0",
+  "depositHandlerAddress": "0x7cE4Af258404784f220e89300B9Eae5607D9B14d",
+  "verifierAddress": "0xaC854d40E41B24446EF19008DD3D1AE975Ed6E61",
+  "protocolTokenAddress": "0x736Cb5EACc36759bc714906a1a2824a3deBE11A5",
   "matchingHandlerAddress": "0xB10dFF54Bc6C375026c701747AfbF465B4B86dDe",
   "fheCoprocessorAddress": "0x5E93F479b70033405ECC686DbAC7adc7cc87EA56"
 }

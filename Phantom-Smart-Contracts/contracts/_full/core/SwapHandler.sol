@@ -9,6 +9,7 @@ import "../interfaces/IFeeDistributor.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../types/Types.sol";
 import "../libraries/DexSwapFee.sol";
+import "../libraries/MiMC7.sol";
 
 /**
  * @title SwapHandler
@@ -210,8 +211,18 @@ contract SwapHandler {
     function _joinSplitPublicInputsToArray(JoinSplitPublicInputs memory inputs) private pure returns (uint256[] memory) {
         // Must match the circuit public input order:
         // [nullifier, inputCommitment, outputCommitmentSwap, outputCommitmentChange, merkleRoot,
-        //  outputAmountSwapPublic, minOutputAmountSwap, protocolFee, gasRefund]
-        uint256[] memory publicInputs = new uint256[](9);
+        //  outputAmountSwapPublic, minOutputAmountSwap, protocolFee, gasRefund, routingCommitment]
+        uint256[] memory publicInputs = new uint256[](10);
+        uint256 r0 = MiMC7.mimc7(inputs.inputAssetID, inputs.outputAssetIDSwap);
+        uint256 r1 = MiMC7.mimc7(r0, inputs.outputAssetIDChange);
+        uint256 r2 = MiMC7.mimc7(r1, inputs.inputAmount);
+        uint256 r3 = MiMC7.mimc7(r2, inputs.swapAmount);
+        uint256 r4 = MiMC7.mimc7(r3, inputs.changeAmount);
+        uint256 r5 = MiMC7.mimc7(r4, inputs.outputAmountSwap);
+        uint256 r6 = MiMC7.mimc7(r5, inputs.minOutputAmountSwap);
+        uint256 r7 = MiMC7.mimc7(r6, inputs.protocolFee);
+        uint256 r8 = MiMC7.mimc7(r7, inputs.gasRefund);
+        uint256 withdrawMode = inputs.outputCommitmentSwap == bytes32(0) ? 1 : 0;
         unchecked {
             publicInputs[0] = uint256(inputs.nullifier) % SNARK_SCALAR_FIELD;
             publicInputs[1] = uint256(inputs.inputCommitment) % SNARK_SCALAR_FIELD;
@@ -222,6 +233,7 @@ contract SwapHandler {
             publicInputs[6] = inputs.minOutputAmountSwap % SNARK_SCALAR_FIELD;
             publicInputs[7] = inputs.protocolFee % SNARK_SCALAR_FIELD;
             publicInputs[8] = inputs.gasRefund % SNARK_SCALAR_FIELD;
+            publicInputs[9] = MiMC7.mimc7(r8, withdrawMode) % SNARK_SCALAR_FIELD;
         }
         return publicInputs;
     }

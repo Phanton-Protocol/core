@@ -88,6 +88,7 @@ const MODULE4_DEPOSIT_API_SECRET = String(process.env.MODULE4_DEPOSIT_API_SECRET
 const SLIPPAGE_BPS = Number(process.env.E2E_SLIPPAGE_BPS || 500);
 const MERKLE_POLL_MS = Number(process.env.MERKLE_POLL_MS || 3000);
 const MERKLE_POLL_MAX = Number(process.env.MERKLE_POLL_MAX || 45);
+const E2E_ALLOW_EXISTING_NOTES = String(process.env.E2E_ALLOW_EXISTING_NOTES || "").toLowerCase() === "true";
 
 function getAssetIdForToken(addr) {
   const n = String(addr || "").toLowerCase();
@@ -282,8 +283,11 @@ async function main() {
   if (rpcUrl) await assertPoolNotMockOnChain(rpcUrl, pool);
 
   const notesAtStart = await fetchUsableNotes(API_URL, wallet.address);
-  if ((notesAtStart.count || 0) !== 0) {
+  if (!E2E_ALLOW_EXISTING_NOTES && (notesAtStart.count || 0) !== 0) {
     throw new Error(`fresh wallet gate failed: expected 0 usable notes, found ${notesAtStart.count}`);
+  }
+  if (E2E_ALLOW_EXISTING_NOTES && (notesAtStart.count || 0) !== 0) {
+    console.warn(`[e2e] continuing with existing usable notes=${notesAtStart.count}`);
   }
 
   if (E2E_MODE === "bnb") {

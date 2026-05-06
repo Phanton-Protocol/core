@@ -1,0 +1,18 @@
+{
+  "network": "bscTestnet",
+  "chainId": 97,
+  "deployer": "0x8F41eA1304032b69b03ED01708ac8522627c2734",
+  "deployedAt": "2026-05-06T13:35:00.010Z",
+  "note": "Path-B reduced stack: new SHDW + RelayerStaking + pool + walletB stake",
+  "contracts": {
+    "protocolToken": "0x736Cb5EACc36759bc714906a1a2824a3deBE11A5",
+    "relayerStaking": "0x3E55d1bBda09D7eA0133B77cbEeF86CBe8A3C7b3",
+    "joinSplitVerifier": "0xaC854d40E41B24446EF19008DD3D1AE975Ed6E61",
+    "portfolioVerifier": "0xaC854d40E41B24446EF19008DD3D1AE975Ed6E61",
+    "thresholdVerifier": "0xaC854d40E41B24446EF19008DD3D1AE975Ed6E61",
+    "swapAdaptor": "0x7890137EB7e045508afe071Fc8699319962aD6e1",
+    "groth16Verifier": "0xfF096C15e000ee7f07b73cF43fDb32a2F387C9b3",
+    "feeOracle": "0x543C9e3763e7c3D3F8e03A7AD24abc2eC92337F0",
+    "shieldedPool": "0x5816f1fCd39390cBCf76C1736d8587c9a0Cfe21D"
+  }
+}

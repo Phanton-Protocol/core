@@ -33,6 +33,7 @@ import "../libraries/DexSwapFee.sol";
  */
 contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
+    error SP();
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Reduced from 20 to save space
@@ -138,8 +139,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     // ============ Modifiers ============
     modifier onlyRelayer() {
-        require(relayerRegistry.isRelayer(msg.sender), "SP: not a relayer");
-        require(!blacklistedRelayers[msg.sender], "SP: blacklisted relayer");
+        require(relayerRegistry.isRelayer(msg.sender), "SP:R1");
+        require(!blacklistedRelayers[msg.sender], "SP:R2");
         _;
     }
 
@@ -152,10 +153,10 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         address _relayerRegistry
     ) public initializer {
         require(_verifier != address(0), "SP: zero verifier");
-        require(_thresholdVerifier != address(0), "SP: zero threshold verifier");
+        require(_thresholdVerifier != address(0), "SP:Z2");
         require(_swapAdaptor != address(0), "SP: zero adaptor");
         require(_feeOracle != address(0), "SP: zero oracle");
-        require(_relayerRegistry != address(0), "SP: zero registry");
+        require(_relayerRegistry != address(0), "SP:Z5");
 
         __Ownable_init();
         __ReentrancyGuard_init();
@@ -190,7 +191,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     function _requireSpendableMerkleRoot(bytes32 root) internal view {
-        require(validMerkleRoots[root], "SP: merkle root not spendable");
+        require(validMerkleRoots[root], "SP:M0");
     }
 
     // ============ Setters ============
@@ -248,10 +249,10 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 sweep = maxWei == 0 ? available : maxWei;
         if (sweep > available) sweep = available;
         require(sweep > 0, "SP: nothing to sweep");
-        require(address(this).balance >= sweep, "SP: insufficient native balance for sweep");
+        require(address(this).balance >= sweep, "SP:S2");
         gasReserve -= sweep;
         (bool ok,) = to.call{value: sweep}("");
-        require(ok, "SP: sweep transfer failed");
+        require(ok, "SP:S3");
     }
 
     /**
@@ -262,9 +263,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     function emergencySendAllNativeBalance(address payable to) external onlyOwner nonReentrant {
         require(to != address(0), "SP: zero to");
         uint256 b = address(this).balance;
-        require(b > 0, "SP: zero native balance");
+        require(b > 0, "SP:N1");
         (bool ok,) = to.call{value: b}("");
-        require(ok, "SP: native send failed");
+        require(ok, "SP:N2");
         gasReserve = 0;
     }
 
@@ -286,7 +287,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 assetID
     ) external payable override {
         require(depositor != address(0), "SP: zero depositor");
-        require(token != address(0), "SP: relayed deposit ERC20 only");
+        require(token != address(0), "SP:D1");
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
     }
 
@@ -309,16 +310,16 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 value,
         address relayer
     ) internal {
-        require(amount > 0 && commitment != bytes32(0) && depositor != address(0), "SP: invalid input");
+        require(amount > 0 && commitment != bytes32(0) && depositor != address(0), "SP:D2");
 
         // For BNB deposits, handle directly
         if (token == address(0)) {
-            require(value >= amount, "SP: insufficient value for BNB deposit");
+            require(value >= amount, "SP:D3");
             uint256 depositFeeBNB = value - amount;
             _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB, relayer);
         } else {
             // For ERC20 deposits, use handler
-            require(depositHandler != address(0), "SP: deposit handler not set");
+            require(depositHandler != address(0), "SP:D4");
             IDepositHandler(depositHandler).processDeposit(
                 depositor,
                 token,
@@ -341,7 +342,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 depositFeeBNB,
         address relayer
     ) external override {
-        require(msg.sender == depositHandler || msg.sender == address(this), "SP: only deposit handler or self");
+        require(msg.sender == depositHandler || msg.sender == address(this), "SP:D5");
         _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB, relayer);
     }
 
@@ -369,14 +370,14 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 feeAmount = depositFeeBNB;
         if (feeAmount > 0 && address(feeOracle) != address(0) && address(relayerRegistry) != address(0)) {
             uint256 feeUsd = feeOracle.getUSDValue(address(0), feeAmount);
-            require(feeUsd >= DEPOSIT_FEE_USD, "SP: deposit fee below $2");
+            require(feeUsd >= DEPOSIT_FEE_USD, "SP:D6");
             uint256 executingRelayerShare = feeAmount / 4;
             uint256 rewardPoolShare = feeAmount - executingRelayerShare;
 
             if (executingRelayerShare > 0) {
                 if (relayer != address(0)) {
                     (bool ok,) = payable(relayer).call{value: executingRelayerShare}("");
-                    require(ok, "SP: relayer transfer failed");
+                    require(ok, "SP:D7");
                 } else {
                     gasReserve += executingRelayerShare;
                 }
@@ -397,10 +398,10 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     // ============ Swap Functions ============
     function shieldedSwap(ShieldedSwapData calldata swapData) external override nonReentrant {
-        require(swapHandler != address(0), "SP: swap handler not set");
+        require(swapHandler != address(0), "SP:S0");
         PublicInputs memory inputs = swapData.publicInputs;
 
-        require(!nullifiers[inputs.nullifier], "SP: nullifier already used");
+        require(!nullifiers[inputs.nullifier], "SP:NF");
         _requireSpendableMerkleRoot(inputs.merkleRoot);
         
         require(
@@ -411,7 +412,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
             ),
-            "SP: invalid merkle proof"
+            "SP:MP"
         );
 
         address inputToken = assetRegistry[inputs.inputAssetID];
@@ -423,7 +424,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         
         (uint256 swapOutput, ) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
         
-        require(swapOutput == inputs.outputAmount, "SP: output mismatch");
+        require(swapOutput == inputs.outputAmount, "SP:O1");
 
         (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitment);
         commitments[newIndex] = inputs.outputCommitment;
@@ -457,7 +458,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
 
-        require(!nullifiers[inputs.nullifier], "SP: nullifier already used");
+        require(!nullifiers[inputs.nullifier], "SP:NF");
         _requireSpendableMerkleRoot(inputs.merkleRoot);
         
         require(
@@ -468,26 +469,23 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
             ),
-            "SP: invalid merkle proof"
+            "SP:MP"
         );
 
         JoinSplitPublicInputValidation.requireDexJoinSplitShape(inputs);
 
-        require(
-            thresholdVerifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)),
-            "SP: insufficient validator consensus"
-        );
-        require(verifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)), "SP: invalid proof");
+        if (!thresholdVerifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
+        require(verifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)), "SP:PF");
 
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
-        require(inputToken != address(0) || inputs.inputAssetID == 0, "SP: unknown asset");
+        require(inputToken != address(0) || inputs.inputAssetID == 0, "SP:A1");
 
         feeOracle.requireFreshPrice(inputToken);
         uint256 protocolFeePart = feeOracle.calculateFee(inputToken, inputs.inputAmount);
         uint256 swapFeePart = DexSwapFee.swapFee(inputs.inputAmount);
         uint256 totalProtocolFee = protocolFeePart + swapFeePart;
-        require(inputs.protocolFee == totalProtocolFee, "SP: fee");
-        require(inputs.gasRefund <= inputs.inputAmount, "SP: gRf");
+        require(inputs.protocolFee == totalProtocolFee, "SP:F1");
+        require(inputs.gasRefund <= inputs.inputAmount, "SP:F2");
 
         // Ensure output asset IDs are registered for later withdrawals
         _registerAsset(inputs.outputAssetIDSwap, swapData.swapParams.tokenOut);
@@ -502,8 +500,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             swapData.swapParams
         );
 
-        require(dexOut >= inputs.minOutputAmountSwap, "SP:slp");
-        require(dexOut == inputs.outputAmountSwap, "SP:out");
+        require(dexOut >= inputs.minOutputAmountSwap, "SP:S1");
+        require(dexOut == inputs.outputAmountSwap, "SP:S2");
 
         if (totalProtocolFee > 0) {
             if (inputToken == address(0)) {
@@ -554,17 +552,17 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     function internalMatchSettle(
         InternalMatchSettlementData calldata
     ) external pure override {
-        revert("internalMatchSettle unsupported on reduced path");
+        revert SP();
     }
 
 
     // ============ Withdraw Functions ============
     function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant {
-        require(withdrawHandler != address(0), "SP: withdraw handler not set");
+        require(withdrawHandler != address(0), "SP:W0");
         
         JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
 
-        require(!nullifiers[inputs.nullifier], "SP: nullifier already used");
+        require(!nullifiers[inputs.nullifier], "SP:NF");
         _requireSpendableMerkleRoot(inputs.merkleRoot);
         
         require(
@@ -575,31 +573,28 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
             ),
-            "SP: invalid merkle proof"
+            "SP:MP"
         );
 
         JoinSplitPublicInputValidation.requireWithdrawJoinSplitShape(inputs);
 
-        require(
-            thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)),
-            "SP: insufficient validator consensus"
-        );
-        require(verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)), "SP: invalid proof");
+        if (!thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
+        if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
 
         (uint256 withdrawAmount, ) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
         if (inputToken == address(0) && inputs.inputAssetID != 0) {
-            revert("SP: unknown asset for withdraw");
+            revert SP();
         }
 
         // CRITICAL: handler validates economics/proofs but does not transfer payout.
         // The pool must transfer the withdraw leg to the requested recipient.
         if (inputToken == address(0)) {
             (bool ok,) = payable(withdrawData.recipient).call{value: withdrawAmount}("");
-            require(ok, "SP: native withdraw transfer failed");
+            require(ok, "SP:W2");
         } else {
             bool ok = IERC20(inputToken).transfer(withdrawData.recipient, withdrawAmount);
-            require(ok, "SP: token withdraw transfer failed");
+            require(ok, "SP:W3");
         }
 
         // Insert change commitment (withdrawal creates change note)
@@ -638,29 +633,29 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256,
         PortfolioSwapData calldata
     ) external payable override {
-        revert("SP: portfolio not supported");
+        revert SP();
     }
 
     function portfolioSwap(
         PortfolioSwapData calldata
     ) external pure override {
-        revert("SP: portfolio not supported");
+        revert SP();
     }
 
     function portfolioWithdraw(
         PortfolioWithdrawData calldata
     ) external pure override {
-        revert("SP: portfolio not supported");
+        revert SP();
     }
 
     // ============ Multi-Output Withdraw (Required by Interface) ============
     function multiOutputWithdraw(MultiOutputWithdrawData calldata withdrawData) external override nonReentrant {
         // Simplified implementation - delegate to withdraw handler if available
         // Otherwise, treat as single withdrawal
-        require(withdrawHandler != address(0), "SP: withdraw handler not set");
+        require(withdrawHandler != address(0), "SP:W0");
         
         JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
-        require(!nullifiers[inputs.nullifier], "SP: nullifier already used");
+        require(!nullifiers[inputs.nullifier], "SP:NF");
         _requireSpendableMerkleRoot(inputs.merkleRoot);
         
         require(
@@ -671,16 +666,13 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
             ),
-            "SP: invalid merkle proof"
+            "SP:MP"
         );
 
         JoinSplitPublicInputValidation.requireWithdrawJoinSplitShape(inputs);
 
-        require(
-            thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)),
-            "SP: insufficient validator consensus"
-        );
-        require(verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)), "SP: invalid proof");
+        if (!thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
+        if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
 
         // Process withdrawal and transfer payout (single-recipient fallback for reduced pool)
         (uint256 withdrawAmount, ) = IWithdrawHandler(withdrawHandler).processWithdraw(ShieldedWithdrawData({
