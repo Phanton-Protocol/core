@@ -287,6 +287,7 @@ const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
   { assetId: 2, symbol: "USDT", address: "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13" },
 ]);
 const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
+const RELAYER_REQUIRE_ENCRYPTED_ENVELOPE = process.env.RELAYER_REQUIRE_ENCRYPTED_ENVELOPE !== "false";
 const PLACEHOLDER_RELAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function toBps(v, fallback) {
@@ -1857,6 +1858,15 @@ function complianceErrorResponse(err, fallbackCode) {
   };
 }
 
+function rejectPlainSensitiveRoute(res, encryptedPath) {
+  if (!RELAYER_REQUIRE_ENCRYPTED_ENVELOPE) return false;
+  res.status(410).json({
+    error: "encrypted_envelope_required",
+    useEndpoint: encryptedPath,
+  });
+  return true;
+}
+
 function configuredTokenAllowlist() {
   const cfg = getRuntimeConfig();
   const allowed = new Set([ethers.ZeroAddress.toLowerCase()]);
@@ -2573,6 +2583,8 @@ app.get("/health", (req, res) => {
     module6Withdraw: {
       chainalysisEnabled: CHAINALYSIS_ENABLED,
       chainalysisApiConfigured: !!CHAINALYSIS_API_URL,
+      encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
+      localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
     module7Hardening: {
@@ -2729,6 +2741,8 @@ app.get("/config", (req, res) => {
       chainalysisEnabled: CHAINALYSIS_ENABLED,
       chainalysisFailClosed: CHAINALYSIS_FAIL_CLOSED,
       chainalysisApiUrlSet: !!CHAINALYSIS_API_URL,
+      encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
+      localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
       feePolicy: "on_chain_oracle_floor_matches_ShieldedPool_shieldedWithdraw (see MODULE6-WITHDRAW.md)",
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
@@ -3298,6 +3312,7 @@ async function processSwapRequestBody(body) {
 }
 
 app.post("/swap", requireSeeForSensitiveFlow, async (req, res) => {
+  if (rejectPlainSensitiveRoute(res, "/swap/encrypted")) return;
   const requiredKeys = process.env.RELAYER_DRY_RUN === "true"
     ? ["SHIELDED_POOL_ADDRESS"]
     : ["RPC_URL", "SHIELDED_POOL_ADDRESS", "RELAYER_PRIVATE_KEY"];
@@ -3329,6 +3344,7 @@ app.post("/swap/encrypted", requireSeeForSensitiveFlow, async (req, res) => {
 });
 
 app.post("/withdraw", requireSeeForSensitiveFlow, async (req, res) => {
+  if (rejectPlainSensitiveRoute(res, "/withdraw/encrypted")) return;
   const requiredKeys = process.env.RELAYER_DRY_RUN === "true"
     ? ["SHIELDED_POOL_ADDRESS"]
     : ["RPC_URL", "SHIELDED_POOL_ADDRESS", "RELAYER_PRIVATE_KEY"];
@@ -3810,6 +3826,7 @@ app.post("/shadow-sweep", async (req, res) => {
 });
 
 app.post("/deposit", requireSeeForSensitiveFlow, async (req, res) => {
+  if (rejectPlainSensitiveRoute(res, "/deposit/encrypted")) return;
   const requiredKeys = process.env.RELAYER_DRY_RUN === "true"
     ? ["SHIELDED_POOL_ADDRESS"]
     : ["RPC_URL", "SHIELDED_POOL_ADDRESS", "RELAYER_PRIVATE_KEY"];

@@ -16,6 +16,7 @@ const { mimc7, FIELD } = require("./mimc7");
 const { computeCommitment, computeNullifier } = require("./noteModel");
 const { ethers } = require("ethers");
 const { toBigIntString, toBigInt } = require("./utils/bigint");
+const ZK_VERBOSE_DEBUG = process.env.PHANTOM_ZK_VERBOSE_DEBUG === "true";
 
 /**
  * ShieldedPool.shieldedSwapJoinSplit checks:
@@ -379,7 +380,7 @@ async function generateSwapProof(swapData) {
     computeNullifier(commitment, ownerKey).toString();
 
   if (circuitInputs.outputAssetIDChange !== circuitInputs.inputAssetID) {
-    console.log(
+    if (ZK_VERBOSE_DEBUG) console.log(
       `   ⚠️ Adjusting outputAssetIDChange to match inputAssetID: ${circuitInputs.outputAssetIDChange} -> ${circuitInputs.inputAssetID}`
     );
     circuitInputs.outputAssetIDChange = circuitInputs.inputAssetID;
@@ -396,21 +397,23 @@ async function generateSwapProof(swapData) {
     BigInt(circuitInputs.ownerPublicKey)
   );
   if (expectedNullifier !== circuitInputs.nullifier) {
-    console.log(
+    if (ZK_VERBOSE_DEBUG) console.log(
       `   ⚠️ Recomputing nullifier: ${circuitInputs.nullifier} -> ${expectedNullifier}`
     );
     circuitInputs.nullifier = expectedNullifier;
   }
 
-  try {
-    const debugPath = path.join(__dirname, "..", "..", "circuits", "debug_last_swap_inputs.json");
-    fs.writeFileSync(debugPath, JSON.stringify(circuitInputs, null, 2));
-  } catch (e) {
-
+  if (ZK_VERBOSE_DEBUG) {
+    try {
+      const debugPath = path.join(__dirname, "..", "..", "circuits", "debug_last_swap_inputs.json");
+      fs.writeFileSync(debugPath, JSON.stringify(circuitInputs, null, 2));
+    } catch (e) {
+      // ignore debug write errors
+    }
   }
 
   if (BigInt(circuitInputs.outputAmountSwapPublic) !== BigInt(circuitInputs.outputAmountSwap)) {
-    console.log(
+    if (ZK_VERBOSE_DEBUG) console.log(
       `   ⚠️ Aligning outputAmountSwapPublic to outputAmountSwap: ${circuitInputs.outputAmountSwapPublic} -> ${circuitInputs.outputAmountSwap}`
     );
     circuitInputs.outputAmountSwapPublic = circuitInputs.outputAmountSwap;
@@ -429,7 +432,7 @@ async function generateSwapProof(swapData) {
     );
   }
   if (expectedChange !== changeAmountBigInt) {
-    console.log(
+    if (ZK_VERBOSE_DEBUG) console.log(
       `   ⚠️ Adjusting changeAmount to satisfy conservation: ${changeAmountBigInt} -> ${expectedChange}`
     );
     circuitInputs.changeAmount = expectedChange.toString();
@@ -530,8 +533,10 @@ async function generateSwapProof(swapData) {
   
   let computedRoot = BigInt(circuitInputs.inputCommitment);
   
-  console.log(`🔍 Verifying Merkle path (circuit logic with proper field arithmetic):`);
-  console.log(`   Starting with commitment: 0x${computedRoot.toString(16).padStart(64, "0")}`);
+  if (ZK_VERBOSE_DEBUG) {
+    console.log(`🔍 Verifying Merkle path (circuit logic with proper field arithmetic):`);
+    console.log(`   Starting with commitment: 0x${computedRoot.toString(16).padStart(64, "0")}`);
+  }
   
   for (let i = 0; i < 10; i++) {
     const pathValue = BigInt(circuitInputs.merklePath[i]);
@@ -544,66 +549,41 @@ async function generateSwapProof(swapData) {
 
     computedRoot = mimc7(left, right);
     
-    if (i < 3) {
+    if (ZK_VERBOSE_DEBUG && i < 3) {
       console.log(`   Level ${i}: idx=${idx}, left=0x${left.toString(16).substring(0, 16)}..., right=0x${right.toString(16).substring(0, 16)}..., hash=0x${computedRoot.toString(16).substring(0, 16)}...`);
     }
   }
   
   const expectedRoot = BigInt(circuitInputs.merkleRoot);
-  console.log(`   Final computed root: 0x${computedRoot.toString(16).padStart(64, "0")}`);
-  console.log(`   Expected root:       0x${expectedRoot.toString(16).padStart(64, "0")}`);
+  if (ZK_VERBOSE_DEBUG) {
+    console.log(`   Final computed root: 0x${computedRoot.toString(16).padStart(64, "0")}`);
+    console.log(`   Expected root:       0x${expectedRoot.toString(16).padStart(64, "0")}`);
+  }
   
   if (computedRoot !== expectedRoot) {
     console.error(`❌ Merkle root mismatch!`);
-    console.error(`   Computed (MiMC7): 0x${computedRoot.toString(16).padStart(64, "0")}`);
-    console.error(`   Expected:         0x${expectedRoot.toString(16).padStart(64, "0")}`);
-    console.error(`   ⚠️  This should match if backend is using MiMC7 correctly`);
-    console.error(`   ⚠️  Continuing anyway - circuit will fail but we can see the exact error...`);
-
-  } else {
+    if (ZK_VERBOSE_DEBUG) {
+      console.error(`   Computed (MiMC7): 0x${computedRoot.toString(16).padStart(64, "0")}`);
+      console.error(`   Expected:         0x${expectedRoot.toString(16).padStart(64, "0")}`);
+      console.error(`   ⚠️  This should match if backend is using MiMC7 correctly`);
+      console.error(`   ⚠️  Continuing anyway - circuit will fail but we can see the exact error...`);
+    }
+  } else if (ZK_VERBOSE_DEBUG) {
     console.log(`✅ Merkle path verification passed (MiMC7)`);
   }
   
   console.log("🔐 Generating swap proof...");
-  console.log("📋 Circuit Inputs Summary:");
-  console.log(`   Input Commitment: ${circuitInputs.inputCommitment.substring(0, 20)}...`);
-  console.log(`   Merkle Root (as BigInt string): ${circuitInputs.merkleRoot}`);
-  console.log(`   Merkle Root (hex): 0x${BigInt(circuitInputs.merkleRoot).toString(16).padStart(64, "0")}`);
-  console.log(`   Merkle Path Length: ${circuitInputs.merklePath.length}`);
-  console.log(`   Merkle Path Indices: [${circuitInputs.merklePathIndices.slice(0, 5).join(", ")}...]`);
-  console.log(`   Merkle Path[0]: ${circuitInputs.merklePath[0]}`);
-  console.log(`   Merkle Path[0] (hex): 0x${BigInt(circuitInputs.merklePath[0]).toString(16).padStart(64, "0")}`);
-  console.log(`   Change Amount: ${circuitInputs.changeAmount}`);
-  console.log(`   Swap Amount: ${circuitInputs.swapAmount}`);
-  console.log(`   Input AssetID: ${circuitInputs.inputAssetID}`);
-  console.log(`   Output AssetID Swap: ${circuitInputs.outputAssetIDSwap}`);
-  console.log(`   Output AssetID Change: ${circuitInputs.outputAssetIDChange}`);
-  console.log(`   Output Amount Swap (private): ${circuitInputs.outputAmountSwap}`);
-  console.log(`   Output Amount Swap (public): ${circuitInputs.outputAmountSwapPublic}`);
 
   const computedRootFromPath = computedRoot; 
 
   const merkleRootBigInt = BigInt(circuitInputs.merkleRoot);
-  console.log(`\n🔍 Root Comparison:`);
-  console.log(`   Computed from path: 0x${computedRootFromPath.toString(16).padStart(64, "0")}`);
-  console.log(`   Passed to circuit:  0x${merkleRootBigInt.toString(16).padStart(64, "0")}`);
-  console.log(`   Match: ${computedRootFromPath === merkleRootBigInt ? "✅ YES" : "❌ NO"}`);
-
-  console.log(`\n🔍 EXTENSIVE DEBUG - ALL CIRCUIT INPUTS:`);
-  console.log(`   inputCommitment: ${circuitInputs.inputCommitment} (type: ${typeof circuitInputs.inputCommitment})`);
-  console.log(`   merkleRoot: ${circuitInputs.merkleRoot} (type: ${typeof circuitInputs.merkleRoot})`);
-  console.log(`   merkleRoot as BigInt: ${BigInt(circuitInputs.merkleRoot).toString()}`);
-  console.log(`   merklePath length: ${circuitInputs.merklePath.length}`);
-  for (let i = 0; i < Math.min(5, circuitInputs.merklePath.length); i++) {
-    console.log(`   merklePath[${i}]: ${circuitInputs.merklePath[i]} (type: ${typeof circuitInputs.merklePath[i]})`);
-    console.log(`     as BigInt: ${BigInt(circuitInputs.merklePath[i]).toString()}`);
-    console.log(`     as hex: 0x${BigInt(circuitInputs.merklePath[i]).toString(16).padStart(64, "0")}`);
+  if (ZK_VERBOSE_DEBUG) {
+    console.log(`\n🔍 Root Comparison:`);
+    console.log(`   Computed from path: 0x${computedRootFromPath.toString(16).padStart(64, "0")}`);
+    console.log(`   Passed to circuit:  0x${merkleRootBigInt.toString(16).padStart(64, "0")}`);
+    console.log(`   Match: ${computedRootFromPath === merkleRootBigInt ? "✅ YES" : "❌ NO"}`);
+    console.log(`\n🔍 VERIFYING CIRCUIT COMPUTATION STEP-BY-STEP (SIMPLIFIED - MATCHES SOLIDITY):`);
   }
-  console.log(`   merklePathIndices: [${circuitInputs.merklePathIndices.slice(0, 5).join(", ")}...]`);
-  console.log(`   All merklePath are strings: ${circuitInputs.merklePath.every(p => typeof p === 'string')}`);
-  console.log(`   All merklePathIndices are strings: ${circuitInputs.merklePathIndices.every(i => typeof i === 'string')}`);
-
-  console.log(`\n🔍 VERIFYING CIRCUIT COMPUTATION STEP-BY-STEP (SIMPLIFIED - MATCHES SOLIDITY):`);
   let circuitComputedRoot = BigInt(circuitInputs.inputCommitment);
   for (let i = 0; i < 10; i++) {
     const pathVal = BigInt(circuitInputs.merklePath[i]);
@@ -618,7 +598,7 @@ async function generateSwapProof(swapData) {
     const oldRoot = circuitComputedRoot;
     circuitComputedRoot = mimc7(leftNorm, rightNorm);
 
-    if (i < 3) {
+    if (ZK_VERBOSE_DEBUG && i < 3) {
       console.log(`   Level ${i}:`);
       console.log(`     path=${pathVal.toString().substring(0, 20)}...`);
       console.log(`     idx=${idx}`);
@@ -626,13 +606,15 @@ async function generateSwapProof(swapData) {
       console.log(`     right=${rightNorm.toString().substring(0, 20)}...`);
       console.log(`     oldRoot=${oldRoot.toString().substring(0, 20)}...`);
       console.log(`     newRoot=${circuitComputedRoot.toString().substring(0, 20)}...`);
-    } else if (i >= 7) {
+    } else if (ZK_VERBOSE_DEBUG && i >= 7) {
       console.log(`   Level ${i}: path=${pathVal.toString().substring(0, 20)}..., idx=${idx}, computed=${circuitComputedRoot.toString().substring(0, 20)}...`);
     }
   }
-  console.log(`   Final circuit computed root: ${circuitComputedRoot.toString()}`);
-  console.log(`   Expected merkleRoot: ${merkleRootBigInt.toString()}`);
-  console.log(`   Match: ${circuitComputedRoot === merkleRootBigInt ? "✅ YES" : "❌ NO"}`);
+  if (ZK_VERBOSE_DEBUG) {
+    console.log(`   Final circuit computed root: ${circuitComputedRoot.toString()}`);
+    console.log(`   Expected merkleRoot: ${merkleRootBigInt.toString()}`);
+    console.log(`   Match: ${circuitComputedRoot === merkleRootBigInt ? "✅ YES" : "❌ NO"}`);
+  }
   if (circuitComputedRoot !== merkleRootBigInt) {
     console.error(`   ❌ CRITICAL MISMATCH!`);
     console.error(`      Computed: 0x${circuitComputedRoot.toString(16).padStart(64, "0")}`);
@@ -644,8 +626,7 @@ async function generateSwapProof(swapData) {
     console.error(`      But we're passing: 0x${merkleRootBigInt.toString(16).padStart(64, "0")}`);
   }
 
-  console.log(`\n🔍 ATTEMPTING WITNESS GENERATION (to identify failing constraint):`);
-  if (!prover.usePublic9) {
+  if (!prover.usePublic9 && ZK_VERBOSE_DEBUG) {
     try {
       const witness = await snarkjs.wtns.calculate(circuitInputs, prover.wasmPath);
       console.log(`   ✅ Witness generated successfully - all constraints passed!`);
@@ -671,8 +652,6 @@ async function generateSwapProof(swapData) {
 
       console.error(`   Continuing to fullProve to get more details...`);
     }
-  } else {
-    // joinsplit_public9: Merkle is enforced in-circuit; witness must match pool root + path.
   }
 
   const startTime = Date.now();
