@@ -315,7 +315,6 @@ const TOKEN_OPTIONS = [
   { label: "BNB (native)", value: ethers.ZeroAddress },
   { label: "BUSD", value: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
   { label: "USDT", value: USDT_BSC_TESTNET },
-  { label: "Custom address", value: "__custom__" },
 ];
 
 /** Resolve asset ID from relayer `/config` `assets` (on-chain registry via deploy config). Never guess (no silent BUSD). */
@@ -659,14 +658,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [swapInputTokenChoice, setSwapInputTokenChoice] = useState(ethers.ZeroAddress);
   const [swapOutputTokenChoice, setSwapOutputTokenChoice] = useState("0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7");
   const [withdrawTokenChoice, setWithdrawTokenChoice] = useState("0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7");
-  const [tokenList, setTokenList] = useState(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("phantom_tokens") || "[]");
-      return [...DEFAULT_TOKEN_LIST, ...stored.filter((t) => t?.symbol && t?.address)];
-    } catch {
-      return DEFAULT_TOKEN_LIST;
-    }
-  });
+  const [tokenList, setTokenList] = useState(() => DEFAULT_TOKEN_LIST);
   const [importTokenSymbol, setImportTokenSymbol] = useState("");
   const [importTokenAddress, setImportTokenAddress] = useState("");
   const [orderForm, setOrderForm] = useState({
@@ -710,9 +702,20 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   }, []);
 
   useEffect(() => {
-    const custom = tokenList.filter((t) => !DEFAULT_TOKEN_LIST.some((d) => d.address.toLowerCase() === t.address.toLowerCase()));
-    localStorage.setItem("phantom_tokens", JSON.stringify(custom));
-  }, [tokenList]);
+    const assets = Array.isArray(cfg?.assets) ? cfg.assets : [];
+    if (!assets.length) return;
+    const runtime = [{ symbol: "BNB", address: ethers.ZeroAddress }];
+    for (const a of assets) {
+      const aid = Number(a?.assetId);
+      if (aid === 0) continue;
+      if (!a?.address) continue;
+      runtime.push({
+        symbol: String(a?.symbol || `ASSET_${aid}`).toUpperCase(),
+        address: String(a.address),
+      });
+    }
+    setTokenList(runtime);
+  }, [cfg?.assets]);
 
   useEffect(() => {
     setDepositTokenChoice(depositForm.token);
@@ -2060,23 +2063,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   }
 
   function importToken() {
-    const symbol = importTokenSymbol.trim().toUpperCase();
-    const address = importTokenAddress.trim();
-    if (!symbol || !address) {
-      setActionError("Enter token symbol and token address.");
-      return;
-    }
-    if (!ethers.isAddress(address)) {
-      setActionError("Invalid token address.");
-      return;
-    }
-    setTokenList((prev) => {
-      if (prev.some((t) => t.address.toLowerCase() === address.toLowerCase())) return prev;
-      return [...prev, { symbol, address }];
-    });
+    setActionError("Custom token import is disabled. Only pool-configured assets are supported on this deployment.");
     setImportTokenSymbol("");
     setImportTokenAddress("");
-    setActionError(null);
     setActionSuccess(null);
   }
 

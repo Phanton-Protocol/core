@@ -281,6 +281,12 @@ const FALLBACK_ASSETS_BY_CHAIN = {
     { assetId: 2, symbol: "USDT", decimals: 18, address: "0x55d398326f99059fF775485246999027B3197955" },
   ],
 };
+const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
+  { assetId: 0, symbol: "WBNB", address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
+  { assetId: 1, symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
+  { assetId: 2, symbol: "USDT", address: "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13" },
+]);
+const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
 const PLACEHOLDER_RELAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function toBps(v, fallback) {
@@ -600,6 +606,20 @@ function getRuntimeConfig() {
   };
 
   const assets = Array.isArray(frozen.assets) ? frozen.assets : [];
+  if (chainId === 97) {
+    for (const req of REQUIRED_BSC_TESTNET_ASSETS) {
+      const hit = assets.find((a) => Number(a?.assetId) === req.assetId);
+      if (!hit) throw new Error(`CONFIG_MISMATCH: missing required bscTestnet assetId=${req.assetId} (${req.symbol})`);
+      if (req.assetId === 0) continue;
+      const addr = normalizeMaybeAddr(hit.address);
+      const exp = normalizeMaybeAddr(req.address);
+      if (!addr || !exp || addr.toLowerCase() !== exp.toLowerCase()) {
+        throw new Error(
+          `CONFIG_MISMATCH: bscTestnet asset ${req.symbol} address mismatch (expected ${req.address}, got ${hit.address || "unset"})`
+        );
+      }
+    }
+  }
   const deploymentVersion = FROZEN_DEPLOYMENT_VERSION;
   if (!deploymentVersion) {
     throw new Error("CONFIG_MISMATCH: missing frozen deployment version");
@@ -646,6 +666,7 @@ function getRuntimeConfig() {
       bypassProofs: DEV_BYPASS_PROOFS,
       quoteMode: QUOTE_MODE,
       chainalysisScreeningEnabled: !!process.env.CHAINALYSIS_API_KEY,
+      chainalysisFailClosed: CHAINALYSIS_FAIL_CLOSED,
       fheEnabled: true,
       validatorQuorumEnforced: RELAYER_REQUIRE_VALIDATOR_QUORUM || VALIDATOR_URLS.length > 0,
       validatorUrlCount: VALIDATOR_URLS.length,
@@ -1442,6 +1463,7 @@ async function processDepositRequestBody(body) {
     throw err;
   }
   const payload = parsed.data;
+  assertTokenAllowed(payload.token, "deposit_token");
   if (payload.deadline < Math.floor(Date.now() / 1000)) {
     const err = new Error("Deposit expired");
     err.status = 400;
@@ -1771,8 +1793,93 @@ async function chainalysisScreenAddress(addr, opts = {}) {
     return { ok: true };
   } catch (e) {
     if (e.status) throw e;
+    if (CHAINALYSIS_FAIL_CLOSED) {
+      const err = new Error("chainalysis_api_unavailable");
+      err.status = 503;
+      throw err;
+    }
     console.warn(`[${label}] Chainalysis request failed (non-fatal):`, e.message || e);
     return { ok: true, warn: String(e.message || e) };
+  }
+}
+
+function configuredTokenAllowlist() {
+  const cfg = getRuntimeConfig();
+  const allowed = new Set([ethers.ZeroAddress.toLowerCase()]);
+  for (const a of cfg.assets || []) {
+    const s = String(a?.address || "").trim();
+    if (!s) continue;
+    try {
+      allowed.add(normalizeEvmAddress(s).toLowerCase());
+    } catch (_) {}
+  }
+  return allowed;
+}
+
+function assertTokenAllowed(token, field) {
+  const t = normalizeEvmAddress(token).toLowerCase();
+  if (!configuredTokenAllowlist().has(t)) {
+    const err = new Error(`${field || "token"}_not_configured_for_pool`);
+    err.status = 400;
+    throw err;
+  }
+}
+
+function configuredTokenForAssetId(assetId) {
+  const cfg = getRuntimeConfig();
+  const n = Number(assetId);
+  if (!Number.isFinite(n)) return null;
+  if (n === 0) return ethers.ZeroAddress;
+  const hit = (cfg.assets || []).find((a) => Number(a?.assetId) === n && a?.address);
+  if (!hit) return null;
+  try {
+    return normalizeEvmAddress(hit.address);
+  } catch {
+    return null;
+  }
+}
+
+function canonicalWrappedNative(chainId) {
+  if (Number(chainId) === 56) return "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
+  return "0xae13d989dac2f0debff460ac112a837c89baa7cd";
+}
+
+function assertSwapRoutingConsistency(swapData) {
+  const pi = swapData?.publicInputs || {};
+  const sp = swapData?.swapParams || {};
+  const cfg = getRuntimeConfig();
+  const expectedIn = configuredTokenForAssetId(pi.inputAssetID);
+  const expectedOut = configuredTokenForAssetId(pi.outputAssetIDSwap);
+  if (!expectedIn || !expectedOut) {
+    const err = new Error("swap_asset_id_not_configured");
+    err.status = 400;
+    throw err;
+  }
+  if (sp.tokenIn) {
+    const actualIn = normalizeEvmAddress(sp.tokenIn).toLowerCase();
+    const expectedInNorm = expectedIn.toLowerCase();
+    const wnative = canonicalWrappedNative(cfg.chainId).toLowerCase();
+    const inOk = expectedInNorm === ethers.ZeroAddress.toLowerCase()
+      ? (actualIn === ethers.ZeroAddress.toLowerCase() || actualIn === wnative)
+      : actualIn === expectedInNorm;
+    if (!inOk) {
+      const err = new Error("swap_tokenIn_asset_mismatch");
+      err.status = 400;
+      throw err;
+    }
+  }
+  if (sp.tokenOut) {
+    const actualOut = normalizeEvmAddress(sp.tokenOut).toLowerCase();
+    const expectedOutNorm = expectedOut.toLowerCase();
+    const wnative = canonicalWrappedNative(cfg.chainId).toLowerCase();
+    const outOk = expectedOutNorm === ethers.ZeroAddress.toLowerCase()
+      ? (actualOut === ethers.ZeroAddress.toLowerCase() || actualOut === wnative)
+      : actualOut === expectedOutNorm;
+    if (!outOk) {
+      const err = new Error("swap_tokenOut_asset_mismatch");
+      err.status = 400;
+      throw err;
+    }
   }
 }
 
@@ -2565,6 +2672,7 @@ app.get("/config", (req, res) => {
     },
     module6Withdraw: {
       chainalysisEnabled: CHAINALYSIS_ENABLED,
+      chainalysisFailClosed: CHAINALYSIS_FAIL_CLOSED,
       chainalysisApiUrlSet: !!CHAINALYSIS_API_URL,
       feePolicy: "on_chain_oracle_floor_matches_ShieldedPool_shieldedWithdraw (see MODULE6-WITHDRAW.md)",
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
@@ -2686,6 +2794,8 @@ app.post("/quote", async (req, res) => {
   try {
     tokenIn = normalizeEvmAddress(tokenIn);
     tokenOut = normalizeEvmAddress(tokenOut);
+    assertTokenAllowed(tokenIn, "tokenIn");
+    assertTokenAllowed(tokenOut, "tokenOut");
   } catch (e) {
     return res.status(400).json({ error: "invalid_token_address", message: e?.message || String(e) });
   }
@@ -2925,6 +3035,8 @@ async function processSwapRequestBody(body) {
   }
 
   const { intentId: incomingIntentId, intent: incomingIntent, intentSig, swapData, zkAuthorization } = parsed.data;
+  if (swapData?.swapParams?.tokenIn) assertTokenAllowed(swapData.swapParams.tokenIn, "swap_tokenIn");
+  if (swapData?.swapParams?.tokenOut) assertTokenAllowed(swapData.swapParams.tokenOut, "swap_tokenOut");
   const pi = swapData?.publicInputs || {};
   const usingLegacyIntent = !!(incomingIntentId && incomingIntent && intentSig);
   let intentId = incomingIntentId || "";
@@ -3052,6 +3164,7 @@ async function processSwapRequestBody(body) {
     err.status = 400;
     throw err;
   }
+  assertSwapRoutingConsistency(swapData);
   swapData.commitment = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ["bytes32", "uint256", "uint256", "uint256", "uint256", "uint256"],
@@ -4053,8 +4166,9 @@ if (!process.env.VERCEL && !process.env.FIREBASE_FUNCTIONS) {
   (async () => {
     try {
       await assertNoMockRuntimeGate();
+      await assertRequiredBscAssetsOnChain();
     } catch (e) {
-      console.error("[FATAL] no-mock runtime gate:", e.message || e);
+      console.error("[FATAL] startup gate:", e.message || e);
       process.exit(1);
     }
     startServer(PORT);
@@ -4114,6 +4228,44 @@ const encodeGroth16Proof = (proof) => {
     c: coder.encode(["uint256[2]"], [c])
   };
 };
+
+const RELAYER_REQUIRE_LOCAL_SNARK_VERIFY = process.env.RELAYER_REQUIRE_LOCAL_SNARK_VERIFY !== "false";
+let localVerificationKeyCache = null;
+function normalizeGroth16ProofForSnarkjs(proof) {
+  const a = proof?.a || proof?.pi_a;
+  const b = proof?.b || proof?.pi_b;
+  const c = proof?.c || proof?.pi_c;
+  if (!a || !b || !c) return null;
+  return {
+    pi_a: Array.isArray(a) ? [String(a[0]), String(a[1])] : a,
+    pi_b: Array.isArray(b)
+      ? [
+          [String(b[0][1]), String(b[0][0])],
+          [String(b[1][1]), String(b[1][0])],
+        ]
+      : b,
+    pi_c: Array.isArray(c) ? [String(c[0]), String(c[1])] : c,
+    protocol: "groth16",
+    curve: "bn128",
+  };
+}
+function getLocalVerificationKey() {
+  if (localVerificationKeyCache) return localVerificationKeyCache;
+  const vkPath = path.join(__dirname, "..", "..", "circuits", "verification_key.json");
+  if (!fs.existsSync(vkPath)) {
+    throw new Error("verification_key.json not found for local relayer SNARK verification");
+  }
+  localVerificationKeyCache = JSON.parse(fs.readFileSync(vkPath, "utf8"));
+  return localVerificationKeyCache;
+}
+async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
+  if (!RELAYER_REQUIRE_LOCAL_SNARK_VERIFY) return;
+  const vk = getLocalVerificationKey();
+  const p = normalizeGroth16ProofForSnarkjs(proof);
+  if (!p) throw new Error(`${label}: invalid_proof_shape_for_local_verify`);
+  const ok = await snarkjs.groth16.verify(vk, publicSignals.map((x) => String(x)), p);
+  if (!ok) throw new Error(`${label}: local_snark_verification_failed`);
+}
 
 const getThresholdVerifier = async (signer) => {
   const poolAbi = ["function thresholdVerifier() view returns (address)"];
@@ -4336,6 +4488,7 @@ async function submitSwap(swapData) {
 
   const pi = swapData.publicInputs || {};
   const publicSignals = buildJoinSplitPublicSignals(pi);
+  await assertRelayerLocalSnarkVerify(swapData.proof, publicSignals, "swap");
 
   const skipValidatorQuorum =
     DEV_BYPASS_VALIDATORS ||
@@ -4500,6 +4653,14 @@ async function submitSwap(swapData) {
         }
       }
     }
+    try {
+      await contract.shieldedSwapJoinSplit.staticCall(swapDataForContract);
+    } catch (simErr) {
+      logRelayerOnchainFailure("shieldedSwapJoinSplit.staticCall", simErr);
+      const err = new Error(`swap_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
+      err.status = 400;
+      throw err;
+    }
     tx = await contract.shieldedSwapJoinSplit(swapDataForContract);
   } catch (e) {
     logRelayerOnchainFailure("shieldedSwapJoinSplit", e);
@@ -4544,6 +4705,7 @@ async function submitWithdraw(withdrawData) {
 
   const pi = withdrawData.publicInputs || {};
   const publicSignals = buildJoinSplitPublicSignals(pi);
+  await assertRelayerLocalSnarkVerify(withdrawData.proof, publicSignals, "withdraw");
 
   const skipValidatorQuorumWd =
     DEV_BYPASS_VALIDATORS ||
@@ -5129,6 +5291,28 @@ function storeCommitmentsFromReceipt(receipt) {
         saveCommitment(db, idx, commitment, receipt.hash);
       }
     } catch (_) { }
+  }
+}
+
+async function assertRequiredBscAssetsOnChain() {
+  const cfg = getRuntimeConfig();
+  if (Number(cfg.chainId) !== 97) return;
+  if (!RPC_URL || !SHIELDED_POOL_ADDRESS) return;
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const pool = new ethers.Contract(
+    SHIELDED_POOL_ADDRESS,
+    ["function assetRegistry(uint256) view returns (address)"],
+    provider
+  );
+  for (const req of REQUIRED_BSC_TESTNET_ASSETS) {
+    if (req.assetId === 0) continue;
+    const onchain = normalizeEvmAddress(await pool.assetRegistry(req.assetId));
+    const expected = normalizeEvmAddress(req.address);
+    if (onchain.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(
+        `ONCHAIN_ASSET_MISMATCH: assetId=${req.assetId} expected=${expected} onchain=${onchain}`
+      );
+    }
   }
 }
 
