@@ -273,7 +273,7 @@ const FALLBACK_ASSETS_BY_CHAIN = {
   97: [
     { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
     { assetId: 1, symbol: "BUSD", decimals: 18, address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13" },
+    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x798562974aDAC3a11768D0739832c1c9Cf5EE590" },
   ],
   56: [
     { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" },
@@ -284,7 +284,7 @@ const FALLBACK_ASSETS_BY_CHAIN = {
 const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
   { assetId: 0, symbol: "WBNB", address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
   { assetId: 1, symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-  { assetId: 2, symbol: "USDT", address: "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13" },
+  { assetId: 2, symbol: "USDT", address: "0x798562974aDAC3a11768D0739832c1c9Cf5EE590" },
 ]);
 const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
 const RELAYER_REQUIRE_ENCRYPTED_ENVELOPE = process.env.RELAYER_REQUIRE_ENCRYPTED_ENVELOPE !== "false";
@@ -2297,12 +2297,14 @@ app.post("/relayer/deposit/submit", requireModule4SubmitAuth, module4RateLimit, 
   let tx;
   try {
     if (session.mode === "erc20") {
+      const feeWei = await getDepositFeeBNBWei();
       tx = await sendDepositForErc20(wallet, SHIELDED_POOL_ADDRESS, {
         depositor,
         token: session.token,
         amount: session.amount,
         commitment,
         assetID: session.assetId,
+        feeWei,
       });
     } else {
       // For BNB, force shadow route so on-chain Deposit.depositor is shadow, not user EOA.

@@ -4,7 +4,7 @@
 const { ethers } = require("ethers");
 
 const POOL_MIN_ABI = [
-  "function depositFor(address depositor,address token,uint256 amount,bytes32 commitment,uint256 assetID) external",
+  "function depositFor(address depositor,address token,uint256 amount,bytes32 commitment,uint256 assetID) external payable",
   "function depositForBNB(address depositor,bytes32 commitment,uint256 assetID) external payable",
   "function relayerRegistry() view returns (address)",
 ];
@@ -35,11 +35,12 @@ function poolContract(poolAddress, signerOrProvider) {
   return new ethers.Contract(poolAddress, POOL_MIN_ABI, signerOrProvider);
 }
 
-async function sendDepositForErc20(wallet, poolAddress, { depositor, token, amount, commitment, assetID }) {
+async function sendDepositForErc20(wallet, poolAddress, { depositor, token, amount, commitment, assetID, feeWei }) {
   const pool = poolContract(poolAddress, wallet);
   const amt = typeof amount === "bigint" ? amount : BigInt(amount);
   const aid = typeof assetID === "bigint" ? assetID : BigInt(assetID);
-  return pool.depositFor(depositor, token, amt, commitment, aid);
+  const fee = typeof feeWei === "bigint" ? feeWei : BigInt(feeWei ?? 0);
+  return pool.depositFor(depositor, token, amt, commitment, aid, { value: fee });
 }
 
 async function sendDepositForBnb(wallet, poolAddress, { depositor, commitment, assetID, valueWei }) {
