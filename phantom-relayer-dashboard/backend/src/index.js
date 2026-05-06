@@ -1436,7 +1436,15 @@ async function processWithdrawRequestBody(body) {
       err.status = 400;
       throw err;
     }
-    await screenWithdrawRecipient(fr);
+    try {
+      await screenWithdrawRecipient(fr);
+    } catch (e) {
+      const out = complianceErrorResponse(e, "chainalysis_recipient_not_allowed");
+      const err = new Error(out.body.error);
+      err.status = out.status;
+      err.details = out.body;
+      throw err;
+    }
     const seed = getWithdrawShadowSeed({ finalRecipient: fr, nullifier: nf });
     const shadowAddr = new ethers.Wallet(seed).address;
     withdrawData.recipient = shadowAddr;
@@ -1447,7 +1455,15 @@ async function processWithdrawRequestBody(body) {
       err.status = 400;
       throw err;
     }
-    await screenWithdrawRecipient(withdrawData.recipient);
+    try {
+      await screenWithdrawRecipient(withdrawData.recipient);
+    } catch (e) {
+      const out = complianceErrorResponse(e, "chainalysis_recipient_not_allowed");
+      const err = new Error(out.body.error);
+      err.status = out.status;
+      err.details = out.body;
+      throw err;
+    }
   }
   return RELAYER_DRY_RUN
     ? await simulateSwap(ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(withdrawData))))
@@ -1487,7 +1503,15 @@ async function processDepositRequestBody(body) {
     err.status = 400;
     throw err;
   }
-  await screenDepositDepositor(payload.depositor, "deposit");
+  try {
+    await screenDepositDepositor(payload.depositor, "deposit");
+  } catch (e) {
+    const out = complianceErrorResponse(e, "chainalysis_depositor_not_allowed");
+    const err = new Error(out.body.error);
+    err.status = out.status;
+    err.details = out.body;
+    throw err;
+  }
   try {
     return RELAYER_DRY_RUN
       ? await simulateSwap(ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify({
@@ -1803,6 +1827,36 @@ async function chainalysisScreenAddress(addr, opts = {}) {
   }
 }
 
+function complianceErrorResponse(err, fallbackCode) {
+  const msg = String(err?.message || fallbackCode || "compliance_error");
+  if (msg === "chainalysis_api_unavailable") {
+    return {
+      status: err?.status || 503,
+      body: {
+        error: "chainalysis_api_unavailable",
+        complianceAction: "block",
+        failClosed: true,
+      },
+    };
+  }
+  if (/^chainalysis_.*_not_allowed$/.test(msg)) {
+    return {
+      status: err?.status || 403,
+      body: {
+        error: msg,
+        complianceAction: "block",
+      },
+    };
+  }
+  return {
+    status: err?.status || 403,
+    body: {
+      error: fallbackCode || "compliance_error",
+      complianceAction: "block",
+    },
+  };
+}
+
 function configuredTokenAllowlist() {
   const cfg = getRuntimeConfig();
   const allowed = new Set([ethers.ZeroAddress.toLowerCase()]);
@@ -1967,7 +2021,8 @@ app.post("/relayer/deposit/session", module4RateLimit, async (req, res) => {
   try {
     await screenDepositDepositor(depositor, "module4.deposit.session");
   } catch (e) {
-    return res.status(e.status || 403).json({ error: e.message || "chainalysis_depositor_not_allowed" });
+    const out = complianceErrorResponse(e, "chainalysis_depositor_not_allowed");
+    return res.status(out.status).json(out.body);
   }
 
   if (mode === "erc20") {
@@ -3137,8 +3192,10 @@ async function processSwapRequestBody(body) {
       await screenDepositDepositor(ethers.getAddress(ownerAddress), "swap");
     } catch (e) {
       if (e?.status) {
-        const err = new Error(e.message || "chainalysis_depositor_not_allowed");
-        err.status = e.status;
+        const out = complianceErrorResponse(e, "chainalysis_depositor_not_allowed");
+        const err = new Error(out.body.error);
+        err.status = out.status;
+        err.details = out.body;
         throw err;
       }
       throw e;
@@ -3635,7 +3692,11 @@ app.post("/shadow-address", async (req, res) => {
   try {
     await screenDepositDepositor(payload.depositor, "shadow-address");
   } catch (e) {
-    return res.status(e.status || 403).json({ error: e.message || "chainalysis_depositor_not_allowed" });
+    const out = complianceErrorResponse(e, "chainalysis_depositor_not_allowed");
+    return res.status(out.status).json({
+      ...out.body,
+      action: "do_not_fund_shadow",
+    });
   }
   const seed = getShadowSeed(payload);
   const shadowWallet = new ethers.Wallet(seed);
