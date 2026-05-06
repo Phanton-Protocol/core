@@ -94,6 +94,7 @@ function getAssetIdForToken(addr) {
   const n = String(addr || "").toLowerCase();
   if (n === ethers.ZeroAddress.toLowerCase()) return 0;
   if (n === "0x78867bbeeef44f2326bf8ddd1941a4439382ef2a7") return 1;
+  if (n === "0x66e972502a34a625828c544a1914e8d8cc2a9de5") return 2;
   if (n === "0x7ef95a0fe8a5f4f9c1824fbf6656e2f95fa6bf13") return 2;
   return Number(process.env.E2E_INPUT_ASSET_ID || 1);
 }
@@ -101,6 +102,7 @@ function getAssetIdForToken(addr) {
 function outputAssetId(addr) {
   const n = String(addr || "").toLowerCase();
   if (n === "0x78867bbeeef44f2326bf8ddd1941a4439382ef2a7") return 1;
+  if (n === "0x66e972502a34a625828c544a1914e8d8cc2a9de5") return 2;
   if (n === "0x7ef95a0fe8a5f4f9c1824fbf6656e2f95fa6bf13") return 2;
   return Number(process.env.E2E_OUTPUT_ASSET_ID || 1);
 }
@@ -559,6 +561,7 @@ async function main() {
   if (gen.status !== 200) throw new Error(`generate-proof ${gen.status} ${gen.raw}`);
   const swapData = {
     proof: gen.json.proof,
+    proofSnark: gen.json.snarkProof,
     publicInputs: gen.json.publicInputs,
     swapParams: {
       tokenIn: inputAssetId === 0 ? ethers.ZeroAddress : tokenIn,
@@ -650,6 +653,7 @@ async function main() {
 
   const withdrawData = {
     proof: wgen.json.proof,
+    proofSnark: wgen.json.snarkProof,
     publicInputs: wgen.json.publicInputs,
     recipient: wallet.address,
     ownerAddress: wallet.address.toLowerCase(),

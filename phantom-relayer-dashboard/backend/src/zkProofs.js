@@ -300,7 +300,7 @@ async function proveWithRapidsnarkOrSnarkjs(circuitInputs, wasmPath, zkeyPath, c
     ],
     c: [String(proof.pi_c[0]), String(proof.pi_c[1])]
   };
-  return { proof: solidityProof, publicSignals, generationTime: elapsed };
+  return { proof: solidityProof, snarkProof: proof, publicSignals, generationTime: elapsed };
 }
 
 async function generateSwapProof(swapData) {

@@ -239,6 +239,12 @@ function decryptRelayEnvelope(envelope) {
   return JSON.parse(plaintext);
 }
 
+function debugIngest(location, message, data, runId, hypothesisId) {
+  // #region agent log
+  fetch('http://127.0.0.1:7607/ingest/0d14d89d-6146-4059-a766-779f424d4edc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c1b159'},body:JSON.stringify({sessionId:'c1b159',location,message,data,timestamp:Date.now(),runId,hypothesisId})}).catch(()=>{});
+  // #endregion
+}
+
 loadConfig();
 
 const PORT = process.env.PORT || 5050;
@@ -3471,11 +3477,25 @@ app.post("/swap/encrypted", requireSeeForSensitiveFlow, async (req, res) => {
   if (!requireConfigured(res, requiredKeys, "Swap encrypted")) return;
   try {
     const envelope = req.body?.envelope;
+    debugIngest("index.js:/swap/encrypted", "encrypted swap envelope received", {
+      hasEnvelope: !!envelope,
+      keyId: envelope?.keyId || null,
+      hasEncryptedKey: !!envelope?.encryptedKey,
+      hasIv: !!envelope?.iv,
+      hasCiphertext: !!envelope?.ciphertext,
+      hasAuthTag: !!envelope?.authTag,
+    }, "pre-fix", "H4");
     const decryptedBody = decryptRelayEnvelope(envelope);
+    debugIngest("index.js:/swap/encrypted", "encrypted swap envelope decrypted", {
+      keys: Object.keys(decryptedBody || {}),
+      hasSwapData: !!decryptedBody?.swapData,
+      proofKeys: Object.keys(decryptedBody?.swapData?.proof || {}),
+    }, "pre-fix", "H4");
     const payload = await processSwapRequestBody(decryptedBody);
     res.json(payload);
   } catch (err) {
     if (err?.status) return res.status(err.status).json({ error: err.message, details: err.details });
+    console.error("[Swap encrypted] Error:", err);
     return res.status(400).json({ error: err.message || "Encrypted swap failed" });
   }
 });
@@ -4451,15 +4471,38 @@ function normalizeGroth16ProofForSnarkjs(proof) {
   const b = proof?.b || proof?.pi_b;
   const c = proof?.c || proof?.pi_c;
   if (!a || !b || !c) return null;
+  const normA = Array.isArray(a)
+    ? [String(a?.[0] ?? 0), String(a?.[1] ?? 0), String(a?.[2] ?? 1)]
+    : a;
+  let normB = b;
+  if (Array.isArray(b)) {
+    if (Array.isArray(b?.[0]) && Array.isArray(b?.[1])) {
+      normB = [
+        [String(b?.[0]?.[1] ?? 0), String(b?.[0]?.[0] ?? 0)],
+        [String(b?.[1]?.[1] ?? 0), String(b?.[1]?.[0] ?? 0)],
+        [String(b?.[2]?.[1] ?? 1), String(b?.[2]?.[0] ?? 0)],
+      ];
+    } else if (b.length >= 4) {
+      normB = [
+        [String(b?.[1] ?? 0), String(b?.[0] ?? 0)],
+        [String(b?.[3] ?? 0), String(b?.[2] ?? 0)],
+        [String(b?.[5] ?? 1), String(b?.[4] ?? 0)],
+      ];
+    } else {
+      normB = [
+        [String(b?.[0] ?? 0), String(b?.[1] ?? 0)],
+        [String(b?.[2] ?? 0), String(b?.[3] ?? 0)],
+        [String(b?.[4] ?? 1), String(b?.[5] ?? 0)],
+      ];
+    }
+  }
+  const normC = Array.isArray(c)
+    ? [String(c?.[0] ?? 0), String(c?.[1] ?? 0), String(c?.[2] ?? 1)]
+    : c;
   return {
-    pi_a: Array.isArray(a) ? [String(a[0]), String(a[1])] : a,
-    pi_b: Array.isArray(b)
-      ? [
-          [String(b[0][1]), String(b[0][0])],
-          [String(b[1][1]), String(b[1][0])],
-        ]
-      : b,
-    pi_c: Array.isArray(c) ? [String(c[0]), String(c[1])] : c,
+    pi_a: normA,
+    pi_b: normB,
+    pi_c: normC,
     protocol: "groth16",
     curve: "bn128",
   };
@@ -4476,10 +4519,75 @@ function getLocalVerificationKey() {
 async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
   if (!RELAYER_REQUIRE_LOCAL_SNARK_VERIFY) return;
   const vk = getLocalVerificationKey();
-  const p = normalizeGroth16ProofForSnarkjs(proof);
-  if (!p) throw new Error(`${label}: invalid_proof_shape_for_local_verify`);
-  const ok = await snarkjs.groth16.verify(vk, publicSignals.map((x) => String(x)), p);
-  if (!ok) throw new Error(`${label}: local_snark_verification_failed`);
+  const normalized = normalizeGroth16ProofForSnarkjs(proof);
+  debugIngest("index.js:assertRelayerLocalSnarkVerify", "local verify start", {
+    label,
+    signalsLen: Array.isArray(publicSignals) ? publicSignals.length : -1,
+    vkICLen: Array.isArray(vk?.IC) ? vk.IC.length : -1,
+    proofKeys: Object.keys(proof || {}),
+    normalizedKeys: normalized ? Object.keys(normalized) : [],
+  }, "pre-fix", "H1_H2_H3");
+  const candidates = [];
+  if (proof && typeof proof === "object") candidates.push(proof);
+  if (normalized) candidates.push(normalized);
+  const unique = candidates.filter((c, idx) => candidates.findIndex((x) => JSON.stringify(x) === JSON.stringify(c)) === idx);
+  if (!unique.length) throw new Error(`${label}: invalid_proof_shape_for_local_verify`);
+  let lastErr = null;
+  for (const p of unique) {
+    try {
+      const ok = await snarkjs.groth16.verify(vk, publicSignals.map((x) => String(x)), p);
+      debugIngest("index.js:assertRelayerLocalSnarkVerify", "candidate verify result", {
+        label,
+        candidateKeys: Object.keys(p || {}),
+        ok,
+      }, "pre-fix", "H1_H2");
+      if (ok) return;
+    } catch (e) {
+      debugIngest("index.js:assertRelayerLocalSnarkVerify", "candidate verify error", {
+        label,
+        candidateKeys: Object.keys(p || {}),
+        error: e?.message || String(e),
+      }, "pre-fix", "H1_H2");
+      lastErr = e;
+    }
+  }
+  // Fallback path for solidity-proof (a/b/c) shapes that snarkjs may reject in some environments:
+  // validate locally via verifier staticcall before relayer submit/sign.
+  try {
+    if (RPC_URL && SHIELDED_POOL_ADDRESS) {
+      const provider = new ethers.JsonRpcProvider(RPC_URL);
+      const pool = new ethers.Contract(
+        SHIELDED_POOL_ADDRESS,
+        ["function verifier() view returns (address)"],
+        provider
+      );
+      const verifierAddr = await pool.verifier();
+      const verifier = new ethers.Contract(
+        verifierAddr,
+        ["function verifyProof((bytes,bytes,bytes) proof, uint256[] publicInputs) view returns (bool)"],
+        provider
+      );
+      const encoded = encodeGroth16Proof(proof);
+      const okStatic = await verifier.verifyProof(
+        { a: encoded.a, b: encoded.b, c: encoded.c },
+        publicSignals.map((x) => toBigInt(x))
+      );
+      debugIngest("index.js:assertRelayerLocalSnarkVerify", "verifier staticcall result", {
+        label,
+        verifierAddr,
+        okStatic,
+      }, "pre-fix", "H3");
+      if (okStatic) return;
+    }
+  } catch (e) {
+    debugIngest("index.js:assertRelayerLocalSnarkVerify", "verifier staticcall error", {
+      label,
+      error: e?.message || String(e),
+    }, "pre-fix", "H3");
+  }
+
+  if (lastErr) throw new Error(`${label}: local_snark_verification_failed (${lastErr.message || lastErr})`);
+  throw new Error(`${label}: local_snark_verification_failed`);
 }
 
 const getThresholdVerifier = async (signer) => {
@@ -4684,7 +4792,24 @@ async function submitSwap(swapData) {
 
   const pi = swapData.publicInputs || {};
   const publicSignals = buildJoinSplitPublicSignals(pi);
-  await assertRelayerLocalSnarkVerify(swapData.proof, publicSignals, "swap");
+  debugIngest("index.js:submitSwap", "submitSwap proof/signal summary", {
+    proofKeys: Object.keys(swapData?.proof || {}),
+    hasProofSnark: !!swapData?.proofSnark,
+    proofSnarkKeys: Object.keys(swapData?.proofSnark || {}),
+    signalLen: publicSignals.length,
+    firstSignal: String(publicSignals?.[0] ?? ""),
+    lastSignal: String(publicSignals?.[publicSignals.length - 1] ?? ""),
+  }, "pre-fix", "H1_H2");
+  console.log("[swap] proof shape", {
+    keys: Object.keys(swapData.proof || {}),
+    hasA: Array.isArray(swapData.proof?.a),
+    hasB: Array.isArray(swapData.proof?.b),
+    hasC: Array.isArray(swapData.proof?.c),
+    hasPiA: Array.isArray(swapData.proof?.pi_a),
+    hasPiB: Array.isArray(swapData.proof?.pi_b),
+    hasPiC: Array.isArray(swapData.proof?.pi_c),
+  });
+  await assertRelayerLocalSnarkVerify(swapData.proofSnark || swapData.proof, publicSignals, "swap");
 
   const skipValidatorQuorum =
     DEV_BYPASS_VALIDATORS ||
@@ -4945,7 +5070,7 @@ async function submitWithdraw(withdrawData) {
 
   const pi = withdrawData.publicInputs || {};
   const publicSignals = buildJoinSplitPublicSignals(pi);
-  await assertRelayerLocalSnarkVerify(withdrawData.proof, publicSignals, "withdraw");
+  await assertRelayerLocalSnarkVerify(withdrawData.proofSnark || withdrawData.proof, publicSignals, "withdraw");
 
   const skipValidatorQuorumWd =
     DEV_BYPASS_VALIDATORS ||
