@@ -40,10 +40,10 @@ Use this gate before marking "Full-Private Relayer Redesign" complete.
 - Nonce replay protection and expiry checks pass for both modes.
 
 ## 6) Routing Commitment Alignment
-- `routingCommitment` generated in proof pipeline matches backend commitment hash function.
-- Contract-side hash computation uses the same canonical field order:
-  - nullifier, inputCommitment, outputCommitmentSwap, outputCommitmentChange, merkleRoot,
-    inputAssetID, outputAssetIDSwap, swapAmount, minOutputAmountSwap
+- `routingCommitment` generated in proof pipeline matches backend + contract MiMC7 computation.
+- Circuit, backend, and contract must use the same canonical order:
+  - inputAssetID, outputAssetIDSwap, outputAssetIDChange, inputAmount, swapAmount,
+    changeAmount, outputAmountSwap, minOutputAmountSwap, protocolFee, gasRefund, withdrawMode
 
 ## 7) End-to-End Runtime Checks
 - Successful encrypted swap flow on BSC testnet for configured assets.

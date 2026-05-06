@@ -4,7 +4,7 @@
   "circom": "2.2.3",
   "snarkjs": "0.7.5",
   "curve": "bn128",
-  "publicSignals": 9,
+  "publicSignals": 10,
   "publicSignalOrder": [
     "nullifier (bytes32 as uint256)",
     "inputCommitment (bytes32 as uint256)",
@@ -14,25 +14,26 @@
     "outputAmountSwap (uint256)",
     "minOutputAmountSwap (uint256)",
     "protocolFee (uint256)",
-    "gasRefund (uint256)"
+    "gasRefund (uint256)",
+    "routingCommitment (uint256)"
   ],
   "onChainReference": "ShieldedPool._joinSplitPublicInputsToArray",
   "artifacts": {
     "circomSource": {
       "path": "circuits/joinsplit_public9/joinsplit_public9.circom",
-      "sha256": "576badc62ab013ce20f97b793c1822a1658d922b551e2f14edc6e333066a87c4"
+      "sha256": "ec55e5baad5b1276131a93301e54b77983e1964416850d72984d73a90139f6ab"
     },
     "wasm": {
       "path": "circuits/joinsplit_public9/build/joinsplit_public9_js/joinsplit_public9.wasm",
-      "sha256": "606ca47f76f0195c5026f20be8f12e723f6a9e0aa45d4d94a958be050608da80"
+      "sha256": "fc81c5e3058c096886082e21b2c5a94fe1beee55f4a4504883669d58bccf930a"
     },
     "zkeyFinal": {
       "path": "circuits/joinsplit_public9/circuit_final.zkey",
-      "sha256": "86fc81eaf136a7967e297a71894112e7cb3e8a319620adb2d68b720f27526e11"
+      "sha256": "8953284cbd7f41c149131d1f391bf187bec8107234033ee660c3f653d88194ff"
     },
     "verificationKeyJson": {
       "path": "circuits/joinsplit_public9/verification_key.json",
-      "sha256": "0cfe23518ab0f508976b164061e6c89458e4ed59ca035ca8ff2ed0af4a79038c"
+      "sha256": "d4280822050dde82c07cfda5d8aa846c14266f70dddd29488be41ab34d5e7333"
     },
     "powersOfTau": {
       "path": "circuits/trusted_setup/powersOfTau28_hez_final_14.ptau",

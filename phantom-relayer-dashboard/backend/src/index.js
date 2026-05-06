@@ -1353,8 +1353,23 @@ const buildJoinSplitPublicSignals = (pi) => ([
   toBigIntString(pi.outputAmountSwap),
   toBigIntString(pi.minOutputAmountSwap),
   toBigIntString(pi.protocolFee),
-  toBigIntString(pi.gasRefund)
+  toBigIntString(pi.gasRefund),
+  toBigIntString(computeJoinSplitRoutingCommitment(pi))
 ]);
+
+function computeJoinSplitRoutingCommitment(pi) {
+  const withdrawMode = toBigInt(pi?.outputCommitmentSwap || 0) === 0n ? 1n : 0n;
+  const r0 = mimc7(toBigInt(pi?.inputAssetID || 0), toBigInt(pi?.outputAssetIDSwap || 0));
+  const r1 = mimc7(r0, toBigInt(pi?.outputAssetIDChange || 0));
+  const r2 = mimc7(r1, toBigInt(pi?.inputAmount || 0));
+  const r3 = mimc7(r2, toBigInt(pi?.swapAmount || 0));
+  const r4 = mimc7(r3, toBigInt(pi?.changeAmount || 0));
+  const r5 = mimc7(r4, toBigInt(pi?.outputAmountSwap || 0));
+  const r6 = mimc7(r5, toBigInt(pi?.minOutputAmountSwap || 0));
+  const r7 = mimc7(r6, toBigInt(pi?.protocolFee || 0));
+  const r8 = mimc7(r7, toBigInt(pi?.gasRefund || 0));
+  return mimc7(r8, withdrawMode);
+}
 
 const computeMerkleRootFromPath = (leafValue, merklePath, merklePathIndices) => {
   let current = toBigInt(leafValue);
@@ -1883,6 +1898,7 @@ function rejectPlainSensitiveRoute(res, encryptedPath) {
 
 function computeSwapPublicInputHash(publicInputs) {
   const pi = publicInputs || {};
+  const routingCommitment = computeJoinSplitRoutingCommitment(pi);
   const asBytes32 = (v) => {
     const raw = v == null ? ethers.ZeroHash : String(v);
     if (raw.startsWith("0x")) return ethers.zeroPadValue(raw, 32);
@@ -1898,9 +1914,6 @@ function computeSwapPublicInputHash(publicInputs) {
         "bytes32",
         "bytes32",
         "uint256",
-        "uint256",
-        "uint256",
-        "uint256",
       ],
       [
         asBytes32(pi.nullifier),
@@ -1908,10 +1921,7 @@ function computeSwapPublicInputHash(publicInputs) {
         asBytes32(pi.outputCommitmentSwap),
         asBytes32(pi.outputCommitmentChange),
         asBytes32(pi.merkleRoot),
-        asU256(pi.inputAssetID ?? 0),
-        asU256(pi.outputAssetIDSwap ?? 0),
-        asU256(pi.swapAmount ?? 0),
-        asU256(pi.minOutputAmountSwap ?? 0),
+        asU256(routingCommitment),
       ]
     )
   );

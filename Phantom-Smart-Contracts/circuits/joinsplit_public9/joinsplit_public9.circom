@@ -5,7 +5,7 @@ include "bitify.circom";
 include "comparators.circom";
 
 /**
- * Join-split Groth16 (9 public outputs, order fixed for JoinSplitVerifier.sol):
+ * Join-split Groth16 (10 public outputs, order fixed for JoinSplitVerifier.sol):
  *   0 nullifier
  *   1 inputCommitment
  *   2 outputCommitmentSwap
@@ -15,6 +15,7 @@ include "comparators.circom";
  *   6 minOutputAmountSwap
  *   7 protocolFee
  *   8 gasRefund
+ *   9 routingCommitment
  *
  * Private witness matches phantom-relayer-dashboard/backend/src/noteModel.js:
  *   commitment = MiMC7(MiMC7(MiMC7(assetID, amount), blinding), ownerPublicKey)
@@ -39,6 +40,7 @@ template JoinSplitPublic9() {
     signal output minOutputAmountSwap;
     signal output protocolFee;
     signal output gasRefund;
+    signal output routingCommitment;
 
     // ---- private witness: spent input note ----
     signal input inputAssetID;
@@ -168,6 +170,40 @@ template JoinSplitPublic9() {
     gasRefund <== gasRefundWitness;
     outputAmountSwap <== outputAmountSwapNote;
     minOutputAmountSwap <== minOutputAmountSwapWitness;
+
+    // Routing commitment binds private asset/amount routing metadata into a single public signal.
+    // This lets relayer/validator authorization key off one commitment instead of clear fields.
+    component r0 = MiMC7();
+    r0.x <== inputAssetID;
+    r0.k <== outputAssetIDSwap;
+    component r1 = MiMC7();
+    r1.x <== r0.h;
+    r1.k <== outputAssetIDChange;
+    component r2 = MiMC7();
+    r2.x <== r1.h;
+    r2.k <== inputAmount;
+    component r3 = MiMC7();
+    r3.x <== r2.h;
+    r3.k <== swapAmount;
+    component r4 = MiMC7();
+    r4.x <== r3.h;
+    r4.k <== changeAmount;
+    component r5 = MiMC7();
+    r5.x <== r4.h;
+    r5.k <== outputAmountSwapNote;
+    component r6 = MiMC7();
+    r6.x <== r5.h;
+    r6.k <== minOutputAmountSwapWitness;
+    component r7 = MiMC7();
+    r7.x <== r6.h;
+    r7.k <== protocolFeeWitness;
+    component r8 = MiMC7();
+    r8.x <== r7.h;
+    r8.k <== gasRefundWitness;
+    component r9 = MiMC7();
+    r9.x <== r8.h;
+    r9.k <== withdrawMode;
+    routingCommitment <== r9.h;
 }
 
 component main = JoinSplitPublic9();

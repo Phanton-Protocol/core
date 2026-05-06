@@ -2,7 +2,7 @@
 
 ## On-chain public input vector (canonical)
 
-`ShieldedPool._joinSplitPublicInputsToArray` passes **exactly nine** `uint256` values to `IVerifier.verifyProof` (via `Groth16VerifierAdapter`). These must match the Groth16 circuit’s public outputs **in order**.
+`ShieldedPool._joinSplitPublicInputsToArray` passes **exactly ten** `uint256` values to `IVerifier.verifyProof` (via `Groth16VerifierAdapter`). These must match the Groth16 circuit’s public outputs **in order**.
 
 | Index | Solidity source field | Type | Notes |
 |------:|------------------------|------|--------|
@@ -15,17 +15,18 @@
 | 6 | `inputs.minOutputAmountSwap` | `uint256` | |
 | 7 | `inputs.protocolFee` | `uint256` | |
 | 8 | `inputs.gasRefund` | `uint256` | |
+| 9 | `_computeJoinSplitRoutingCommitment(inputs)` | `uint256` | MiMC7 commitment over routing amount/asset metadata |
 
 **Field reduction:** `ShieldedPool._joinSplitPublicInputsToArray` (and handler helpers) pass each value as `uint256(...) % SNARK_SCALAR_FIELD` so calldata matches Circom’s `Fr` semantics (same reduction snarkjs uses in public signals). Merkle / nullifier logic still uses the full `bytes32` keys from `JoinSplitPublicInputs`.
 
-`JoinSplitPublicInputs` also carries **calldata-only** fields (asset IDs, `swapAmount`, Merkle siblings, etc.). The Groth16 verifier still receives **only** the nine public field elements above; the circuit witness binds those to the spent note, Merkle path, splits, and fees.
+`JoinSplitPublicInputs` also carries **calldata-only** fields (asset IDs, `swapAmount`, Merkle siblings, etc.). The Groth16 verifier receives the ten public field elements above; the new `routingCommitment` output binds those private routing fields in-circuit.
 
-**Note:** `ShieldedPoolUpgradeable` uses a **29-element** public vector for join-split (includes Merkle path indices in-circuit). That path is not covered by `joinsplit_public9`; only the **non-upgradeable `ShieldedPool`** 9-signal layout matches this artifact.
+**Note:** `ShieldedPoolUpgradeable` uses a **29-element** public vector for join-split (includes Merkle path indices in-circuit). That path is not covered by `joinsplit_public9`; only the **non-upgradeable `ShieldedPool`** 10-signal layout matches this artifact.
 
 ## Circom: `joinsplit_public9`
 
 - Source: `circuits/joinsplit_public9/joinsplit_public9.circom` (+ `mimc7.circom`, `mimc7_constants.circom`).
-- Nine **public outputs** in the same order as the table above.
+- Ten **public outputs** in the same order as the table above.
 - Constraints: MiMC7 commitments + nullifier (`noteModel.js` chain), depth-10 Merkle (`MerkleTree.sol`), conservation with **120-bit** range checks, slippage when `withdrawMode = 0`.
 
 ## Pinning & artifacts

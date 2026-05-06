@@ -18,10 +18,30 @@ const { computeCommitment, computeNullifier } = require(path.join(
   "src",
   "noteModel.js"
 ));
+const { mimc7 } = require(path.join(
+  __dirname,
+  "..",
+  "..",
+  "phantom-relayer-dashboard",
+  "backend",
+  "src",
+  "mimc7.js"
+));
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 
 const FIELD = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const RELAYER_SWAP_ATTESTATION_TYPES = {
+  RelayerSwapAttestationHashFirst: [
+    { name: "proofHash", type: "bytes32" },
+    { name: "publicInputHash", type: "bytes32" },
+    { name: "relayer", type: "address" },
+    { name: "pool", type: "address" },
+    { name: "chainId", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+  ],
+};
 
 function randField() {
   while (true) {
@@ -33,6 +53,55 @@ function randField() {
 function commitmentToBytes32(commitmentBn) {
   const h = BigInt(commitmentBn) % FIELD;
   return ethers.toBeHex(h, 32);
+}
+
+function computeRoutingCommitmentFromPublicInputs(pi) {
+  const withdrawMode = BigInt(pi.outputCommitmentSwap) === 0n ? 1n : 0n;
+  const r0 = mimc7(pi.inputAssetID, pi.outputAssetIDSwap);
+  const r1 = mimc7(r0, pi.outputAssetIDChange);
+  const r2 = mimc7(r1, pi.inputAmount);
+  const r3 = mimc7(r2, pi.swapAmount);
+  const r4 = mimc7(r3, pi.changeAmount);
+  const r5 = mimc7(r4, pi.outputAmountSwap);
+  const r6 = mimc7(r5, pi.minOutputAmountSwap);
+  const r7 = mimc7(r6, pi.protocolFee);
+  const r8 = mimc7(r7, pi.gasRefund);
+  return mimc7(r8, withdrawMode);
+}
+
+async function buildHashFirstRelayerAttestation({ signer, pool, proof, publicInputs, nonce, deadline }) {
+  const proofHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(["bytes", "bytes", "bytes"], [proof.a, proof.b, proof.c])
+  );
+  const publicInputHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["bytes32", "bytes32", "bytes32", "bytes32", "bytes32", "uint256"],
+      [
+        publicInputs.nullifier,
+        publicInputs.inputCommitment,
+        publicInputs.outputCommitmentSwap,
+        publicInputs.outputCommitmentChange,
+        publicInputs.merkleRoot,
+        computeRoutingCommitmentFromPublicInputs(publicInputs),
+      ]
+    )
+  );
+  const network = await ethers.provider.getNetwork();
+  const domain = {
+    name: "PhantomRelayerAttestation",
+    version: "1",
+    chainId: Number(network.chainId),
+    verifyingContract: await pool.getAddress(),
+  };
+  return signer.signTypedData(domain, RELAYER_SWAP_ATTESTATION_TYPES, {
+    proofHash,
+    publicInputHash,
+    relayer: signer.address,
+    pool: await pool.getAddress(),
+    chainId: BigInt(network.chainId),
+    deadline,
+    nonce,
+  });
 }
 
 async function buildValidSwapPublicInputsAsync(feeOracle, inputAmount, swapAmount, gasRefund = 0n, outputAssetIDSwap = 1n) {
@@ -102,6 +171,16 @@ describe("Join-split Groth16 (real verifier)", function () {
     };
 
     const { poolProof } = await proveJoinSplitPublic9FromPublicInputs(publicInputs);
+    const attestationNonce = 1n;
+    const attestationDeadline = BigInt((await ethers.provider.getBlock("latest")).timestamp + 3600);
+    const relayerAttestationSig = await buildHashFirstRelayerAttestation({
+      signer: deployer,
+      pool,
+      proof: poolProof,
+      publicInputs,
+      nonce: attestationNonce,
+      deadline: attestationDeadline,
+    });
 
     const swapData = {
       proof: poolProof,
@@ -120,6 +199,10 @@ describe("Join-split Groth16 (real verifier)", function () {
       deadline: 0n,
       nonce: 0n,
       encryptedPayload: "0x",
+      relayerAttestationSig,
+      relayerAttestationDeadline: attestationDeadline,
+      relayerAttestationNonce: attestationNonce,
+      proofContextHash: ethers.ZeroHash,
     };
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(pool, "ShieldedSwapJoinSplit");
@@ -154,9 +237,20 @@ describe("Join-split Groth16 (real verifier)", function () {
     const cBytes = ethers.getBytes(poolProof.c);
     cBytes[cBytes.length - 1] ^= 1;
     const tamperedC = ethers.hexlify(cBytes);
+    const tamperedProof = { ...poolProof, c: tamperedC };
+    const attestationNonce = 2n;
+    const attestationDeadline = BigInt((await ethers.provider.getBlock("latest")).timestamp + 3600);
+    const relayerAttestationSig = await buildHashFirstRelayerAttestation({
+      signer: deployer,
+      pool,
+      proof: tamperedProof,
+      publicInputs,
+      nonce: attestationNonce,
+      deadline: attestationDeadline,
+    });
 
     const swapData = {
-      proof: { ...poolProof, c: tamperedC },
+      proof: tamperedProof,
       publicInputs,
       swapParams: {
         tokenIn: ethers.ZeroAddress,
@@ -172,6 +266,10 @@ describe("Join-split Groth16 (real verifier)", function () {
       deadline: 0n,
       nonce: 0n,
       encryptedPayload: "0x",
+      relayerAttestationSig,
+      relayerAttestationDeadline: attestationDeadline,
+      relayerAttestationNonce: attestationNonce,
+      proofContextHash: ethers.ZeroHash,
     };
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData))

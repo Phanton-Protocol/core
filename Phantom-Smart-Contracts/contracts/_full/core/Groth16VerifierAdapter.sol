@@ -8,7 +8,7 @@ interface IGroth16Verifier {
         uint256[2] calldata _pA,
         uint256[2][2] calldata _pB,
         uint256[2] calldata _pC,
-        uint256[9] calldata _pubSignals
+        uint256[10] calldata _pubSignals
     ) external view returns (bool);
 }
 
@@ -24,12 +24,12 @@ contract Groth16VerifierAdapter is IVerifier {
         Proof calldata proof,
         uint256[] calldata publicInputs
     ) external view override returns (bool) {
-        require(publicInputs.length == 9, "VerifierAdapter: invalid public inputs");
+        require(publicInputs.length == 10, "VerifierAdapter: invalid public inputs");
         uint256[2] memory a = abi.decode(proof.a, (uint256[2]));
         uint256[2][2] memory b = abi.decode(proof.b, (uint256[2][2]));
         uint256[2] memory c = abi.decode(proof.c, (uint256[2]));
-        uint256[9] memory inputs;
-        for (uint256 i = 0; i < 9; i++) {
+        uint256[10] memory inputs;
+        for (uint256 i = 0; i < 10; i++) {
             inputs[i] = publicInputs[i];
         }
         return groth16.verifyProof(a, b, c, inputs);

@@ -170,32 +170,17 @@ function swapCircuitToPublicInputs(ci) {
     merklePath: [...ci.merklePath],
     merklePathIndices: [...ci.merklePathIndices],
   };
-  pub.routingCommitment = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      [
-        "bytes32",
-        "bytes32",
-        "bytes32",
-        "bytes32",
-        "bytes32",
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint256",
-      ],
-      [
-        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.nullifier)), 32),
-        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.inputCommitment)), 32),
-        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.outputCommitmentSwap)), 32),
-        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.outputCommitmentChange)), 32),
-        ethers.zeroPadValue(ethers.toBeHex(BigInt(pub.merkleRoot)), 32),
-        BigInt(pub.inputAssetID),
-        BigInt(pub.outputAssetIDSwap),
-        BigInt(pub.swapAmount),
-        BigInt(pub.minOutputAmountSwap),
-      ]
-    )
-  );
+  const withdrawMode = BigInt(pub.outputCommitmentSwap) === 0n ? 1n : 0n;
+  const r0 = mimc7(BigInt(pub.inputAssetID), BigInt(pub.outputAssetIDSwap));
+  const r1 = mimc7(r0, BigInt(pub.outputAssetIDChange));
+  const r2 = mimc7(r1, BigInt(pub.inputAmount));
+  const r3 = mimc7(r2, BigInt(pub.swapAmount));
+  const r4 = mimc7(r3, BigInt(pub.changeAmount));
+  const r5 = mimc7(r4, BigInt(pub.outputAmountSwap));
+  const r6 = mimc7(r5, BigInt(pub.minOutputAmountSwap));
+  const r7 = mimc7(r6, BigInt(pub.protocolFee));
+  const r8 = mimc7(r7, BigInt(pub.gasRefund));
+  pub.routingCommitment = mimc7(r8, withdrawMode).toString();
   return pub;
 }
 
