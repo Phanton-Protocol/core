@@ -288,6 +288,7 @@ const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
 ]);
 const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
 const RELAYER_REQUIRE_ENCRYPTED_ENVELOPE = process.env.RELAYER_REQUIRE_ENCRYPTED_ENVELOPE !== "false";
+const RELAYER_SWAP_ATTESTATION_MODE = String(process.env.RELAYER_SWAP_ATTESTATION_MODE || "hash_first_with_fallback").toLowerCase();
 const PLACEHOLDER_RELAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function toBps(v, fallback) {
@@ -439,6 +440,15 @@ const INTENT_TYPES = {
     { name: "outputAssetID", type: "uint256" },
     { name: "amountIn", type: "uint256" },
     { name: "minAmountOut", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "nullifier", type: "bytes32" },
+  ],
+};
+const INTENT_TYPES_V2 = {
+  SwapIntentHash: [
+    { name: "user", type: "address" },
+    { name: "publicInputHash", type: "bytes32" },
     { name: "deadline", type: "uint256" },
     { name: "nonce", type: "uint256" },
     { name: "nullifier", type: "bytes32" },
@@ -1295,6 +1305,9 @@ const swapSchema = z.object({
     deadline: z.union([z.string(), z.number()]).optional(),
     nonce: z.union([z.string(), z.number()]).optional(),
     minAmountOut: z.union([z.string(), z.number()]).optional(),
+    userAddress: z.string().optional(),
+    publicInputHash: z.string().optional(),
+    signature: z.string().optional(),
   }).optional(),
   swapData: z.object({
     proof: proofShape,
@@ -1865,6 +1878,42 @@ function rejectPlainSensitiveRoute(res, encryptedPath) {
     useEndpoint: encryptedPath,
   });
   return true;
+}
+
+function computeSwapPublicInputHash(publicInputs) {
+  const pi = publicInputs || {};
+  const asBytes32 = (v) => {
+    const raw = v == null ? ethers.ZeroHash : String(v);
+    if (raw.startsWith("0x")) return ethers.zeroPadValue(raw, 32);
+    return ethers.toBeHex(toBigInt(raw), 32);
+  };
+  const asU256 = (v) => toBigInt(v ?? "0");
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      [
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+      ],
+      [
+        asBytes32(pi.nullifier),
+        asBytes32(pi.inputCommitment),
+        asBytes32(pi.outputCommitmentSwap),
+        asBytes32(pi.outputCommitmentChange),
+        asBytes32(pi.merkleRoot),
+        asU256(pi.inputAssetID ?? 0),
+        asU256(pi.outputAssetIDSwap ?? 0),
+        asU256(pi.swapAmount ?? 0),
+        asU256(pi.minOutputAmountSwap ?? 0),
+      ]
+    )
+  );
 }
 
 function configuredTokenAllowlist() {
@@ -2585,6 +2634,7 @@ app.get("/health", (req, res) => {
       chainalysisApiConfigured: !!CHAINALYSIS_API_URL,
       encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
       localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
+      relayerSwapAttestationMode: RELAYER_SWAP_ATTESTATION_MODE,
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
     module7Hardening: {
@@ -2743,6 +2793,7 @@ app.get("/config", (req, res) => {
       chainalysisApiUrlSet: !!CHAINALYSIS_API_URL,
       encryptedEnvelopeRequired: RELAYER_REQUIRE_ENCRYPTED_ENVELOPE,
       localSnarkVerifyRequired: RELAYER_REQUIRE_LOCAL_SNARK_VERIFY,
+      relayerSwapAttestationMode: RELAYER_SWAP_ATTESTATION_MODE,
       feePolicy: "on_chain_oracle_floor_matches_ShieldedPool_shieldedWithdraw (see MODULE6-WITHDRAW.md)",
       endpoints: ["/withdraw/generate-proof", "/withdraw", "/withdraw/encrypted"],
     },
@@ -3091,7 +3142,7 @@ app.post("/intent", async (req, res) => {
   );
   intents.set(intentId, payload);
   saveIntent(db, intentId, payload.userAddress, payload);
-  res.json({ intentId, intent: payload, domain: INTENT_DOMAIN, types: INTENT_TYPES });
+  res.json({ intentId, intent: payload, domain: INTENT_DOMAIN, types: INTENT_TYPES, typesV2: INTENT_TYPES_V2 });
 });
 
 async function processSwapRequestBody(body) {
@@ -3111,6 +3162,7 @@ async function processSwapRequestBody(body) {
   let intentId = incomingIntentId || "";
   let intent = null;
   let ownerAddress = null;
+  const swapPublicInputHash = computeSwapPublicInputHash(pi);
 
   if (usingLegacyIntent) {
     intent = incomingIntent;
@@ -3190,13 +3242,41 @@ async function processSwapRequestBody(body) {
       nullifier: nullifierHex,
       deadline,
     };
+    if (zkAuthorization?.publicInputHash) {
+      if (String(zkAuthorization.publicInputHash).toLowerCase() !== String(swapPublicInputHash).toLowerCase()) {
+        const err = new Error("zkAuthorization.publicInputHash mismatch");
+        err.status = 400;
+        throw err;
+      }
+    }
+    if (zkAuthorization?.signature) {
+      if (!zkAuthorization?.userAddress) {
+        const err = new Error("zkAuthorization.userAddress is required with signature");
+        err.status = 400;
+        throw err;
+      }
+      const typedIntentV2 = {
+        user: ethers.getAddress(zkAuthorization.userAddress),
+        publicInputHash: swapPublicInputHash,
+        deadline: BigInt(deadline),
+        nonce: BigInt(nonce),
+        nullifier: nullifierHex,
+      };
+      const signerAddr = ethers.verifyTypedData(INTENT_DOMAIN, INTENT_TYPES_V2, typedIntentV2, zkAuthorization.signature);
+      if (signerAddr.toLowerCase() !== String(zkAuthorization.userAddress).toLowerCase()) {
+        const err = new Error("Invalid zkAuthorization signature");
+        err.status = 400;
+        throw err;
+      }
+      ownerAddress = ethers.getAddress(zkAuthorization.userAddress);
+      intent.userAddress = ownerAddress;
+    }
     intentId = incomingIntentId || ethers.keccak256(
       ethers.toUtf8Bytes(JSON.stringify({
+        publicInputHash: swapPublicInputHash,
         nullifier: intent.nullifier,
         deadline: intent.deadline,
         nonce: intent.nonce,
-        amountIn: intent.amountIn,
-        outputAssetID: intent.outputAssetID,
       }))
     );
   }
@@ -3215,20 +3295,22 @@ async function processSwapRequestBody(body) {
       throw e;
     }
   }
-  if (String(pi.outputAssetIDSwap) !== String(intent.outputAssetID) || String(pi.inputAssetID) !== String(intent.inputAssetID)) {
-    const err = new Error("Intent asset IDs do not match swap public inputs");
-    err.status = 400;
-    throw err;
-  }
-  if (toBigInt(pi.swapAmount || 0) !== toBigInt(intent.amountIn || 0)) {
-    const err = new Error("Intent amountIn must match swap publicInputs.swapAmount");
-    err.status = 400;
-    throw err;
-  }
-  if (toBigInt(pi.minOutputAmountSwap || 0) !== toBigInt(intent.minAmountOut || 0)) {
-    const err = new Error("Intent minAmountOut must match swap publicInputs.minOutputAmountSwap");
-    err.status = 400;
-    throw err;
+  if (usingLegacyIntent) {
+    if (String(pi.outputAssetIDSwap) !== String(intent.outputAssetID) || String(pi.inputAssetID) !== String(intent.inputAssetID)) {
+      const err = new Error("Intent asset IDs do not match swap public inputs");
+      err.status = 400;
+      throw err;
+    }
+    if (toBigInt(pi.swapAmount || 0) !== toBigInt(intent.amountIn || 0)) {
+      const err = new Error("Intent amountIn must match swap publicInputs.swapAmount");
+      err.status = 400;
+      throw err;
+    }
+    if (toBigInt(pi.minOutputAmountSwap || 0) !== toBigInt(intent.minAmountOut || 0)) {
+      const err = new Error("Intent minAmountOut must match swap publicInputs.minOutputAmountSwap");
+      err.status = 400;
+      throw err;
+    }
   }
   if (toBigInt(swapData?.swapParams?.minAmountOut || 0) !== toBigInt(intent.minAmountOut || 0)) {
     const err = new Error("Intent minAmountOut must match swapParams.minAmountOut");
@@ -3238,8 +3320,8 @@ async function processSwapRequestBody(body) {
   assertSwapRoutingConsistency(swapData);
   swapData.commitment = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "uint256", "uint256", "uint256", "uint256", "uint256"],
-      [intent.nullifier, intent.inputAssetID, intent.outputAssetID, intent.amountIn, intent.deadline, intent.nonce]
+      ["bytes32", "bytes32", "uint256", "uint256"],
+      [intent.nullifier, swapPublicInputHash, intent.deadline, intent.nonce]
     )
   );
   swapData.deadline = Number(intent.deadline);
@@ -4656,6 +4738,7 @@ async function submitSwap(swapData) {
   const proofHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(["bytes", "bytes", "bytes"], proofTuple)
   );
+  const swapPublicInputHash = computeSwapPublicInputHash(pi);
   const attestationChainId = Number(CHAIN_ID || 97);
   const attestationDomain = {
     name: "PhantomRelayerAttestation",
@@ -4678,7 +4761,18 @@ async function submitSwap(swapData) {
       { name: "nonce", type: "uint256" },
     ],
   };
-  const attestationValue = {
+  const attestationTypesHashFirst = {
+    RelayerSwapAttestationHashFirst: [
+      { name: "proofHash", type: "bytes32" },
+      { name: "publicInputHash", type: "bytes32" },
+      { name: "relayer", type: "address" },
+      { name: "pool", type: "address" },
+      { name: "chainId", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+    ],
+  };
+  const buildLegacyAttestationValue = () => ({
     proofHash,
     nullifier: toBytes32(pi.nullifier),
     inputAssetID: toU256(pi.inputAssetID),
@@ -4690,13 +4784,29 @@ async function submitSwap(swapData) {
     chainId: BigInt(attestationChainId),
     deadline: BigInt(attestationDeadline),
     nonce: attestationNonce,
-  };
-  const relayerAttestationSig = await signer.signTypedData(
-    attestationDomain,
-    attestationTypes,
-    attestationValue
-  );
-  const swapDataForContract = [
+  });
+  const buildHashFirstAttestationValue = () => ({
+    proofHash,
+    publicInputHash: swapPublicInputHash,
+    relayer: relayerAddr,
+    pool: SHIELDED_POOL_ADDRESS,
+    chainId: BigInt(attestationChainId),
+    deadline: BigInt(attestationDeadline),
+    nonce: attestationNonce,
+  });
+  async function signRelayerAttestation(mode) {
+    if (mode === "hash_first") {
+      return signer.signTypedData(attestationDomain, attestationTypesHashFirst, buildHashFirstAttestationValue());
+    }
+    return signer.signTypedData(attestationDomain, attestationTypes, buildLegacyAttestationValue());
+  }
+  const preferHashFirst =
+    RELAYER_SWAP_ATTESTATION_MODE === "hash_first" ||
+    RELAYER_SWAP_ATTESTATION_MODE === "hash_first_with_fallback";
+  const allowLegacyFallback = RELAYER_SWAP_ATTESTATION_MODE === "hash_first_with_fallback";
+  let relayerAttestationModeUsed = preferHashFirst ? "hash_first" : "legacy";
+  let relayerAttestationSig = await signRelayerAttestation(relayerAttestationModeUsed);
+  const buildSwapDataForContract = (attestationSig) => [
     proofTuple,
     publicInputsTuple,
     swapParamsTuple,
@@ -4705,10 +4815,11 @@ async function submitSwap(swapData) {
     (swapData.commitment && swapData.commitment !== ethers.ZeroHash) ? swapData.commitment : ethers.ZeroHash,
     Number(swapData.deadline || 0),
     toU256(swapData.nonce || 0),
-    relayerAttestationSig,
+    attestationSig,
     BigInt(attestationDeadline),
     attestationNonce
   ];
+  let swapDataForContract = buildSwapDataForContract(relayerAttestationSig);
 
   if (DEV_BYPASS_VALIDATORS) {
     await submitSelfThresholdValidation(signer, swapData.proof, publicSignals, "swap bypass");
@@ -4734,10 +4845,24 @@ async function submitSwap(swapData) {
     try {
       await contract.shieldedSwapJoinSplit.staticCall(swapDataForContract);
     } catch (simErr) {
-      logRelayerOnchainFailure("shieldedSwapJoinSplit.staticCall", simErr);
-      const err = new Error(`swap_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
-      err.status = 400;
-      throw err;
+      const simRaw = `${simErr?.reason || ""} ${simErr?.message || ""} ${simErr?.shortMessage || ""}`.toLowerCase();
+      const looksLikeAttestationFailure =
+        simRaw.includes("poolerr(48)") ||
+        simRaw.includes("poolerr(49)") ||
+        simRaw.includes("invalid relayer") ||
+        simRaw.includes("attestation");
+      if (relayerAttestationModeUsed === "hash_first" && allowLegacyFallback && looksLikeAttestationFailure) {
+        console.warn("[swap] hash-first relayer attestation not accepted by pool; retrying with legacy attestation mode");
+        relayerAttestationModeUsed = "legacy";
+        relayerAttestationSig = await signRelayerAttestation("legacy");
+        swapDataForContract = buildSwapDataForContract(relayerAttestationSig);
+        await contract.shieldedSwapJoinSplit.staticCall(swapDataForContract);
+      } else {
+        logRelayerOnchainFailure("shieldedSwapJoinSplit.staticCall", simErr);
+        const err = new Error(`swap_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
+        err.status = 400;
+        throw err;
+      }
     }
     tx = await contract.shieldedSwapJoinSplit(swapDataForContract);
   } catch (e) {
@@ -4770,7 +4895,8 @@ async function submitSwap(swapData) {
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
     validatorSignatures: validationResult.signatures.length,
-    relayer: relayerAddr
+    relayer: relayerAddr,
+    relayerAttestationMode: relayerAttestationModeUsed
   };
 }
 

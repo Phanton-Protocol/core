@@ -28,7 +28,12 @@ class ValidatorNetwork {
     results.forEach((result, i) => {
       const url = this.validators[i];
       if (result.status === 'fulfilled' && result.value) {
-        console.log(`🧾 Validator response from ${url}:`, result.value);
+        console.log(`🧾 Validator response from ${url}:`, {
+          valid: result.value.valid,
+          hasSignature: !!result.value.signature,
+          votingPower: result.value.votingPower,
+          aggregated: !!result.value.aggregated,
+        });
       } else if (result.status === 'fulfilled') {
         console.log(`🧾 Validator response from ${url}: null`);
       } else {
