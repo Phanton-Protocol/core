@@ -152,6 +152,35 @@ function requestJson(method, urlStr, body, headers = {}) {
   });
 }
 
+async function encryptRelayEnvelope(apiUrl, payload) {
+  const keyResp = await requestJson("GET", `${apiUrl}/relayer/encryption-key`);
+  if (keyResp.status !== 200 || !keyResp.json?.publicKeyPem) {
+    throw new Error(`relayer encryption key fetch failed: ${keyResp.status} ${keyResp.raw || ""}`);
+  }
+  const publicKeyPem = String(keyResp.json.publicKeyPem);
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", aesKey, iv);
+  const plaintext = Buffer.from(JSON.stringify(payload), "utf8");
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const encryptedKey = crypto.publicEncrypt(
+    {
+      key: publicKeyPem,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: "sha256",
+    },
+    aesKey
+  );
+  return {
+    keyId: String(keyResp.json.keyId || ""),
+    encryptedKey: encryptedKey.toString("base64"),
+    iv: iv.toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+    authTag: authTag.toString("base64"),
+  };
+}
+
 function loadMockFingerprints() {
   const fpPath = path.join(__dirname, "..", "..", "..", "config", "module7-mock-bytecode-hashes.json");
   if (!fs.existsSync(fpPath)) return null;
@@ -263,6 +292,7 @@ async function main() {
   const cfg = await requestJson("GET", `${API_URL}/config`);
   if (cfg.status !== 200) throw new Error(`config failed: ${cfg.status}`);
   const chainId = Number(cfg.json.chainId || 97);
+  const encryptedEnvelopeRequired = !!cfg.json?.module6Withdraw?.encryptedEnvelopeRequired;
   const pool = cfg.json.addresses?.shieldedPool;
   const rpcUrl = String(cfg.json.rpcUrl || process.env.RPC_URL || "").trim();
   if (!pool) throw new Error("config.addresses.shieldedPool missing");
@@ -542,7 +572,10 @@ async function main() {
     encryptedPayload: "0x",
   };
 
-  const swapOut = await requestJson("POST", `${API_URL}/swap`, { intentId, intent, intentSig, swapData });
+  const swapPayload = { intentId, intent, intentSig, swapData };
+  const swapOut = encryptedEnvelopeRequired
+    ? await requestJson("POST", `${API_URL}/swap/encrypted`, { envelope: await encryptRelayEnvelope(API_URL, swapPayload) })
+    : await requestJson("POST", `${API_URL}/swap`, swapPayload);
   if (swapOut.status !== 200) throw new Error(`swap ${swapOut.status} ${swapOut.raw}`);
   console.log("[e2e] swap OK tx", swapOut.json?.txHash || swapOut.json);
   const afterSwapNotes = await fetchUsableNotes(API_URL, wallet.address);
@@ -630,13 +663,18 @@ async function main() {
     },
     encryptedPayload: "0x",
   };
-  const wdOut = await requestJson("POST", `${API_URL}/withdraw`, { withdrawData });
+  const withdrawPayload = { withdrawData };
+  const wdOut = encryptedEnvelopeRequired
+    ? await requestJson("POST", `${API_URL}/withdraw/encrypted`, { envelope: await encryptRelayEnvelope(API_URL, withdrawPayload) })
+    : await requestJson("POST", `${API_URL}/withdraw`, withdrawPayload);
   if (wdOut.status !== 200) throw new Error(`withdraw ${wdOut.status} ${wdOut.raw}`);
   console.log("[e2e] withdraw OK tx", wdOut.json?.txHash || wdOut.json);
   const afterWithdrawNotes = await fetchUsableNotes(API_URL, wallet.address);
   assertNotesPinnedToFrozenConfig(afterWithdrawNotes, cfg.json);
 
-  const secondWd = await requestJson("POST", `${API_URL}/withdraw`, { withdrawData });
+  const secondWd = encryptedEnvelopeRequired
+    ? await requestJson("POST", `${API_URL}/withdraw/encrypted`, { envelope: await encryptRelayEnvelope(API_URL, withdrawPayload) })
+    : await requestJson("POST", `${API_URL}/withdraw`, withdrawPayload);
   if (secondWd.status === 200) {
     throw new Error("second withdraw negative test failed: second withdraw unexpectedly succeeded");
   }

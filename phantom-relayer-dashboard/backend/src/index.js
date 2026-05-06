@@ -273,7 +273,7 @@ const FALLBACK_ASSETS_BY_CHAIN = {
   97: [
     { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
     { assetId: 1, symbol: "BUSD", decimals: 18, address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x798562974aDAC3a11768D0739832c1c9Cf5EE590" },
+    { assetId: 2, symbol: "USDT", decimals: 18, address: "0x66E972502A34A625828C544a1914E8D8cc2A9dE5" },
   ],
   56: [
     { assetId: 0, symbol: "WBNB", decimals: 18, address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" },
@@ -284,7 +284,7 @@ const FALLBACK_ASSETS_BY_CHAIN = {
 const REQUIRED_BSC_TESTNET_ASSETS = Object.freeze([
   { assetId: 0, symbol: "WBNB", address: "0xae13d989dac2f0debff460ac112a837c89baa7cd" },
   { assetId: 1, symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },
-  { assetId: 2, symbol: "USDT", address: "0x798562974aDAC3a11768D0739832c1c9Cf5EE590" },
+  { assetId: 2, symbol: "USDT", address: "0x66E972502A34A625828C544a1914E8D8cc2A9dE5" },
 ]);
 const CHAINALYSIS_FAIL_CLOSED = process.env.CHAINALYSIS_FAIL_CLOSED !== "false";
 const RELAYER_REQUIRE_ENCRYPTED_ENVELOPE = process.env.RELAYER_REQUIRE_ENCRYPTED_ENVELOPE !== "false";

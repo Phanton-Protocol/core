@@ -269,6 +269,15 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         gasReserve = 0;
     }
 
+    /**
+     * @notice Owner reset for wallet note pointer metadata.
+     * @dev Does not modify commitments/nullifiers; only clears convenience per-wallet pointers.
+     */
+    function resetUserNote(address user) external onlyOwner {
+        userNotes[user] = bytes32(0);
+        userNoteAssetID[user] = 0;
+    }
+
     // ============ Deposit Functions ============
     function deposit(
         address token,
@@ -753,14 +762,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     function _updateUserNoteOnDeposit(address depositor, bytes32 commitment, uint256 assetID) internal {
-        bytes32 existing = userNotes[depositor];
-        if (existing == bytes32(0)) {
-            userNotes[depositor] = commitment;
-            userNoteAssetID[depositor] = assetID;
-        } else {
-            userNotes[depositor] = commitment;
-            require(userNoteAssetID[depositor] == assetID, "SP: asset mismatch");
-        }
+        userNotes[depositor] = commitment;
+        userNoteAssetID[depositor] = assetID;
     }
 
     function _checkCompliance(address depositor) internal virtual {

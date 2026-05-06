@@ -342,7 +342,8 @@ async function generateSwapProof(swapData) {
 
   const inputAmountWeiBn = toBigInt(inputNote.amount);
   let resolvedProtocolFeeStr = String(protocolFee ?? "0");
-  if (process.env.RPC_URL && process.env.SHIELDED_POOL_ADDRESS) {
+  const useChainProtocolFee = process.env.PHANTOM_USE_CHAIN_PROTOCOL_FEE !== "false";
+  if (useChainProtocolFee && process.env.RPC_URL && process.env.SHIELDED_POOL_ADDRESS) {
     try {
       const total = await getJoinSplitTotalProtocolFeeWei(Number(inputNote.assetID), inputAmountWeiBn);
       resolvedProtocolFeeStr = total.toString();

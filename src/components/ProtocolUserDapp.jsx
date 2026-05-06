@@ -300,7 +300,7 @@ const DEPOSIT_TYPES = {
 };
 
 /** Must match `ethers.getAddress` / pool config (EIP-55). Wrong checksum breaks quotes in the relayer. */
-const USDT_BSC_TESTNET = "0x7eF95A0FE8A5f4f9C1824fbF6656e2f95fa6Bf13";
+const USDT_BSC_TESTNET = "0x66E972502A34A625828C544a1914E8D8cc2A9dE5";
 const DEFAULT_TOKEN_LIST = [
   { symbol: "BNB", address: ethers.ZeroAddress },
   { symbol: "BUSD", address: "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7" },

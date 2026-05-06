@@ -2,13 +2,13 @@
   "version": "prod-frozen-v2",
   "chainId": 97,
   "addresses": {
-    "shieldedPool": "0x84220888fe10ED7D92601cd7f0A1B1348b3a43E2",
-    "feeOracle": "0xf1f5F4E17De02f8F8C98B54779f4B1fa2343bCDe",
-    "swapAdaptor": "0x4e018ED719b2eD9d91Ed71D1A42244fc38D38B44",
-    "relayerStaking": "0x113A09348B2Dcd16F524317661ca496368281dAf",
-    "depositHandler": "0x9a328Ae4a837E6cAa5b3C5fB57276FD816936C60",
-    "matchingHandler": "0x52DF3e0aa1091885639141Ec33643910a97f35FF",
-    "protocolToken": "0xF8F0DBc7707A1A68f86F19D2D6fb7c580981bC72",
+    "shieldedPool": "0xb911Cc9b468B32C6e97D3bcCB1529AB75e85fCFC",
+    "feeOracle": "0x4e09849d5B0cE2D651c42a1DC5394EF789Ba7754",
+    "swapAdaptor": "0xd95448AFcc53e58dAfd698D467fC254611D95cB4",
+    "relayerStaking": "0x71e354D927d435e8439258E9C6326547C128073A",
+    "depositHandler": "0x69a051bC92473e923d0713986A13b83BF9362A3d",
+    "matchingHandler": "0xEc191feF011Da2e7ccd61cE8c935217Ca52004b4",
+    "protocolToken": "0x96798510cb2079e25cc9f1ec3e525eC71978fa47",
     "fheCoprocessor": "0x0000000000000000000000000000000000000000"
   },
   "assets": [
@@ -28,7 +28,7 @@
       "assetId": 2,
       "symbol": "USDT",
       "decimals": 18,
-      "address": "0x798562974aDAC3a11768D0739832c1c9Cf5EE590"
+      "address": "0x66E972502A34A625828C544a1914E8D8cc2A9dE5"
     }
   ]
 }
