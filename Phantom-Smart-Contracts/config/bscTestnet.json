@@ -2,15 +2,18 @@
   "chainId": 97,
   "rpcUrl": "https://data-seed-prebsc-1-s1.binance.org:8545",
   "addresses": {
-    "shieldedPool": "0xb911Cc9b468B32C6e97D3bcCB1529AB75e85fCFC",
-    "swapAdaptor": "0xd95448AFcc53e58dAfd698D467fC254611D95cB4",
+    "shieldedPool": "0x77C4BadA4306e4b258980f0f0D79Aec814509FDf",
+    "swapAdaptor": "0x101D154a8851c4945401f5B498763c456748780a",
     "noteStorage": "",
-    "feeOracle": "0x4e09849d5B0cE2D651c42a1DC5394EF789Ba7754",
-    "relayerRegistry": "0x71e354D927d435e8439258E9C6326547C128073A",
-    "relayerStaking": "0x71e354D927d435e8439258E9C6326547C128073A",
-    "depositHandler": "0x69a051bC92473e923d0713986A13b83BF9362A3d",
-    "joinSplitVerifier": "0x15E4Fc6d7590aB33531C1f9a2791400f5B50cf2e",
-    "thresholdVerifier": "0x15E4Fc6d7590aB33531C1f9a2791400f5B50cf2e"
+    "feeOracle": "0x70c25C882C899f9ED3D7c81083cC75B5E8152672",
+    "relayerRegistry": "0x390eBcCF884253fD779C4D75f23c23400C46aA58",
+    "relayerStaking": "0x390eBcCF884253fD779C4D75f23c23400C46aA58",
+    "depositHandler": "0x2c46bb897DB2Ecd3AdD6ab27868f3b88cFf638ec",
+    "swapHandler": "0xdcBBb3fE3055D5D49086aAcEE14CbB45b21E13bB",
+    "withdrawHandler": "0x857BB5DDa87B4cf9E634309b91A163546e2268CD",
+    "joinSplitVerifier": "0x61ebea37c0762adB97C1ff0249D79A5512D3A0BD",
+    "thresholdVerifier": "0x61ebea37c0762adB97C1ff0249D79A5512D3A0BD",
+    "protocolToken": "0xcAeBD928E27E3B7Aa802a1bF44921c9B80A20FaA"
   },
   "assets": [
     { "assetId": 0, "symbol": "WBNB", "decimals": 18, "address": "0xae13d989dac2f0debff460ac112a837c89baa7cd" },

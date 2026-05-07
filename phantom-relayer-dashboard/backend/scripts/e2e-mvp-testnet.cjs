@@ -563,6 +563,20 @@ async function main() {
     proof: gen.json.proof,
     proofSnark: gen.json.snarkProof,
     publicInputs: gen.json.publicInputs,
+    noteHints: {
+      swap: {
+        assetID: outputAssetId(tokenOut),
+        amount: outAmt,
+        blindingFactor: swapBlinding,
+        ownerPublicKey: notePayload.ownerPublicKey,
+      },
+      change: {
+        assetID: inputAssetId,
+        amount: String(changePreviewBn),
+        blindingFactor: changeBlinding,
+        ownerPublicKey: notePayload.ownerPublicKey,
+      },
+    },
     swapParams: {
       tokenIn: inputAssetId === 0 ? ethers.ZeroAddress : tokenIn,
       tokenOut: String(tokenOut).toLowerCase() === ethers.ZeroAddress.toLowerCase() ? wbnb : tokenOut,
@@ -616,7 +630,7 @@ async function main() {
   const nullifierChangeHex = `0x${nullifierChange.toString(16).padStart(64, "0")}`;
 
   const withdrawPayout = String(process.env.E2E_WITHDRAW_PAYOUT_WEI || "2500000000000000");
-  const protocolFeeW = String(process.env.E2E_PROTOCOL_FEE_WEI || "800000000000000");
+  const protocolFeeW = String(process.env.E2E_PROTOCOL_FEE_WEI || "0");
   const gasRefundW = String(process.env.E2E_GAS_REFUND_WEI || "400000000000000");
   const changeWei = BigInt(changeAmountStr) - BigInt(withdrawPayout) - BigInt(protocolFeeW) - BigInt(gasRefundW);
   if (changeWei <= 0n) {
@@ -683,7 +697,7 @@ async function main() {
     throw new Error("second withdraw negative test failed: second withdraw unexpectedly succeeded");
   }
   const secondErr = String(secondWd.json?.error || secondWd.text || "");
-  if (!/spent|nullifier|already/i.test(secondErr)) {
+  if (!/spent|nullifier|already|sp:nf/i.test(secondErr)) {
     throw new Error(`second withdraw negative test failed: unexpected error ${secondErr}`);
   }
   console.log("[e2e] second withdraw negative test OK");

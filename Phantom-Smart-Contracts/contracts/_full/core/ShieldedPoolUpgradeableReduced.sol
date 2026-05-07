@@ -17,7 +17,6 @@ import "../types/Types.sol";
 import "../libraries/MerkleTree.sol";
 import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/JoinSplitPublicInputValidation.sol";
-import "../libraries/DexSwapFee.sol";
 
 /**
  * @title ShieldedPoolUpgradeableReduced
@@ -484,16 +483,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         JoinSplitPublicInputValidation.requireDexJoinSplitShape(inputs);
 
         if (!thresholdVerifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
-        require(verifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs)), "SP:PF");
+        if (!verifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
 
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
         require(inputToken != address(0) || inputs.inputAssetID == 0, "SP:A1");
 
-        feeOracle.requireFreshPrice(inputToken);
-        uint256 protocolFeePart = feeOracle.calculateFee(inputToken, inputs.inputAmount);
-        uint256 swapFeePart = DexSwapFee.swapFee(inputs.inputAmount);
-        uint256 totalProtocolFee = protocolFeePart + swapFeePart;
-        require(inputs.protocolFee == totalProtocolFee, "SP:F1");
+        uint256 totalProtocolFee = inputs.protocolFee;
         require(inputs.gasRefund <= inputs.inputAmount, "SP:F2");
 
         // Ensure output asset IDs are registered for later withdrawals

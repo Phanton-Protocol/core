@@ -70,15 +70,15 @@ export const blogPosts = [
     intro:
       'The future is here: Web2 companies are beginning to adopt crypto while remaining private. Most people associate blockchain transactions with cryptocurrency traders monitoring price charts late at night. They do not picture a customer buying a hoodie. This gap in imagination has become MJ Apparel’s competitive advantage because the brand recognized that privacy was never a Web3 problem to begin with. Phantom Protocol’s onboarding of MJ Apparel proves that confidential, frictionless commerce now belongs to any business bold enough to claim it first.',
     introFigure: {
-      src: '/blog/mj-apparel/hero-screenshot.svg',
-      alt: 'Phantom Protocol and MJ Apparel partnership artwork',
+      src: '/blog/mj-apparel/phantomprotocal-banner-01.svg',
+      alt: 'Phantom Protocol banner artwork',
       wide: true,
     },
     sections: [
       {
         heading: 'MJ Apparel at a glance',
-        figureSrc: '/blog/mj-apparel/rfy00544-apparel.svg',
-        figureAlt: 'MJ Apparel product and brand imagery',
+        figureSrc: '/blog/mj-apparel/mpapparels-post.svg',
+        figureAlt: 'MJ Apparel post artwork',
         figureMaxWidth: 596,
         body: [
           'MJ Apparel is a premier U.S.-based apparel manufacturer and wholesale supplier specializing in high-quality heavyweight fleece and premium “blanks.” With a legacy in the textile industry reaching back to 1976, the company has built a reputation for superior craftsmanship and fabric integrity. Beyond supplying basic apparel, MJ Apparel serves as a foundational partner for streetwear brands and corporate labels. Their move away from standard, “boxy” promotional wear toward modern, retail-ready fits allows their partners to launch high-end merchandise that rivals boutique fashion standards.',
@@ -105,9 +105,6 @@ export const blogPosts = [
       },
       {
         heading: 'Speed is not a perk; it is the product',
-        figureSrc: '/blog/mj-apparel/dsc09915-apparel.svg',
-        figureAlt: 'MJ Apparel imagery alongside Phantom commerce narrative',
-        figureMaxWidth: 596,
         body: [
           'A persistent myth in digital payments holds that privacy comes at the cost of performance. Phantom Protocol dismantles that assumption because blockchain settlement finality on BN254 curve–optimized networks operates in seconds rather than the two-to-five business days that characterize traditional cross-border wires. For a retail brand like MJ Apparel processing international orders, this difference is not marginal. It represents an architectural shift in how revenue moves.',
           'Phantom’s 95% transaction success rate directly reflects this reliability. The protocol was not built as a proof-of-concept for cryptography researchers. Instead, it was built to satisfy the operational demands of institutional trading desks, global banking infrastructure, and enterprise payroll. Because it now extends that same infrastructure to consumer-facing commerce, MJ Apparel is not a crypto experiment. It is a brand that recognized institutional-grade rails and chose to run on them.',
@@ -122,9 +119,6 @@ export const blogPosts = [
       },
       {
         heading: 'Key benefits from Phantom’s architecture',
-        figureSrc: '/blog/mj-apparel/rfy00580-apparel.svg',
-        figureAlt: 'MJ Apparel collection imagery',
-        figureMaxWidth: 596,
         body: [
           'Phantom’s design translates into concrete advantages for a brand serving both traditional and on-chain buyers.',
         ],

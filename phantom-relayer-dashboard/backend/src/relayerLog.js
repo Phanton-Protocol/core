@@ -7,6 +7,8 @@ const { pushError } = require("./relayerActivityBuffer");
 
 const poolIface = new ethers.Interface([
   "error PoolErr(uint8 code)",
+  "error SP()",
+  "error Panic(uint256)",
 ]);
 
 function decodeRevertData(data) {
@@ -15,6 +17,12 @@ function decodeRevertData(data) {
     const parsed = poolIface.parseError(data);
     if (parsed?.name === "PoolErr") {
       return `PoolErr(${(parsed.args[0]).toString()})`;
+    }
+    if (parsed?.name === "SP") {
+      return "SP()";
+    }
+    if (parsed?.name === "Panic") {
+      return `Panic(${(parsed.args[0]).toString()})`;
     }
   } catch (_) {
     /* not PoolErr */
@@ -28,7 +36,7 @@ function decodeRevertData(data) {
   } catch (_) {
     /* ignore */
   }
-  return `raw:${data.slice(0, 42)}…`;
+  return `raw:${data}`;
 }
 
 /**

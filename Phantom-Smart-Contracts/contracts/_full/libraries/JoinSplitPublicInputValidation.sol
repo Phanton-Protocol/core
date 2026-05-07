@@ -2,6 +2,7 @@
 pragma solidity ^0.8.21;
 
 import "../types/Types.sol";
+import "./MiMC7.sol";
 
 /**
  * @title JoinSplitPublicInputValidation
@@ -11,6 +12,8 @@ import "../types/Types.sol";
  *      `zWd` zero withdraw leg. Pool DEX binding: `SP:slp` slippage, `SP:out` exact output vs public `outputAmountSwap`.
  */
 library JoinSplitPublicInputValidation {
+    uint256 private constant SNARK_SCALAR_FIELD =
+        21888242871839275222246405745257275088548364400416034343698204186575808495617;
     function merklePathToBytes32(uint256[10] memory arr) internal pure returns (bytes32[10] memory result) {
         unchecked {
             for (uint256 i = 0; i < 10; ++i) {
@@ -21,16 +24,28 @@ library JoinSplitPublicInputValidation {
 
     /// @dev Order matches `JoinSplitVerifier` / circuit public signals.
     function joinSplitInputsToArray(JoinSplitPublicInputs memory inputs) internal pure returns (uint256[] memory arr) {
-        arr = new uint256[](9);
-        arr[0] = uint256(inputs.nullifier);
-        arr[1] = uint256(inputs.inputCommitment);
-        arr[2] = uint256(inputs.outputCommitmentSwap);
-        arr[3] = uint256(inputs.outputCommitmentChange);
-        arr[4] = uint256(inputs.merkleRoot);
-        arr[5] = inputs.outputAmountSwap;
-        arr[6] = inputs.minOutputAmountSwap;
-        arr[7] = inputs.protocolFee;
-        arr[8] = inputs.gasRefund;
+        uint256 withdrawMode = inputs.outputCommitmentSwap == bytes32(0) ? 1 : 0;
+        uint256 r0 = MiMC7.mimc7(inputs.inputAssetID, inputs.outputAssetIDSwap);
+        uint256 r1 = MiMC7.mimc7(r0, inputs.outputAssetIDChange);
+        uint256 r2 = MiMC7.mimc7(r1, inputs.inputAmount);
+        uint256 r3 = MiMC7.mimc7(r2, inputs.swapAmount);
+        uint256 r4 = MiMC7.mimc7(r3, inputs.changeAmount);
+        uint256 r5 = MiMC7.mimc7(r4, inputs.outputAmountSwap);
+        uint256 r6 = MiMC7.mimc7(r5, inputs.minOutputAmountSwap);
+        uint256 r7 = MiMC7.mimc7(r6, inputs.protocolFee);
+        uint256 r8 = MiMC7.mimc7(r7, inputs.gasRefund);
+
+        arr = new uint256[](10);
+        arr[0] = uint256(inputs.nullifier) % SNARK_SCALAR_FIELD;
+        arr[1] = uint256(inputs.inputCommitment) % SNARK_SCALAR_FIELD;
+        arr[2] = uint256(inputs.outputCommitmentSwap) % SNARK_SCALAR_FIELD;
+        arr[3] = uint256(inputs.outputCommitmentChange) % SNARK_SCALAR_FIELD;
+        arr[4] = uint256(inputs.merkleRoot) % SNARK_SCALAR_FIELD;
+        arr[5] = inputs.outputAmountSwap % SNARK_SCALAR_FIELD;
+        arr[6] = inputs.minOutputAmountSwap % SNARK_SCALAR_FIELD;
+        arr[7] = inputs.protocolFee % SNARK_SCALAR_FIELD;
+        arr[8] = inputs.gasRefund % SNARK_SCALAR_FIELD;
+        arr[9] = MiMC7.mimc7(r8, withdrawMode) % SNARK_SCALAR_FIELD;
     }
 
     function requireCalldataConservation(JoinSplitPublicInputs memory inputs) internal pure {

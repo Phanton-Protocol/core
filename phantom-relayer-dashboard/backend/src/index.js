@@ -1318,6 +1318,7 @@ const swapSchema = z.object({
   }).optional(),
   swapData: z.object({
     proof: proofShape,
+    proofSnark: z.any().optional(),
     publicInputs: z.any(),
     swapParams: z.any(),
     relayer: z.string().optional(),
@@ -1417,6 +1418,7 @@ const fetchMerkleProofFromChain = async (commitment) => {
 const withdrawSchema = z.object({
   withdrawData: z.object({
     proof: proofShape,
+    proofSnark: z.any().optional(),
     publicInputs: z.any(),
     relayer: z.string().optional(),
     recipient: z.string().optional(),
@@ -2041,6 +2043,17 @@ function buildCommittedSwapParams(swapData) {
     }
   } else {
     path = "0x";
+  }
+  if (path === "0x") {
+    const inIsNative = Number(pi.inputAssetID) === 0;
+    const outIsNative = Number(pi.outputAssetIDSwap) === 0;
+    if (!inIsNative && !outIsNative && String(tokenIn).toLowerCase() !== String(tokenOut).toLowerCase()) {
+      const wnative = canonicalWrappedNative(getRuntimeConfig().chainId);
+      path = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address[]"],
+        [[tokenIn, wnative, tokenOut]]
+      );
+    }
   }
   return {
     tokenIn: Number(pi.inputAssetID) === 0 ? ethers.ZeroAddress : tokenIn,
@@ -3053,6 +3066,17 @@ app.post("/quote", async (req, res) => {
         sqrtPriceLimitX96: 0,
         path: req.body?.path || "0x"
       };
+      if (swapParams.path === "0x") {
+        const inIsNative = String(swapParams.tokenIn).toLowerCase() === ethers.ZeroAddress.toLowerCase();
+        const outIsNative = String(swapParams.tokenOut).toLowerCase() === ethers.ZeroAddress.toLowerCase();
+        if (!inIsNative && !outIsNative && String(swapParams.tokenIn).toLowerCase() !== String(swapParams.tokenOut).toLowerCase()) {
+          const wnative = canonicalWrappedNative(CHAIN_ID);
+          swapParams.path = ethers.AbiCoder.defaultAbiCoder().encode(
+            ["address[]"],
+            [[swapParams.tokenIn, wnative, swapParams.tokenOut]]
+          );
+        }
+      }
       const outAmount = BigInt((await adaptor.getExpectedOutput(swapParams)).toString());
       const minOut = (outAmount * BigInt(10000 - slippageBps)) / 10000n;
       const payload = {
@@ -3610,10 +3634,13 @@ app.get("/relayer/encryption-key", (req, res) => {
   });
 });
 
-app.get("/verification-key", (req, res) => {
-  const vkPath = path.join(__dirname, "..", "..", "circuits", "verification_key.json");
-  if (!fs.existsSync(vkPath)) return res.status(404).json({ error: "Verification key not found" });
-  res.json(JSON.parse(fs.readFileSync(vkPath, "utf8")));
+app.get("/verification-key", async (req, res) => {
+  try {
+    const vk = await getLocalVerificationKey();
+    res.json(vk);
+  } catch (err) {
+    res.status(404).json({ error: "Verification key not found", message: err?.message || String(err) });
+  }
 });
 
 async function getStakingContract(provider) {
@@ -4300,8 +4327,19 @@ app.post("/swap/generate-proof", async (req, res) => {
   }
   try {
     const result = await generateSwapProof(swapData);
+    // #region agent log
+    debugIngest("index.js:/swap/generate-proof", "generate-proof signals cross-check", {
+      generatedSignalsLen: Array.isArray(result.publicSignals) ? result.publicSignals.length : -1,
+      rebuiltSignalsLen: Array.isArray(buildJoinSplitPublicSignals(result.publicInputs || {})) ? buildJoinSplitPublicSignals(result.publicInputs || {}).length : -1,
+      generatedFirst: Array.isArray(result.publicSignals) ? String(result.publicSignals[0] || "") : "",
+      rebuiltFirst: String((buildJoinSplitPublicSignals(result.publicInputs || {}) || [])[0] || ""),
+      generatedLast: Array.isArray(result.publicSignals) ? String(result.publicSignals[result.publicSignals.length - 1] || "") : "",
+      rebuiltLast: String((buildJoinSplitPublicSignals(result.publicInputs || {}) || []).slice(-1)[0] || ""),
+    }, "pre-fix", "H2");
+    // #endregion
     res.json({
       proof: result.proof,
+      snarkProof: result.snarkProof,
       publicSignals: result.publicSignals,
       publicInputs: result.publicInputs,
       generationTime: result.generationTime
@@ -4345,6 +4383,7 @@ app.post("/withdraw/generate-proof", async (req, res) => {
     const result = await generateWithdrawProof(parsed.data);
     return res.json({
       proof: result.proof,
+      snarkProof: result.snarkProof,
       publicSignals: result.publicSignals,
       publicInputs: result.publicInputs,
       generationTime: result.generationTime,
@@ -4466,6 +4505,21 @@ const encodeGroth16Proof = (proof) => {
 
 const RELAYER_REQUIRE_LOCAL_SNARK_VERIFY = process.env.RELAYER_REQUIRE_LOCAL_SNARK_VERIFY !== "false";
 let localVerificationKeyCache = null;
+let localVerificationKeyPathCache = null;
+function resolveVerificationKeyPath() {
+  if (localVerificationKeyPathCache) return localVerificationKeyPathCache;
+  const candidates = [
+    path.join(__dirname, "..", "..", "..", "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "verification_key.json"),
+    path.join(__dirname, "..", "..", "circuits", "verification_key.json"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      localVerificationKeyPathCache = p;
+      return p;
+    }
+  }
+  return path.join(__dirname, "..", "..", "circuits", "verification_key.json");
+}
 function normalizeGroth16ProofForSnarkjs(proof) {
   const a = proof?.a || proof?.pi_a;
   const b = proof?.b || proof?.pi_b;
@@ -4507,18 +4561,34 @@ function normalizeGroth16ProofForSnarkjs(proof) {
     curve: "bn128",
   };
 }
-function getLocalVerificationKey() {
+function resolveProverZkeyPath() {
+  const candidates = [
+    process.env.PROVER_ZKEY,
+    path.join(__dirname, "..", "..", "..", "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "circuit_final.zkey"),
+    path.join(__dirname, "..", "..", "circuits", "joinsplit_public9_final.zkey"),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+async function getLocalVerificationKey() {
   if (localVerificationKeyCache) return localVerificationKeyCache;
-  const vkPath = path.join(__dirname, "..", "..", "circuits", "verification_key.json");
+  const zkeyPath = resolveProverZkeyPath();
+  if (zkeyPath) {
+    localVerificationKeyCache = await snarkjs.zKey.exportVerificationKey(zkeyPath);
+    return localVerificationKeyCache;
+  }
+  const vkPath = resolveVerificationKeyPath();
   if (!fs.existsSync(vkPath)) {
-    throw new Error("verification_key.json not found for local relayer SNARK verification");
+    throw new Error("verification_key.json not found for local relayer SNARK verification (and no zkey found)");
   }
   localVerificationKeyCache = JSON.parse(fs.readFileSync(vkPath, "utf8"));
   return localVerificationKeyCache;
 }
 async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
   if (!RELAYER_REQUIRE_LOCAL_SNARK_VERIFY) return;
-  const vk = getLocalVerificationKey();
+  const vk = await getLocalVerificationKey();
   const normalized = normalizeGroth16ProofForSnarkjs(proof);
   debugIngest("index.js:assertRelayerLocalSnarkVerify", "local verify start", {
     label,
@@ -4569,7 +4639,7 @@ async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
       );
       const encoded = encodeGroth16Proof(proof);
       const okStatic = await verifier.verifyProof(
-        { a: encoded.a, b: encoded.b, c: encoded.c },
+        [encoded.a, encoded.b, encoded.c],
         publicSignals.map((x) => toBigInt(x))
       );
       debugIngest("index.js:assertRelayerLocalSnarkVerify", "verifier staticcall result", {
@@ -4838,7 +4908,7 @@ async function submitSwap(swapData) {
   const signer = new ethers.Wallet(RELAYER_PRIVATE_KEY, provider);
   const abi = [
     "function commitSwap(bytes32 commitmentHash, uint256 deadline) external",
-    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256)) external"
+    "function shieldedSwapJoinSplit(((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32)) external"
   ];
   const contract = new ethers.Contract(SHIELDED_POOL_ADDRESS, abi, signer);
 
@@ -4978,7 +5048,8 @@ async function submitSwap(swapData) {
     toU256(swapData.nonce || 0),
     attestationSig,
     BigInt(attestationDeadline),
-    attestationNonce
+    attestationNonce,
+    (swapData.proofContextHash && swapData.proofContextHash !== ethers.ZeroHash) ? swapData.proofContextHash : ethers.ZeroHash
   ];
   let swapDataForContract = buildSwapDataForContract(relayerAttestationSig);
 
@@ -4990,6 +5061,45 @@ async function submitSwap(swapData) {
 
   let tx;
   try {
+    // #region agent log
+    try {
+      const probeProvider = new ethers.JsonRpcProvider(RPC_URL);
+      const poolProbe = new ethers.Contract(
+        SHIELDED_POOL_ADDRESS,
+        ["function verifier() view returns (address)", "function thresholdVerifier() view returns (address)"],
+        probeProvider
+      );
+      const verifierAddr = await poolProbe.verifier();
+      const thresholdAddr = await poolProbe.thresholdVerifier();
+      const verifierProbe = new ethers.Contract(
+        verifierAddr,
+        ["function verifyProof((bytes,bytes,bytes) proof, uint256[] publicInputs) view returns (bool)"],
+        probeProvider
+      );
+      const proofForProbe = encodeGroth16Proof(swapData.proof);
+      const probeInputs = publicSignals.map((x) => toBigInt(x));
+      const verifyOk = await verifierProbe.verifyProof([proofForProbe.a, proofForProbe.b, proofForProbe.c], probeInputs);
+      let thresholdOk = null;
+      if (thresholdAddr && thresholdAddr !== ethers.ZeroAddress) {
+        const thresholdProbe = new ethers.Contract(
+          thresholdAddr,
+          ["function verifyProof((bytes,bytes,bytes) proof, uint256[] publicInputs) view returns (bool)"],
+          probeProvider
+        );
+        thresholdOk = await thresholdProbe.verifyProof([proofForProbe.a, proofForProbe.b, proofForProbe.c], probeInputs);
+      }
+      debugIngest("index.js:submitSwap", "onchain verifier precheck", {
+        verifierAddr,
+        thresholdAddr,
+        verifyOk,
+        thresholdOk,
+      }, "pre-fix", "H10");
+    } catch (verifyProbeErr) {
+      debugIngest("index.js:submitSwap", "onchain verifier precheck error", {
+        error: verifyProbeErr?.reason || verifyProbeErr?.message || String(verifyProbeErr),
+      }, "pre-fix", "H10");
+    }
+    // #endregion
     if (swapDataForContract[5] !== ethers.ZeroHash) {
       try {
         await (await contract.commitSwap(swapDataForContract[5], swapDataForContract[6])).wait();
@@ -5003,9 +5113,50 @@ async function submitSwap(swapData) {
         }
       }
     }
+    // #region agent log
+    debugIngest("index.js:submitSwap", "pre-staticcall swap tuple snapshot", {
+      inputAssetID: String(pi?.inputAssetID ?? ""),
+      outputAssetIDSwap: String(pi?.outputAssetIDSwap ?? ""),
+      tokenIn: String(swapParamsTuple?.[0] || ""),
+      tokenOut: String(swapParamsTuple?.[1] || ""),
+      amountIn: String(swapParamsTuple?.[2] || ""),
+      minAmountOut: String(swapParamsTuple?.[3] || ""),
+      fee: Number(swapParamsTuple?.[4] || 0),
+      sqrtPriceLimitX96: String(swapParamsTuple?.[5] || ""),
+      pathLen: typeof (swapParamsTuple?.[6] || "") === "string" ? (swapParamsTuple?.[6] || "").length : -1,
+    }, "pre-fix", "H6_H7_H8");
+    // #endregion
     try {
-      await contract.shieldedSwapJoinSplit.staticCall(swapDataForContract);
+      await contract.shieldedSwapJoinSplit.estimateGas(swapDataForContract);
     } catch (simErr) {
+      // #region agent log
+      try {
+        if (SWAP_ADAPTOR_ADDRESS && RPC_URL) {
+          const adaptorProbe = new ethers.Contract(
+            SWAP_ADAPTOR_ADDRESS,
+            ["function getExpectedOutput((address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint24 fee,uint160 sqrtPriceLimitX96,bytes path)) view returns (uint256)"],
+            new ethers.JsonRpcProvider(RPC_URL)
+          );
+          const probeOut = await adaptorProbe.getExpectedOutput({
+            tokenIn: toAddress(swapData.swapParams?.tokenIn),
+            tokenOut: toAddress(swapData.swapParams?.tokenOut),
+            amountIn: toBigInt(swapData.swapParams?.amountIn || 0),
+            minAmountOut: toBigInt(swapData.swapParams?.minAmountOut || 0),
+            fee: Number(swapData.swapParams?.fee || 0),
+            sqrtPriceLimitX96: toBigInt(swapData.swapParams?.sqrtPriceLimitX96 || 0),
+            path: swapData.swapParams?.path || "0x",
+          });
+          debugIngest("index.js:submitSwap", "simulation catch adaptor probe", {
+            probeOut: String(probeOut),
+            minAmountOut: String(swapData.swapParams?.minAmountOut || 0),
+          }, "pre-fix", "H7_H8");
+        }
+      } catch (probeErr) {
+        debugIngest("index.js:submitSwap", "simulation catch adaptor probe error", {
+          error: probeErr?.reason || probeErr?.message || String(probeErr),
+        }, "pre-fix", "H7_H8");
+      }
+      // #endregion
       const simRaw = `${simErr?.reason || ""} ${simErr?.message || ""} ${simErr?.shortMessage || ""}`.toLowerCase();
       const looksLikeAttestationFailure =
         simRaw.includes("poolerr(48)") ||
@@ -5017,9 +5168,9 @@ async function submitSwap(swapData) {
         relayerAttestationModeUsed = "legacy";
         relayerAttestationSig = await signRelayerAttestation("legacy");
         swapDataForContract = buildSwapDataForContract(relayerAttestationSig);
-        await contract.shieldedSwapJoinSplit.staticCall(swapDataForContract);
+        await contract.shieldedSwapJoinSplit.estimateGas(swapDataForContract);
       } else {
-        logRelayerOnchainFailure("shieldedSwapJoinSplit.staticCall", simErr);
+        logRelayerOnchainFailure("shieldedSwapJoinSplit.estimateGas", simErr);
         const err = new Error(`swap_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
         err.status = 400;
         throw err;
