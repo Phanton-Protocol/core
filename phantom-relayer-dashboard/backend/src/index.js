@@ -5363,6 +5363,26 @@ async function submitWithdraw(withdrawData) {
   ];
   const recipient = ethers.getAddress(withdrawData.recipient);
   const relayerAddr = (withdrawData.relayer && withdrawData.relayer !== ethers.ZeroAddress) ? withdrawData.relayer : signer.address;
+  const poolRead = new ethers.Contract(
+    SHIELDED_POOL_ADDRESS,
+    ["function isNullifierUsed(bytes32 nullifier) view returns (bool used)"],
+    provider
+  );
+  let nullifierUsedPre = false;
+  try {
+    nullifierUsedPre = Boolean(await poolRead.isNullifierUsed(toBytes32(pi.nullifier)));
+  } catch (_) {}
+  // #region agent log
+  debugIngest("index.js:submitWithdraw", "withdraw pre-staticcall snapshot", {
+    nullifier: String(pi.nullifier || ""),
+    inputCommitment: String(pi.inputCommitment || ""),
+    outputCommitmentChange: String(pi.outputCommitmentChange || ""),
+    merkleRoot: String(merkleRoot || ""),
+    nullifierUsedPre,
+    recipient,
+    relayerAddr,
+  }, "run-2", "H10");
+  // #endregion
   const withdrawDataForContract = [
     withdrawProofTuple,
     withdrawPublicInputsTuple,
@@ -5374,6 +5394,17 @@ async function submitWithdraw(withdrawData) {
   try {
     await contract.shieldedWithdraw.staticCall(withdrawDataForContract);
   } catch (simErr) {
+    // #region agent log
+    debugIngest("index.js:submitWithdraw", "withdraw staticcall failed", {
+      reason: simErr?.reason || "",
+      shortMessage: simErr?.shortMessage || "",
+      message: simErr?.message || String(simErr),
+      code: simErr?.code || "",
+      data: simErr?.data || null,
+      nullifier: String(pi.nullifier || ""),
+      inputCommitment: String(pi.inputCommitment || ""),
+    }, "run-2", "H10");
+    // #endregion
     logRelayerOnchainFailure("shieldedWithdraw.staticCall", simErr);
     const err = new Error(`withdraw_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
     err.status = 400;

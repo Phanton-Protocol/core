@@ -455,6 +455,7 @@ function isWithdrawNullifierSpentError(err) {
   const msg = String(err?.message || err || "").toLowerCase();
   return (
     /withdraw_simulation_failed:\s*sp:nul/.test(msg) ||
+    /withdraw_simulation_failed:\s*sp:nf/.test(msg) ||
     /withdraw_nullifier_already_spent/.test(msg) ||
     (/nullifier/.test(msg) && /(spent|already|used)/.test(msg))
   );
@@ -2035,6 +2036,17 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           const inputWei = BigInt(note.amount);
           const changeWei = inputWei - amountWei - protocolFee - gasRefund;
           if (changeWei <= 0n) continue;
+          // #region agent log
+          debugLog("H7", "ProtocolUserDapp.jsx:submitWithdraw-candidate", "withdraw candidate selected", {
+            token: String(withdrawForm.token || ""),
+            amountWei: amountWei.toString(),
+            protocolFee: protocolFee.toString(),
+            gasRefund: gasRefund.toString(),
+            noteCommitment: String(note?.commitmentHex || ""),
+            noteAmount: String(note?.amount || ""),
+            changeWei: changeWei.toString(),
+          });
+          // #endregion
           try {
             const merkle = await fetchMerkleForNote(base, note, cfg);
             const proofBody = {
@@ -2089,6 +2101,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               },
               encryptedPayload: "0x",
             };
+            // #region agent log
+            debugLog("H8", "ProtocolUserDapp.jsx:submitWithdraw-payload", "withdraw payload before encryption", {
+              nullifier: String(gen?.publicInputs?.nullifier || ""),
+              inputCommitment: String(gen?.publicInputs?.inputCommitment || ""),
+              outputCommitmentChange: String(gen?.publicInputs?.outputCommitmentChange || ""),
+              recipient: String(recipient || ""),
+            });
+            // #endregion
 
             const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
             const envelope = await encryptForRelayer({ withdrawData }, keyInfo?.publicKeyPem);
@@ -2132,6 +2152,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             }
             return;
           } catch (attemptErr) {
+            // #region agent log
+            debugLog("H9", "ProtocolUserDapp.jsx:submitWithdraw-attempt-error", "withdraw attempt failed", {
+              message: stringifyErr(attemptErr?.message ?? attemptErr),
+              noteCommitment: String(note?.commitmentHex || ""),
+              noteAmount: String(note?.amount || ""),
+            });
+            // #endregion
             if (isWithdrawNullifierSpentError(attemptErr)) {
               lastNullifierErr = attemptErr;
               try {
