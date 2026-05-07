@@ -75,8 +75,9 @@ contract FeeOracle is IFeeOracle {
             require(price > 0, "FeeOracle: no offchain price");
             require(block.timestamp - updatedAt <= 10 minutes, "FeeOracle: stale offchain price");
 
-            // USD value with 8 decimals
-            return (amount * price) / (10 ** (18 - PRICE_FEED_DECIMALS));
+            // USD value with 8 decimals (match Chainlink branch: amountWei * price / 10^tokenDecimals)
+            uint256 tokenDecimals = _getTokenDecimals(token);
+            return (amount * price) / (10 ** tokenDecimals);
         }
 
         address feed = priceFeeds[token];

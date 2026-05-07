@@ -310,7 +310,7 @@ export default function App() {
             type="text"
             value={apiBase}
             onChange={(e) => setApiBase(e.target.value)}
-            placeholder="https://your-relayer.onrender.com (required)"
+            placeholder="https://your-backend.vercel.app (required)"
             style={{
               flex: 1,
               padding: "0.5rem 0.75rem",
@@ -415,7 +415,7 @@ export default function App() {
         <Card title="Health">
           {!base ? (
             <div style={{ color: "#f59e0b" }}>
-              Enter your relayer API URL above (e.g. https://your-relayer.onrender.com). The relayer must be running and allow CORS.
+              Enter your relayer API URL above (e.g. https://backend-self-nu-51.vercel.app). The relayer must be running and allow CORS.
             </div>
           ) : health ? (
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>

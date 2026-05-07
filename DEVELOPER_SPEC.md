@@ -123,7 +123,7 @@ Interfaces (in `Phantom-Smart-Contracts/contracts/.../interfaces/`): IShieldedPo
 
 ## 7. Backend API (full endpoint list)
 
-REST over HTTP. Base URL: e.g. `https://relayers-backend.onrender.com` or `http://localhost:5050`. All endpoints are relative to base.
+REST over HTTP. Base URL: e.g. Hamza Vercel backend alias `https://backend-self-nu-51.vercel.app` or `http://127.0.0.1:5050`. All endpoints are relative to base.
 
 **Health and info**
 
@@ -264,7 +264,7 @@ Backend code and Phantom SDK/docs contain full request/response shapes and integ
 
 **Production**
 
-- DApp/API: e.g. `https://relayers-backend.onrender.com`. Marketing site and docs are separate. Frontend default API URL in `src/config.js` (API_URL, DAPP_URL).
+- DApp/API: production alias `https://backend-self-nu-51.vercel.app`. Marketing site is separate. Frontend default API URL in `src/config.js` (`frozenProductionConfig.relayerApiBase`, `VITE_API_URL`).
 
 **Testnet tokens (example)**
 
@@ -291,7 +291,7 @@ Backend code and Phantom SDK/docs contain full request/response shapes and integ
 
 **Backend:** `cd backend && npm install && node src/index.js` (see DAPP-SETUP.md). Ensure config.json or env matches deployed contracts and RPC.
 
-**Frontend:** `cd frontend && npm install && VITE_API_URL=https://relayers-backend.onrender.com npm run dev` (or `npm run build` for production). Keep `frontend/public/config.json` in sync with backend/chain.
+**Frontend:** `cd core && npm install && VITE_API_URL=https://backend-self-nu-51.vercel.app npm run dev` (or `npm run build` for production). Keep `public/config.json` in sync with backend/chain.
 
 **Deploy:** See `Phantom-Smart-Contracts/DEPLOY-SETUP.md` for Render (full app or static site) and Vercel (frontend only; backend elsewhere). Render one-service option: build command installs backend + frontend deps and builds frontend; start command `node backend/src/index.js`.
 

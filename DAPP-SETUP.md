@@ -39,7 +39,7 @@ npm run build
 
 **Config:** At build time the app uses:
 
-- `VITE_API_URL` — backend API base (e.g. `https://relayers-backend.onrender.com` or `http://localhost:5050` for local).
+- `VITE_API_URL` — backend API base (e.g. the Vercel `backend` project’s **Latest Production URL** or `http://127.0.0.1:5050` for local; see `frozenProductionConfig.relayerApiBase`).
 - At runtime it also loads `/config.json` (from `frontend/public/config.json`) for contract addresses.
 
 Keep **frontend/public/config.json** in sync with your backend/chain:
@@ -49,7 +49,7 @@ Keep **frontend/public/config.json** in sync with your backend/chain:
 Dev server:
 
 ```bash
-VITE_API_URL=https://relayers-backend.onrender.com npm run dev
+VITE_API_URL=https://backend-self-nu-51.vercel.app npm run dev
 ```
 
 Production: set `VITE_API_URL` in your host (e.g. Vercel/Render env) and serve the `frontend/dist` output.

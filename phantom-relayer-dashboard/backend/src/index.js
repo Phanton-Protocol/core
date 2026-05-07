@@ -2669,6 +2669,16 @@ app.get("/", (req, res) => {
   });
 });
 
+/** Landing metrics panel on phantomproto.com reads this; harmless stub when telemetry is unavailable. */
+app.get("/telemetry", (_req, res) => {
+  res.json({
+    volume24hWei: null,
+    swapCount24h: 0,
+    nodeOperators: null,
+    anonymitySet: null,
+  });
+});
+
 app.get("/health", (req, res) => {
   let cfg = null;
   let cfgError = null;

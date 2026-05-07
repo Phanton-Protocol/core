@@ -344,6 +344,26 @@ function getAssetIdForToken(tokenAddress, relayerConfig) {
   );
 }
 
+/** Exclude legacy vault rows from balance totals — same pairing fields as swap spend eligibility. */
+function vaultNoteCountsTowardBalances(entry, cfg) {
+  const raw = entry?.payload ?? entry;
+  if (Number(raw?.version) !== 1) return false;
+  if (!cfg?.addresses?.shieldedPool) return false;
+  const poolLower = String(cfg.addresses.shieldedPool).toLowerCase();
+  const oracleLower = String(cfg.addresses.feeOracle || "").toLowerCase();
+  const dep = String(cfg.deploymentVersion || "");
+  const notePool = String(entry?.poolAddress || raw.poolAddress || "").toLowerCase();
+  if (!notePool || notePool !== poolLower) return false;
+  const noteOracle = String(entry?.oracleAddress || raw.oracleAddress || "").toLowerCase();
+  if (noteOracle && oracleLower && noteOracle !== oracleLower) return false;
+  const noteVersion = String(entry?.deploymentVersion || raw.deploymentVersion || "");
+  if (noteVersion && dep && noteVersion !== dep) return false;
+  const src = String(entry?.source || "").toLowerCase();
+  if (src && src !== "relayer" && src !== "deposit" && src !== "swap") return false;
+  const st = String(entry?.status || "unspent").toLowerCase();
+  return st === "unspent";
+}
+
 function spendableNoteEntries(vaultData, inputToken, relayerConfig) {
   if (!relayerConfig?.assets?.length) return [];
   let aid;
@@ -938,8 +958,9 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             const maxSwapWei = noteWei - feeBn - gasBn - MIN_SWAP_CHANGE_WEI;
             if (maxSwapWei <= 0n) {
               setSwapLastQuote(null);
+              setIntentForm((p) => ({ ...p, protocolFee: protocolFeeStr, gasRefund: refund }));
               setSwapQuoteErr(
-                "This note is too small after protocol fee and gas refund — the pool always keeps a leftover change note. Deposit more or lower Gas refund (Advanced)."
+                "This shielded note cannot cover protocol fee (~$10 USD floor on-chain for this pool) plus relayer gas refund and a nonzero change Note. Deposit a larger shielded note (typically ≥ ~0.03 BNB-equivalent depending on oracle price), or reset Gas refund under Advanced.",
               );
               return;
             }
@@ -1552,7 +1573,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         const maxSwapWei = inputAmountBn - feeBn - gasBn - MIN_SWAP_CHANGE_WEI;
         if (maxSwapWei <= 0n) {
           throw new Error(
-            "This note is too small after protocol fee and gas refund — the pool always keeps a leftover change note. Deposit more or lower Gas refund (Advanced)."
+            "Shielded note cannot cover on-chain protocol fee + gas refund + change Note. Top up the note or lower Gas refund under Advanced if the relayer allows."
           );
         }
         if (swapAmountBn > maxSwapWei) {
@@ -2251,6 +2272,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
     const sums = new Map();
     notes.forEach((entry) => {
+      if (cfg?.addresses?.shieldedPool && !vaultNoteCountsTowardBalances(entry, cfg)) return;
       const raw = entry?.payload ?? entry;
       if (Number(raw?.version) !== 1) return;
       const aid = Number(raw?.assetID);
@@ -2285,7 +2307,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         };
       })
       .sort((a, b) => (a.symbol > b.symbol ? 1 : -1));
-  }, [vault.data, cfg?.assets, tokenList]);
+  }, [vault.data, cfg?.assets, cfg?.addresses?.shieldedPool, cfg?.deploymentVersion, tokenList]);
   const [noteBalanceToken, setNoteBalanceToken] = useState("__all_notes__");
   const selectedBalanceRow = useMemo(
     () => noteBalanceRows.find((row) => row.key === noteBalanceToken) || null,
@@ -2822,7 +2844,11 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             {swapClampHint && !swapQuoteErr && (
               <div style={{ marginTop: 8, fontSize: 12, color: PC.muted }}>{swapClampHint}</div>
             )}
-            {cfg?.mode === "live" && !swapGasRefundOk && !swapQuoteLoading && (intentForm.inputAmount || "").trim() && (
+            {cfg?.mode === "live" &&
+              !swapQuoteErr &&
+              !swapGasRefundOk &&
+              !swapQuoteLoading &&
+              (intentForm.inputAmount || "").trim() && (
               <div style={{ marginTop: 8, fontSize: 12, color: "#ed4b9e" }}>Waiting for relayer gas quote…</div>
             )}
           </div>

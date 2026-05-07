@@ -72,6 +72,17 @@ function verifyAgainstManifest() {
 }
 
 function main() {
+  /** Vercel deploys often omit Phantom-Smart-Contracts — wasm+zkey committed under backend/circuits. */
+  if (fs.existsSync(destWasm) && fs.existsSync(destZkey)) {
+    console.log("[copy-joinsplit-prover-artifacts] OK (prebundled under backend/circuits)");
+    console.log(" ", destWasm);
+    console.log(" ", destZkey);
+    const verifyEarly =
+      process.env.VERIFY_PROVER_ARTIFACTS === "1" || /^true$/i.test(process.env.VERIFY_PROVER_ARTIFACTS || "");
+    if (verifyEarly) verifyAgainstManifest();
+    return;
+  }
+
   const need = [
     ["wasm", srcWasm],
     ["zkey", srcZkey],
@@ -83,7 +94,7 @@ function main() {
     console.error("");
     console.error("Add the pinned joinsplit_public9 wasm + circuit_final.zkey under:");
     console.error(`  ${joinsplitDir}`);
-    console.error("(commit them, or restore from the artifact store that matches production verifier).");
+    console.error("Or commit them under backend/circuits/ (see backend/.gitignore).");
     console.error("Dev-only local compile: cd Phantom-Smart-Contracts && npm run circuit:build:joinsplit");
     console.error(`PHANTOM_PSC_ROOT (if layout differs): ${pscRoot}`);
     process.exit(1);
@@ -92,7 +103,7 @@ function main() {
   fs.mkdirSync(destWasmDir, { recursive: true });
   fs.copyFileSync(srcWasm, destWasm);
   fs.copyFileSync(srcZkey, destZkey);
-  console.log("[copy-joinsplit-prover-artifacts] OK");
+  console.log("[copy-joinsplit-prover-artifacts] OK (copied from Phantom-Smart-Contracts)");
   console.log(" ", destWasm);
   console.log(" ", destZkey);
 

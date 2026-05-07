@@ -2,6 +2,8 @@
 const RAW_BLOCKED = [
   "https://backend-ashy-ten-75.vercel.app",
   "https://backend-seven-vert-86.vercel.app",
+  /** Retired Render host — production uses Hamza's Vercel backend only. */
+  "https://relayers-backend.onrender.com",
 ];
 
 export function normalizeRelayerBase(u) {

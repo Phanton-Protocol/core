@@ -1,5 +1,6 @@
 {
   "version": "prod-frozen-v2",
+  "relayerApiBase": "https://backend-self-nu-51.vercel.app",
   "chainId": 97,
   "addresses": {
     "shieldedPool": "0x77C4BadA4306e4b258980f0f0D79Aec814509FDf",

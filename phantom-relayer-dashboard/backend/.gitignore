@@ -1,5 +1,4 @@
 .vercel
 
-# Copied by `npm run build` / Vercel from Phantom-Smart-Contracts (large; do not commit)
-circuits/joinsplit_public9_js/
-circuits/joinsplit_public9_final.zkey
+# Pinned joinsplit_public9 wasm + circuit_final.zkey are committed under circuits/
+# so Vercel builds succeed when Root Directory is this backend folder (see copy-joinsplit-prover-artifacts.mjs).

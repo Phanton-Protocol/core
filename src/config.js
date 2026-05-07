@@ -1,4 +1,5 @@
 import { filterRelayerUrlList, isBlockedRelayerBase } from "./lib/relayerBlocklist";
+import frozenShip from "../frozenProductionConfig.json";
 
 export const DAPP_URL = '/user';
 export const RELAYER_DASHBOARD_URL = '/relayer';
@@ -10,19 +11,26 @@ export const GITHUB_URL = 'https://github.com/Phanton-Protocol';
 export const RUNBOOK_URL = `${GITHUB_URL}/core/blob/main/RUNBOOK.md`;
 
 /**
- * Default relayer API (no VITE_* override). Render instance is the current stable host with production env.
- * After Hamza Vercel `backend` has the same env as Render (CORS_ORIGINS, RELAYER_PRIVATE_KEY, RPC_URL, …),
- * set VITE_API_URL / VITE_API_URLS on the website project or switch this default to that URL.
+ * Default relayer API: `VITE_API_URL` at build time wins; otherwise `frozenProductionConfig.relayerApiBase`
+ * (Hamza Vercel backend — see `npx vercel project ls` → backend Latest Production URL). Never use Render in prod.
  */
+const fromFrozenBase = String(frozenShip.relayerApiBase || "")
+  .trim()
+  .replace(/\/$/, "");
 const viteApiUrl =
   typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL
     ? String(import.meta.env.VITE_API_URL).trim()
     : "";
 
+const defaultRelayerBase =
+  typeof import.meta !== "undefined" && import.meta.env?.DEV
+    ? "http://127.0.0.1:5050"
+    : fromFrozenBase;
+
 export const API_URL =
   viteApiUrl && !isBlockedRelayerBase(viteApiUrl)
     ? viteApiUrl.replace(/\/$/, "")
-    : "https://relayers-backend.onrender.com";
+    : defaultRelayerBase;
 
 export const API_URLS = (() => {
   const fromMany =
