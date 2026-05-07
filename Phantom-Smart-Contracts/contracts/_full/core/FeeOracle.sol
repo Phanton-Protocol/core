@@ -8,7 +8,7 @@ import "../interfaces/AggregatorV3Interface.sol";
 /**
  * @title FeeOracle
  * @notice Calculates dynamic protocol fees using Chainlink price feeds
- * @dev Fee = MAX($10 USD, 0.5% of transaction value)
+ * @dev Fee = MAX($2 USD, 0.5% of transaction value)
  */
 contract FeeOracle is IFeeOracle {
     // Chainlink price feed addresses (BSC mainnet)
@@ -17,7 +17,7 @@ contract FeeOracle is IFeeOracle {
     address public constant BNB_USD_FEED = address(0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE); // Example BSC Chainlink feed
     address public offchainOracle;
     
-    uint256 public constant FEE_FLOOR_USD = 10 * 1e8; // $10 USD (8 decimals from Chainlink)
+    uint256 public constant FEE_FLOOR_USD = 2 * 1e8; // $2 USD (8 decimals from Chainlink)
     uint256 public constant FEE_PERCENTAGE = 5; // 0.5% = 5 basis points (scaled by 1000)
     uint256 public constant BASIS_POINTS = 1000;
     uint256 public constant PRICE_FEED_DECIMALS = 8;

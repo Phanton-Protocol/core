@@ -960,7 +960,7 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               setSwapLastQuote(null);
               setIntentForm((p) => ({ ...p, protocolFee: protocolFeeStr, gasRefund: refund }));
               setSwapQuoteErr(
-                "This shielded note cannot cover protocol fee (~$10 USD floor on-chain for this pool) plus relayer gas refund and a nonzero change Note. Deposit a larger shielded note (typically ≥ ~0.03 BNB-equivalent depending on oracle price), or reset Gas refund under Advanced.",
+                "This shielded note cannot cover protocol fee (~$2 USD floor on-chain for this pool) plus relayer gas refund and a nonzero change Note. Deposit a larger shielded note (typically ≥ ~0.03 BNB-equivalent depending on oracle price), or reset Gas refund under Advanced.",
               );
               return;
             }

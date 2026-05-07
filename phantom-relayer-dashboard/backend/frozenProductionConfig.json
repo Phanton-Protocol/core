@@ -4,7 +4,7 @@
   "chainId": 97,
   "addresses": {
     "shieldedPool": "0x77C4BadA4306e4b258980f0f0D79Aec814509FDf",
-    "feeOracle": "0x70c25C882C899f9ED3D7c81083cC75B5E8152672",
+    "feeOracle": "0xc3d358d89637c2dA9aA8607bDd1fA140d73e8232",
     "swapAdaptor": "0x101D154a8851c4945401f5B498763c456748780a",
     "relayerStaking": "0x390eBcCF884253fD779C4D75f23c23400C46aA58",
     "depositHandler": "0x2c46bb897DB2Ecd3AdD6ab27868f3b88cFf638ec",
