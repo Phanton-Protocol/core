@@ -4520,7 +4520,7 @@ function resolveVerificationKeyPath() {
   if (localVerificationKeyPathCache) return localVerificationKeyPathCache;
   const candidates = [
     path.join(__dirname, "..", "..", "..", "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "verification_key.json"),
-    path.join(__dirname, "..", "..", "circuits", "verification_key.json"),
+    path.join(__dirname, "..", "circuits", "verification_key.json"),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) {
@@ -4528,7 +4528,7 @@ function resolveVerificationKeyPath() {
       return p;
     }
   }
-  return path.join(__dirname, "..", "..", "circuits", "verification_key.json");
+  return path.join(__dirname, "..", "circuits", "verification_key.json");
 }
 function normalizeGroth16ProofForSnarkjs(proof) {
   const a = proof?.a || proof?.pi_a;
@@ -4575,7 +4575,7 @@ function resolveProverZkeyPath() {
   const candidates = [
     process.env.PROVER_ZKEY,
     path.join(__dirname, "..", "..", "..", "Phantom-Smart-Contracts", "circuits", "joinsplit_public9", "circuit_final.zkey"),
-    path.join(__dirname, "..", "..", "circuits", "joinsplit_public9_final.zkey"),
+    path.join(__dirname, "..", "circuits", "joinsplit_public9_final.zkey"),
   ].filter(Boolean);
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
