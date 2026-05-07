@@ -9,12 +9,19 @@ deployments
 docs
 fhe-node
 frontend
-phantom-relayer-dashboard
-!phantom-relayer-dashboard/
-!phantom-relayer-dashboard/vercel.json
-!phantom-relayer-dashboard/backend/
-!phantom-relayer-dashboard/backend/**
-!phantom-relayer-dashboard/backend/vercel.json
+# Include `phantom-relayer-dashboard/backend` for the serverless API project (never ignore the parent path on Vercel).
+# Ignore only the Dashboard Vite subtree we do not ship to the website build.
+phantom-relayer-dashboard/node_modules
+phantom-relayer-dashboard/dist
+phantom-relayer-dashboard/package-lock.json
+phantom-relayer-dashboard/index.html
+phantom-relayer-dashboard/vite.config.js
+phantom-relayer-dashboard/vercel.json
+phantom-relayer-dashboard/src
+phantom-relayer-dashboard/api
+phantom-relayer-dashboard/circuits
+phantom-relayer-dashboard/Dockerfile
+phantom-relayer-dashboard/render.yaml
 relayer-dashboard
 !scripts/
 !scripts/generate-seo-html-entries.mjs
