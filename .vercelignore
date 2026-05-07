@@ -1,9 +1,10 @@
 .cursor
 .vercel
 artifacts
-backend
+# Anchor to repo root — unanchored `backend` / `circuits` skip every matching folder (breaks `phantom-relayer-dashboard/backend/**`).
+/backend
 cache
-circuits
+/circuits
 deploy
 deployments
 docs
