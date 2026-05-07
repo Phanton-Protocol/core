@@ -28,6 +28,14 @@ function shorten(addr) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+function canonicalAddress(raw) {
+  try {
+    return ethers.getAddress(String(raw ?? "").trim());
+  } catch {
+    return "";
+  }
+}
+
 function stringifyErr(x) {
   if (x == null) return "";
   if (typeof x === "string") return x;
@@ -785,6 +793,41 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             `Config mismatch: expected deployment version ${frozenDeploymentVersion || "unknown"} but relayer returned ${c?.deploymentVersion || "missing"}`
           );
         }
+
+        /** Relayer `/config` must match this build’s pinned chain addresses (frozenProductionConfig.json). */
+        const PINNED_CONTRACT_KEYS = ["shieldedPool", "swapAdaptor", "feeOracle", "relayerStaking"];
+        const mismatches = [];
+        for (const key of PINNED_CONTRACT_KEYS) {
+          const pinned = canonicalAddress(FROZEN_CONFIG?.addresses?.[key]);
+          const fromRelayer = canonicalAddress(c?.addresses?.[key]);
+          if (pinned && fromRelayer && pinned !== fromRelayer) {
+            mismatches.push(`${key}: relayer ${shorten(fromRelayer)} ≠ pinned ${shorten(pinned)}`);
+          }
+        }
+        const frozenAssets = Array.isArray(FROZEN_CONFIG?.assets) ? FROZEN_CONFIG.assets : [];
+        const relAssets = Array.isArray(c?.assets) ? c.assets : [];
+        for (const fa of frozenAssets) {
+          const aid = Number(fa?.assetId);
+          if (!Number.isFinite(aid)) continue;
+          const pinnedAsset = canonicalAddress(fa?.address);
+          if (!pinnedAsset) continue;
+          const ra = relAssets.find((x) => Number(x?.assetId) === aid);
+          const fromRelayer = canonicalAddress(ra?.address);
+          if (!fromRelayer) continue;
+          if (pinnedAsset !== fromRelayer) {
+            mismatches.push(
+              `${String(fa.symbol || `asset_${aid}`).toUpperCase()} (assetId ${aid}): relayer ${shorten(fromRelayer)} ≠ pinned ${shorten(pinnedAsset)}`,
+            );
+          }
+        }
+        if (mismatches.length > 0) {
+          throw new Error(
+            `Relayer backend is not synced with this site build (${mismatches.join("; ")}). ` +
+              "Open Advanced → Relayer API URL(s) and point at a redeployed backend whose /config matches this release, "
+              + "or wait for ops to update the default relayer host.",
+          );
+        }
+
         if (!cancelled) {
           setCfg(c);
           setHealth(h);
