@@ -522,6 +522,11 @@ function consumeReplayKey(key, ttlSec = 3600) {
   return true;
 }
 
+function releaseReplayKey(key) {
+  if (!key) return;
+  replayCache.delete(key);
+}
+
 function missingEnv(required) {
   return required.filter((k) => !process.env[k] || String(process.env[k]).trim() === "");
 }
@@ -1518,6 +1523,34 @@ async function processDepositRequestBody(body) {
   }
   const payload = parsed.data;
   assertTokenAllowed(payload.token, "deposit_token");
+  if (String(payload.token || "").toLowerCase() !== ethers.ZeroAddress.toLowerCase()) {
+    // #region agent log
+    fetch("http://127.0.0.1:7607/ingest/0d14d89d-6146-4059-a766-779f424d4edc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "c1b159" },
+      body: JSON.stringify({
+        sessionId: "c1b159",
+        runId: "run-1",
+        hypothesisId: "H4",
+        location: "backend/src/index.js:processDepositRequestBody",
+        message: "blocked ERC20 deposit path",
+        data: {
+          depositor: String(payload.depositor || "").toLowerCase(),
+          token: String(payload.token || "").toLowerCase(),
+          amount: String(payload.amount || "0"),
+          assetID: String(payload.assetID || ""),
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+    const err = new Error(
+      "ERC20 relayer deposit is temporarily disabled: current pool path records note commitments without enforcing token transfer. Use BNB deposit + swap, or wait for pool/handler redeploy."
+    );
+    err.status = 400;
+    err.code = "ERC20_DEPOSIT_DISABLED";
+    throw err;
+  }
   if (payload.deadline < Math.floor(Date.now() / 1000)) {
     const err = new Error("Deposit expired");
     err.status = 400;
@@ -3263,6 +3296,7 @@ async function processSwapRequestBody(body) {
   let intentId = incomingIntentId || "";
   let intent = null;
   let ownerAddress = null;
+  let replayKey = "";
   const swapPublicInputHash = computeSwapPublicInputHash(pi);
 
   if (usingLegacyIntent) {
@@ -3272,7 +3306,8 @@ async function processSwapRequestBody(body) {
       err.status = 400;
       throw err;
     }
-    if (!consumeReplayKey(`swap_intent:${String(intent.nullifier).toLowerCase()}:${String(intent.nonce)}`)) {
+    replayKey = `swap_intent:${String(intent.nullifier).toLowerCase()}:${String(intent.nonce)}`;
+    if (!consumeReplayKey(replayKey)) {
       const err = new Error("Intent already processed or replay detected");
       err.status = 409;
       throw err;
@@ -3328,7 +3363,8 @@ async function processSwapRequestBody(body) {
     }
     const nonce = String(zkAuthorization?.nonce ?? "0");
     const minAmountOut = String(zkAuthorization?.minAmountOut ?? pi?.minOutputAmountSwap ?? swapData?.swapParams?.minAmountOut ?? "0");
-    if (!consumeReplayKey(`swap_zk:${nullifierHex}`)) {
+    replayKey = `swap_zk:${nullifierHex}`;
+    if (!consumeReplayKey(replayKey)) {
       const err = new Error("Swap already processed or replay detected");
       err.status = 409;
       throw err;
@@ -3453,9 +3489,16 @@ async function processSwapRequestBody(body) {
     console.warn("[swap] internal FHE order book:", e.message || e);
   }
 
-  const txResult = RELAYER_DRY_RUN
-    ? await simulateSwap(intentId)
-    : await submitSwap(swapData);
+  let txResult;
+  try {
+    txResult = RELAYER_DRY_RUN
+      ? await simulateSwap(intentId)
+      : await submitSwap(swapData);
+  } catch (swapErr) {
+    // Allow retry when swap was rejected before any on-chain state transition.
+    releaseReplayKey(replayKey);
+    throw swapErr;
+  }
   if (internalFheMatch) txResult.internalFheMatch = internalFheMatch;
   if (!RELAYER_DRY_RUN && txResult?.txHash && ownerAddress && ownerAddress !== ethers.ZeroAddress) {
     try {
