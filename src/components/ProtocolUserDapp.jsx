@@ -934,13 +934,10 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         setIntentForm((p) => ({ ...p, minOutputAmount: "", protocolFee: "0", gasRefund: "0" }));
         return;
       }
-      const wbnbQ = canonicalWbnb(cfg.chainId);
-      const tokenIn = intentForm.inputToken && intentForm.inputToken.toLowerCase() !== ethers.ZeroAddress.toLowerCase()
-        ? intentForm.inputToken
-        : wbnbQ;
-      const tokenOut = intentForm.outputToken && intentForm.outputToken.toLowerCase() !== ethers.ZeroAddress.toLowerCase()
-        ? intentForm.outputToken
-        : wbnbQ;
+      // Quote endpoint expects native asset as zero-address (same convention as pool/adaptor).
+      // Mapping native->WBNB here forces fallback oracle quotes and breaks adaptor parity.
+      const tokenIn = String(intentForm.inputToken || ethers.ZeroAddress);
+      const tokenOut = String(intentForm.outputToken || ethers.ZeroAddress);
       if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) {
         setSwapLastQuote(null);
         setSwapQuoteErr(null);
