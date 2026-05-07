@@ -239,12 +239,6 @@ function decryptRelayEnvelope(envelope) {
   return JSON.parse(plaintext);
 }
 
-function debugIngest(location, message, data, runId, hypothesisId) {
-  // #region agent log
-  fetch('http://127.0.0.1:7607/ingest/0d14d89d-6146-4059-a766-779f424d4edc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c1b159'},body:JSON.stringify({sessionId:'c1b159',location,message,data,timestamp:Date.now(),runId,hypothesisId})}).catch(()=>{});
-  // #endregion
-}
-
 loadConfig();
 
 const PORT = process.env.PORT || 5050;
@@ -1524,26 +1518,6 @@ async function processDepositRequestBody(body) {
   const payload = parsed.data;
   assertTokenAllowed(payload.token, "deposit_token");
   if (String(payload.token || "").toLowerCase() !== ethers.ZeroAddress.toLowerCase()) {
-    // #region agent log
-    fetch("http://127.0.0.1:7607/ingest/0d14d89d-6146-4059-a766-779f424d4edc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "c1b159" },
-      body: JSON.stringify({
-        sessionId: "c1b159",
-        runId: "run-1",
-        hypothesisId: "H4",
-        location: "backend/src/index.js:processDepositRequestBody",
-        message: "blocked ERC20 deposit path",
-        data: {
-          depositor: String(payload.depositor || "").toLowerCase(),
-          token: String(payload.token || "").toLowerCase(),
-          amount: String(payload.amount || "0"),
-          assetID: String(payload.assetID || ""),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     const err = new Error(
       "ERC20 relayer deposit is temporarily disabled: current pool path records note commitments without enforcing token transfer. Use BNB deposit + swap, or wait for pool/handler redeploy."
     );
@@ -3560,20 +3534,7 @@ app.post("/swap/encrypted", requireSeeForSensitiveFlow, async (req, res) => {
   if (!requireConfigured(res, requiredKeys, "Swap encrypted")) return;
   try {
     const envelope = req.body?.envelope;
-    debugIngest("index.js:/swap/encrypted", "encrypted swap envelope received", {
-      hasEnvelope: !!envelope,
-      keyId: envelope?.keyId || null,
-      hasEncryptedKey: !!envelope?.encryptedKey,
-      hasIv: !!envelope?.iv,
-      hasCiphertext: !!envelope?.ciphertext,
-      hasAuthTag: !!envelope?.authTag,
-    }, "pre-fix", "H4");
     const decryptedBody = decryptRelayEnvelope(envelope);
-    debugIngest("index.js:/swap/encrypted", "encrypted swap envelope decrypted", {
-      keys: Object.keys(decryptedBody || {}),
-      hasSwapData: !!decryptedBody?.swapData,
-      proofKeys: Object.keys(decryptedBody?.swapData?.proof || {}),
-    }, "pre-fix", "H4");
     const payload = await processSwapRequestBody(decryptedBody);
     res.json(payload);
   } catch (err) {
@@ -4386,16 +4347,6 @@ app.post("/swap/generate-proof", async (req, res) => {
   }
   try {
     const result = await generateSwapProof(swapData);
-    // #region agent log
-    debugIngest("index.js:/swap/generate-proof", "generate-proof signals cross-check", {
-      generatedSignalsLen: Array.isArray(result.publicSignals) ? result.publicSignals.length : -1,
-      rebuiltSignalsLen: Array.isArray(buildJoinSplitPublicSignals(result.publicInputs || {})) ? buildJoinSplitPublicSignals(result.publicInputs || {}).length : -1,
-      generatedFirst: Array.isArray(result.publicSignals) ? String(result.publicSignals[0] || "") : "",
-      rebuiltFirst: String((buildJoinSplitPublicSignals(result.publicInputs || {}) || [])[0] || ""),
-      generatedLast: Array.isArray(result.publicSignals) ? String(result.publicSignals[result.publicSignals.length - 1] || "") : "",
-      rebuiltLast: String((buildJoinSplitPublicSignals(result.publicInputs || {}) || []).slice(-1)[0] || ""),
-    }, "pre-fix", "H2");
-    // #endregion
     res.json({
       proof: result.proof,
       snarkProof: result.snarkProof,
@@ -4649,13 +4600,6 @@ async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
   if (!RELAYER_REQUIRE_LOCAL_SNARK_VERIFY) return;
   const vk = await getLocalVerificationKey();
   const normalized = normalizeGroth16ProofForSnarkjs(proof);
-  debugIngest("index.js:assertRelayerLocalSnarkVerify", "local verify start", {
-    label,
-    signalsLen: Array.isArray(publicSignals) ? publicSignals.length : -1,
-    vkICLen: Array.isArray(vk?.IC) ? vk.IC.length : -1,
-    proofKeys: Object.keys(proof || {}),
-    normalizedKeys: normalized ? Object.keys(normalized) : [],
-  }, "pre-fix", "H1_H2_H3");
   const candidates = [];
   if (proof && typeof proof === "object") candidates.push(proof);
   if (normalized) candidates.push(normalized);
@@ -4665,18 +4609,8 @@ async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
   for (const p of unique) {
     try {
       const ok = await snarkjs.groth16.verify(vk, publicSignals.map((x) => String(x)), p);
-      debugIngest("index.js:assertRelayerLocalSnarkVerify", "candidate verify result", {
-        label,
-        candidateKeys: Object.keys(p || {}),
-        ok,
-      }, "pre-fix", "H1_H2");
       if (ok) return;
     } catch (e) {
-      debugIngest("index.js:assertRelayerLocalSnarkVerify", "candidate verify error", {
-        label,
-        candidateKeys: Object.keys(p || {}),
-        error: e?.message || String(e),
-      }, "pre-fix", "H1_H2");
       lastErr = e;
     }
   }
@@ -4701,19 +4635,9 @@ async function assertRelayerLocalSnarkVerify(proof, publicSignals, label) {
         [encoded.a, encoded.b, encoded.c],
         publicSignals.map((x) => toBigInt(x))
       );
-      debugIngest("index.js:assertRelayerLocalSnarkVerify", "verifier staticcall result", {
-        label,
-        verifierAddr,
-        okStatic,
-      }, "pre-fix", "H3");
       if (okStatic) return;
     }
-  } catch (e) {
-    debugIngest("index.js:assertRelayerLocalSnarkVerify", "verifier staticcall error", {
-      label,
-      error: e?.message || String(e),
-    }, "pre-fix", "H3");
-  }
+  } catch (e) {}
 
   if (lastErr) throw new Error(`${label}: local_snark_verification_failed (${lastErr.message || lastErr})`);
   throw new Error(`${label}: local_snark_verification_failed`);
@@ -4921,14 +4845,6 @@ async function submitSwap(swapData) {
 
   const pi = swapData.publicInputs || {};
   const publicSignals = buildJoinSplitPublicSignals(pi);
-  debugIngest("index.js:submitSwap", "submitSwap proof/signal summary", {
-    proofKeys: Object.keys(swapData?.proof || {}),
-    hasProofSnark: !!swapData?.proofSnark,
-    proofSnarkKeys: Object.keys(swapData?.proofSnark || {}),
-    signalLen: publicSignals.length,
-    firstSignal: String(publicSignals?.[0] ?? ""),
-    lastSignal: String(publicSignals?.[publicSignals.length - 1] ?? ""),
-  }, "pre-fix", "H1_H2");
   console.log("[swap] proof shape", {
     keys: Object.keys(swapData.proof || {}),
     hasA: Array.isArray(swapData.proof?.a),
@@ -5120,7 +5036,6 @@ async function submitSwap(swapData) {
 
   let tx;
   try {
-    // #region agent log
     try {
       const probeProvider = new ethers.JsonRpcProvider(RPC_URL);
       const poolProbe = new ethers.Contract(
@@ -5147,18 +5062,8 @@ async function submitSwap(swapData) {
         );
         thresholdOk = await thresholdProbe.verifyProof([proofForProbe.a, proofForProbe.b, proofForProbe.c], probeInputs);
       }
-      debugIngest("index.js:submitSwap", "onchain verifier precheck", {
-        verifierAddr,
-        thresholdAddr,
-        verifyOk,
-        thresholdOk,
-      }, "pre-fix", "H10");
     } catch (verifyProbeErr) {
-      debugIngest("index.js:submitSwap", "onchain verifier precheck error", {
-        error: verifyProbeErr?.reason || verifyProbeErr?.message || String(verifyProbeErr),
-      }, "pre-fix", "H10");
     }
-    // #endregion
     if (swapDataForContract[5] !== ethers.ZeroHash) {
       try {
         await (await contract.commitSwap(swapDataForContract[5], swapDataForContract[6])).wait();
@@ -5172,23 +5077,9 @@ async function submitSwap(swapData) {
         }
       }
     }
-    // #region agent log
-    debugIngest("index.js:submitSwap", "pre-staticcall swap tuple snapshot", {
-      inputAssetID: String(pi?.inputAssetID ?? ""),
-      outputAssetIDSwap: String(pi?.outputAssetIDSwap ?? ""),
-      tokenIn: String(swapParamsTuple?.[0] || ""),
-      tokenOut: String(swapParamsTuple?.[1] || ""),
-      amountIn: String(swapParamsTuple?.[2] || ""),
-      minAmountOut: String(swapParamsTuple?.[3] || ""),
-      fee: Number(swapParamsTuple?.[4] || 0),
-      sqrtPriceLimitX96: String(swapParamsTuple?.[5] || ""),
-      pathLen: typeof (swapParamsTuple?.[6] || "") === "string" ? (swapParamsTuple?.[6] || "").length : -1,
-    }, "pre-fix", "H6_H7_H8");
-    // #endregion
     try {
       await contract.shieldedSwapJoinSplit.estimateGas(swapDataForContract);
     } catch (simErr) {
-      // #region agent log
       try {
         if (SWAP_ADAPTOR_ADDRESS && RPC_URL) {
           const adaptorProbe = new ethers.Contract(
@@ -5205,17 +5096,9 @@ async function submitSwap(swapData) {
             sqrtPriceLimitX96: toBigInt(swapData.swapParams?.sqrtPriceLimitX96 || 0),
             path: swapData.swapParams?.path || "0x",
           });
-          debugIngest("index.js:submitSwap", "simulation catch adaptor probe", {
-            probeOut: String(probeOut),
-            minAmountOut: String(swapData.swapParams?.minAmountOut || 0),
-          }, "pre-fix", "H7_H8");
         }
       } catch (probeErr) {
-        debugIngest("index.js:submitSwap", "simulation catch adaptor probe error", {
-          error: probeErr?.reason || probeErr?.message || String(probeErr),
-        }, "pre-fix", "H7_H8");
       }
-      // #endregion
       const simRaw = `${simErr?.reason || ""} ${simErr?.message || ""} ${simErr?.shortMessage || ""}`.toLowerCase();
       const looksLikeAttestationFailure =
         simRaw.includes("poolerr(48)") ||
@@ -5372,17 +5255,6 @@ async function submitWithdraw(withdrawData) {
   try {
     nullifierUsedPre = Boolean(await poolRead.isNullifierUsed(toBytes32(pi.nullifier)));
   } catch (_) {}
-  // #region agent log
-  debugIngest("index.js:submitWithdraw", "withdraw pre-staticcall snapshot", {
-    nullifier: String(pi.nullifier || ""),
-    inputCommitment: String(pi.inputCommitment || ""),
-    outputCommitmentChange: String(pi.outputCommitmentChange || ""),
-    merkleRoot: String(merkleRoot || ""),
-    nullifierUsedPre,
-    recipient,
-    relayerAddr,
-  }, "run-2", "H10");
-  // #endregion
   const withdrawDataForContract = [
     withdrawProofTuple,
     withdrawPublicInputsTuple,
@@ -5394,17 +5266,6 @@ async function submitWithdraw(withdrawData) {
   try {
     await contract.shieldedWithdraw.staticCall(withdrawDataForContract);
   } catch (simErr) {
-    // #region agent log
-    debugIngest("index.js:submitWithdraw", "withdraw staticcall failed", {
-      reason: simErr?.reason || "",
-      shortMessage: simErr?.shortMessage || "",
-      message: simErr?.message || String(simErr),
-      code: simErr?.code || "",
-      data: simErr?.data || null,
-      nullifier: String(pi.nullifier || ""),
-      inputCommitment: String(pi.inputCommitment || ""),
-    }, "run-2", "H10");
-    // #endregion
     logRelayerOnchainFailure("shieldedWithdraw.staticCall", simErr);
     const err = new Error(`withdraw_simulation_failed: ${simErr?.reason || simErr?.message || String(simErr)}`);
     err.status = 400;

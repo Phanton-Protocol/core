@@ -49,24 +49,6 @@ function stringifyErr(x) {
   return String(x);
 }
 
-function debugLog(hypothesisId, location, message, data = {}, runId = "run-1") {
-  // #region agent log
-  fetch("http://127.0.0.1:7607/ingest/0d14d89d-6146-4059-a766-779f424d4edc", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "c1b159" },
-    body: JSON.stringify({
-      sessionId: "c1b159",
-      runId,
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
-}
-
 function looksLikeEndpointUnavailable(errText) {
   const s = String(errText || "").toLowerCase();
   return (
@@ -920,15 +902,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           /* keep */
         }
       }
-      // #region agent log
-      debugLog("H1", "ProtocolUserDapp.jsx:swap-quote-run", "quote run amount derivation", {
-        customJson: !!customJson,
-        inputAmountRaw: String(intentForm.inputAmount || ""),
-        amountUsed: amt,
-        autoNoteCommitment: String(autoSpendEntry?.note?.commitmentHex || ""),
-        autoNoteAmount: String(autoSpendEntry?.note?.amount || ""),
-      });
-      // #endregion
       if (!base || !cfg?.chainId) return;
       if (!amt || Number(amt) <= 0) {
         setSwapLastQuote(null);
@@ -964,16 +937,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           }),
         });
         if (cancelled) return;
-        // #region agent log
-        debugLog("H5", "ProtocolUserDapp.jsx:swap-quote-source", "quote source observed", {
-          inputToken: tokenIn,
-          outputToken: tokenOut,
-          amountWei,
-          quoteSource: String(q?.quoteSource || ""),
-          amountOut: String(q?.amountOut || "0"),
-          minAmountOut: String(q?.minAmountOut || "0"),
-        });
-        // #endregion
         if (cfg?.mode === "live" && String(q?.quoteSource || "") !== "swap_adaptor") {
           setSwapLastQuote(null);
           setSwapExpectedLabel("");
@@ -1598,16 +1561,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
           );
         }
         const note = entry.note;
-        // #region agent log
-        debugLog("H2", "ProtocolUserDapp.jsx:submitSwap-note-selection", "selected note for swap", {
-          selectedCommitment: String(note?.commitmentHex || ""),
-          selectedAmount: String(note?.amount || ""),
-          selectedSource: String(entry?.source || ""),
-          uiInputAmount: String(intentForm.inputAmount || ""),
-          inputToken: String(intentForm.inputToken || ""),
-          outputToken: String(intentForm.outputToken || ""),
-        });
-        // #endregion
         swapInputVaultNote = note;
         let activeQuote = swapLastQuote || null;
         let outAmtStr = String(activeQuote?.amountOut || "0");
@@ -1905,16 +1858,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       setLastResult(out);
     } catch (e) {
       const rawMsg = stringifyErr(e?.message ?? e);
-      // #region agent log
-      debugLog("H6", "ProtocolUserDapp.jsx:submitSwap-error", "submit swap failed", {
-        message: rawMsg,
-        selectedCommitment: String(swapInputVaultNote?.commitmentHex || ""),
-        selectedAmount: String(swapInputVaultNote?.amount || ""),
-        inputToken: String(intentForm.inputToken || ""),
-        outputToken: String(intentForm.outputToken || ""),
-        inputAmount: String(intentForm.inputAmount || ""),
-      });
-      // #endregion
       if (isSwapNullifierSpentError(rawMsg) && swapInputVaultNote?.commitmentHex && vaultRef.current?.unlocked && vaultRef.current?.key) {
         try {
           const spentHex = String(swapInputVaultNote.commitmentHex).toLowerCase();
@@ -1926,14 +1869,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             const nextData = { ...vaultRef.current.data, notes: nextNotes, updatedAt: new Date().toISOString() };
             await saveVault({ key: vaultRef.current.key, data: nextData });
             setVault({ unlocked: true, key: vaultRef.current.key, data: nextData });
-            // #region agent log
-            debugLog("H3", "ProtocolUserDapp.jsx:submitSwap-prune", "spent note pruned after nullifier error", {
-              spentCommitment: spentHex,
-              beforeCount: currentNotes.length,
-              afterCount: nextNotes.length,
-              rawMsg,
-            });
-            // #endregion
             setActionError(
               `${rawMsg} Removed the spent local note from vault; refresh quote and retry with a fresh note.`
             );
@@ -2031,22 +1966,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
         };
 
         let lastNullifierErr = null;
+        const attemptedCommitments = [];
         for (const candidate of spend) {
           const note = candidate.note;
+          attemptedCommitments.push(String(note?.commitmentHex || ""));
           const inputWei = BigInt(note.amount);
           const changeWei = inputWei - amountWei - protocolFee - gasRefund;
           if (changeWei <= 0n) continue;
-          // #region agent log
-          debugLog("H7", "ProtocolUserDapp.jsx:submitWithdraw-candidate", "withdraw candidate selected", {
-            token: String(withdrawForm.token || ""),
-            amountWei: amountWei.toString(),
-            protocolFee: protocolFee.toString(),
-            gasRefund: gasRefund.toString(),
-            noteCommitment: String(note?.commitmentHex || ""),
-            noteAmount: String(note?.amount || ""),
-            changeWei: changeWei.toString(),
-          });
-          // #endregion
           try {
             const merkle = await fetchMerkleForNote(base, note, cfg);
             const proofBody = {
@@ -2101,14 +2027,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               },
               encryptedPayload: "0x",
             };
-            // #region agent log
-            debugLog("H8", "ProtocolUserDapp.jsx:submitWithdraw-payload", "withdraw payload before encryption", {
-              nullifier: String(gen?.publicInputs?.nullifier || ""),
-              inputCommitment: String(gen?.publicInputs?.inputCommitment || ""),
-              outputCommitmentChange: String(gen?.publicInputs?.outputCommitmentChange || ""),
-              recipient: String(recipient || ""),
-            });
-            // #endregion
 
             const keyInfo = await fetchJson(`${base}/relayer/encryption-key`);
             const envelope = await encryptForRelayer({ withdrawData }, keyInfo?.publicKeyPem);
@@ -2152,13 +2070,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
             }
             return;
           } catch (attemptErr) {
-            // #region agent log
-            debugLog("H9", "ProtocolUserDapp.jsx:submitWithdraw-attempt-error", "withdraw attempt failed", {
-              message: stringifyErr(attemptErr?.message ?? attemptErr),
-              noteCommitment: String(note?.commitmentHex || ""),
-              noteAmount: String(note?.amount || ""),
-            });
-            // #endregion
             if (isWithdrawNullifierSpentError(attemptErr)) {
               lastNullifierErr = attemptErr;
               try {
