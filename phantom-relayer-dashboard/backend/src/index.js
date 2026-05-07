@@ -3088,6 +3088,12 @@ app.post("/quote", async (req, res) => {
         }
       }
       const outAmount = BigInt((await adaptor.getExpectedOutput(swapParams)).toString());
+      // Guard against corrupted adaptor quotes (observed rare absurd outputs on testnet);
+      // fallback to oracle quote path instead of poisoning UI with impossible numbers.
+      const maxReasonableOut = amountInBn * 1000n;
+      if (outAmount <= 0n || outAmount > maxReasonableOut) {
+        throw new Error(`swap_adaptor_unreasonable_quote: out=${outAmount} in=${amountInBn}`);
+      }
       const minOut = (outAmount * BigInt(10000 - slippageBps)) / 10000n;
       const payload = {
         quoteSource: "swap_adaptor",

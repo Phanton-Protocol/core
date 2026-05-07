@@ -442,6 +442,15 @@ function isWithdrawNullifierSpentError(err) {
   );
 }
 
+function isSwapNullifierSpentError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    /swap note already spent on-chain/.test(msg) ||
+    /swap_simulation_failed:\s*sp:nul/.test(msg) ||
+    (/nullifier/.test(msg) && /(spent|already|used)/.test(msg))
+  );
+}
+
 function mergeSwapData(base, overlay) {
   if (!overlay || typeof overlay !== "object") return base;
   const out = { ...base, ...overlay };
@@ -1471,6 +1480,8 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     setLastResult(null);
     setSwapFlowBusy(true);
     setSwapFlowStage("Preparing swap...");
+    /** Track auto-selected vault note across try/catch for spent-nullifier pruning. */
+    let swapInputVaultNote = null;
     try {
       if (!wallet.signer) throw new Error("Connect wallet first.");
       if (!cfg?.chainId || !cfg?.addresses?.shieldedPool) throw new Error("Backend config not loaded.");
@@ -1508,7 +1519,6 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
       let swapData;
       /** Set only in the auto-generated swap path (vault spend note). Advanced JSON has no `note` binding. */
-      let swapInputVaultNote = null;
       const customRaw = String(intentForm.swapDataJson || "").trim();
       if (customRaw) {
         try {
@@ -1839,7 +1849,32 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       }
       setLastResult(out);
     } catch (e) {
-      setActionError(stringifyErr(e?.message ?? e));
+      const rawMsg = stringifyErr(e?.message ?? e);
+      if (isSwapNullifierSpentError(rawMsg) && swapInputVaultNote?.commitmentHex && vaultRef.current?.unlocked && vaultRef.current?.key) {
+        try {
+          const spentHex = String(swapInputVaultNote.commitmentHex).toLowerCase();
+          const currentNotes = Array.isArray(vaultRef.current?.data?.notes) ? vaultRef.current.data.notes : [];
+          const nextNotes = currentNotes.filter(
+            (entry) => String(entry?.payload?.commitmentHex || "").toLowerCase() !== spentHex
+          );
+          if (nextNotes.length !== currentNotes.length) {
+            const nextData = { ...vaultRef.current.data, notes: nextNotes, updatedAt: new Date().toISOString() };
+            await saveVault({ key: vaultRef.current.key, data: nextData });
+            setVault({ unlocked: true, key: vaultRef.current.key, data: nextData });
+            setActionError(
+              `${rawMsg} Removed the spent local note from vault; refresh quote and retry with a fresh note.`
+            );
+          } else {
+            setActionError(rawMsg);
+          }
+        } catch (pruneErr) {
+          setActionError(
+            `${rawMsg} Also failed to prune spent local note: ${stringifyErr(pruneErr?.message ?? pruneErr)}`
+          );
+        }
+      } else {
+        setActionError(rawMsg);
+      }
     } finally {
       setSwapFlowBusy(false);
       setSwapFlowStage("");
@@ -2744,7 +2779,14 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               onChange={(e) => {
                 const next = e.target.value;
                 setSwapInputTokenChoice(next);
-                if (next !== "__custom__") setIntentForm({ ...intentForm, inputToken: next });
+                if (next !== "__custom__") {
+                  setIntentForm({
+                    ...intentForm,
+                    inputToken: next,
+                    inputAmount: "",
+                    minOutputAmount: "",
+                  });
+                }
               }}
               style={{ marginTop: 6, width: "100%", borderRadius: 12, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "12px 10px", fontSize: 15, fontWeight: 600 }}
             >
@@ -2797,7 +2839,13 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               onChange={(e) => {
                 const next = e.target.value;
                 setSwapOutputTokenChoice(next);
-                if (next !== "__custom__") setIntentForm({ ...intentForm, outputToken: next });
+                if (next !== "__custom__") {
+                  setIntentForm({
+                    ...intentForm,
+                    outputToken: next,
+                    minOutputAmount: "",
+                  });
+                }
               }}
               style={{ marginTop: 6, width: "100%", borderRadius: 12, border: `1px solid ${PC.border}`, background: "#2c2f36", color: "#fff", padding: "12px 10px", fontSize: 15, fontWeight: 600 }}
             >
