@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { getShieldedPoolFactory } = require("./helpers/libraryLinker.cjs");
 
 /**
  * Minimal integration: deploy pool + DepositHandler (same order as scripts/deploy/deploy-all.ts), BNB deposit.
@@ -34,7 +35,7 @@ describe("ShieldedPool deposit path", function () {
 
     await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-    const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+    const ShieldedPool = await getShieldedPoolFactory("ShieldedPool");
     const shieldedPool = await ShieldedPool.deploy(
       joinSplitAddr,
       joinSplitAddr,

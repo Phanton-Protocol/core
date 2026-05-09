@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { getShieldedPoolFactory } = require("./helpers/libraryLinker.cjs");
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 
 /**
@@ -35,7 +36,7 @@ describe("depositFor ERC20 (relayer + BNB fee for $2 policy)", function () {
 
     await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-    const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+    const ShieldedPool = await getShieldedPoolFactory("ShieldedPool");
     const shieldedPool = await ShieldedPool.deploy(
       joinSplitAddr,
       joinSplitAddr,

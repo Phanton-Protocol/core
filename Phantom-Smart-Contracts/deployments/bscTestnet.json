@@ -2,23 +2,32 @@
   "network": "bscTestnet",
   "chainId": "97",
   "deployer": "0x8F41eA1304032b69b03ED01708ac8522627c2734",
-  "deployedAt": "2026-04-20T15:02:24.042Z",
+  "deployedAt": "2026-05-09T17:33:11.866Z",
   "primary": "ShieldedPool",
   "contracts": {
-    "joinSplitVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
-    "portfolioVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
-    "thresholdVerifier": "0x2e96d4b64c83C1b13275199Ecb82FA965077B215",
-    "swapAdaptor": "0x88521d26561d26E7A91c427bA37Bebe8e1ec4556",
-    "feeOracle": "0x633D5Edd746B07F8dBBAc95b1F5E36C8a8cb48D2",
-    "relayerRegistry": "0xDA92Ee4f20853D55885dF5aAa04Df86AfBC79fb8",
-    "shieldedPool": "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2",
-    "depositHandler": "0x51718507Ba072b64D9aE2d42F04de545aF93590F",
-    "transactionHistory": "0xa4536Ba90012f5887Bc78b7084b71ce46bb838a5"
+    "joinSplitVerifier": "0x7B58230D3869C7f7266B82B420828Cf566e1BFb6",
+    "portfolioVerifier": "0x7B58230D3869C7f7266B82B420828Cf566e1BFb6",
+    "thresholdVerifier": "0x5100BD6B0904ab0514fFadf100C979266814a13d",
+    "swapAdaptor": "0x7ecf116f881cb2F8ABd31DFF2704E6a2f7D3169E",
+    "feeOracle": "0x0c2F90A2CEe393260B7E7DB865f5424a93fD12C9",
+    "relayerRegistry": "0xB7ba5565C59289ee74fF2a0d31bbe4F78a7d01e2",
+    "internalMatchIntentLib": "0x5Fd208f66F8A7C1200f9284569370366Ca632E7E",
+    "shieldedPool": "0xE18051F9fabb4ABB12e18BE4931A15f2Ef9a4631",
+    "mockVerifierJoinSplit": "0x7B58230D3869C7f7266B82B420828Cf566e1BFb6",
+    "mockVerifierThreshold": "0x5100BD6B0904ab0514fFadf100C979266814a13d",
+    "mockSwapAdaptor": "0x7ecf116f881cb2F8ABd31DFF2704E6a2f7D3169E"
   },
   "deploymentTxs": {
-    "feeOracle": "0x1e632c6bfe60e58f07376aec22666a7a07b7d136558edc6738b54480cd14623e",
-    "shieldedPool": "0x064433c8d63b84952956e659d45b37afc0ce1fe602ab7a47cf516305e75a4d60",
-    "depositHandler": "0x5a65c76584e028e546fa9ab52d51ce6d994fd43e1707a51ed1be85df9ee33066",
-    "transactionHistory": "0xcd8ce5333cf1aed81e47e4dff07e53994795ad4dea3c5dccfdfaebaf905b8ec8"
+    "joinSplitVerifier": "0x646b04611eec031bbe2dd030001f5b7c8881de477c98fe1364f792c8e05df6d5",
+    "portfolioVerifier": "0x646b04611eec031bbe2dd030001f5b7c8881de477c98fe1364f792c8e05df6d5",
+    "thresholdVerifier": "0x9480fd303141502ad73793a58f10d1521ce1ed7347bf10229a39c04e3ff91e03",
+    "swapAdaptor": "0x9318adf69de557f9c8ae41ce7691d8067314aa5bfc6900f6ff66c24439ee339d",
+    "feeOracle": "0xb119ce7c92f7fc7e9dbe952170953350d4256064173c01a66e7e858e101349c7",
+    "relayerRegistry": "0x4d76ec93c1a9aac4a6d02ba17850978a1133182d9ffb76ac0e45d1e56f1b26eb",
+    "internalMatchIntentLib": "0x11e25facd545733d555cf662e7eeb545f0b63f80817d68a3e13006843270755d",
+    "shieldedPool": "0xd071c5b880edfa1d522c3d47f4311475040f5eeb0c30b2a465dd446d320f1d9e",
+    "mockVerifierJoinSplit": "0x646b04611eec031bbe2dd030001f5b7c8881de477c98fe1364f792c8e05df6d5",
+    "mockVerifierThreshold": "0x9480fd303141502ad73793a58f10d1521ce1ed7347bf10229a39c04e3ff91e03",
+    "mockSwapAdaptor": "0x9318adf69de557f9c8ae41ce7691d8067314aa5bfc6900f6ff66c24439ee339d"
   }
 }

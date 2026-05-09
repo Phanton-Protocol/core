@@ -54,7 +54,12 @@ async function main() {
     console.log("[redeploy] reusing existing swapAdaptor:", swapAdaptor);
   }
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  const InternalMatchIntentLib = await ethers.getContractFactory("InternalMatchIntentLib");
+  const internalMatchIntentLib = await InternalMatchIntentLib.deploy();
+  await internalMatchIntentLib.waitForDeployment();
+  const ShieldedPool = await ethers.getContractFactory("ShieldedPool", {
+    libraries: { InternalMatchIntentLib: await internalMatchIntentLib.getAddress() },
+  });
   const pool = await ShieldedPool.deploy(joinSplit, joinSplit, threshold, swapAdaptor, feeOracleAddr, relayerRegistry);
   await pool.waitForDeployment();
   const poolAddr = await pool.getAddress();

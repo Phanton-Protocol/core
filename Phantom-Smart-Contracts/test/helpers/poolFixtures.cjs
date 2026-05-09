@@ -1,4 +1,5 @@
 const { ethers } = require("hardhat");
+const { getShieldedPoolFactory } = require("./libraryLinker.cjs");
 
 const TREE_DEPTH = 10n;
 
@@ -55,7 +56,7 @@ async function deployPoolFixture() {
 
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  const ShieldedPool = await getShieldedPoolFactory("ShieldedPool");
   const shieldedPool = await ShieldedPool.deploy(
     joinSplitAddr,
     joinSplitAddr,

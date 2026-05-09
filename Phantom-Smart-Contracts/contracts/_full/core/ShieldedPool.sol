@@ -13,6 +13,7 @@ import "../libraries/MerkleTree.sol";
 import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/MiMC7.sol";
 import "../libraries/DexSwapFee.sol";
+import "../libraries/InternalMatchIntentLib.sol";
 import "./ComplianceModule.sol";
 import "./TransactionHistory.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -40,8 +41,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Matches circuit/array sizes
-    uint256 public constant MAX_ASSETS = 256; // Support up to 256 different assets
-    uint256 public constant PORTFOLIO_ASSET_COUNT = 9; // Fixed portfolio vector size
 
     /// @dev BN128 scalar field order (Circom / Groth16 `Fr`); public inputs must match field reduction.
     uint256 internal constant SNARK_SCALAR_FIELD =
@@ -74,9 +73,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     mapping(uint256 => address) public assetRegistry; // assetID => token address
     mapping(address => uint256) public assetIDMap; // token address => assetID
     uint256 public nextAssetID;
-    /// @notice DEX protocol swap fee = 10 bps (0.10%); see `DexSwapFee` / E-paper §1.8.
-    uint256 public constant DEX_SWAP_FEE_BPS = 10;
-    uint256 public constant BPS_DENOMINATOR = 10000;
     
     // ============ Portfolio Note System ============
     /// @notice One portfolio note per user (address => commitment + nonce)
@@ -107,44 +103,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     /// @dev Prevents frontrunning by requiring commitment before reveal
     mapping(bytes32 => bool) public swapCommitments; // commitment hash => used
     mapping(bytes32 => uint256) public swapCommitmentDeadline; // commitment hash => deadline timestamp
-    uint256 public constant COMMIT_REVEAL_DELAY = 1 minutes; // Minimum delay between commit and reveal
-    uint256 public constant MAX_DEADLINE_DURATION = 1 hours; // Maximum time from commit to reveal
+    uint256 internal constant MAX_DEADLINE_DURATION = 1 hours; // Maximum time from commit to reveal
     
     /// @notice Nonce-based ordering to prevent reordering attacks
-    mapping(address => uint256) public userNonces; // user address => last used nonce
-    
-    /// @notice Batch execution protection - prevents sandwich attacks
-    uint256 public constant MAX_BATCH_SIZE = 10; // Maximum swaps per batch
-    mapping(bytes32 => uint256) public batchExecutionTime; // batch hash => execution timestamp
-    bytes32 public constant RELAYER_ATTESTATION_TYPEHASH = keccak256(
-        "RelayerSwapAttestation(bytes32 proofHash,bytes32 nullifier,uint256 inputAssetID,uint256 outputAssetIDSwap,uint256 swapAmount,uint256 minOutputAmountSwap,address relayer,address pool,uint256 chainId,uint256 deadline,uint256 nonce)"
-    );
-    bytes32 public constant RELAYER_ATTESTATION_HASH_FIRST_TYPEHASH = keccak256(
-        "RelayerSwapAttestationHashFirst(bytes32 proofHash,bytes32 publicInputHash,address relayer,address pool,uint256 chainId,uint256 deadline,uint256 nonce)"
-    );
-    bytes32 public constant RELAYER_ATTESTATION_DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
-    bytes32 public constant RELAYER_ATTESTATION_NAME_HASH = keccak256("PhantomRelayerAttestation");
-    bytes32 public constant RELAYER_ATTESTATION_VERSION_HASH = keccak256("1");
     mapping(address => mapping(uint256 => bool)) public relayerAttestationNonceUsed;
-    bytes32 public constant INTERNAL_MATCH_ATTESTATION_TYPEHASH = keccak256(
-        "InternalMatchAttestation(bytes32 decisionHash,bytes32 matchHash,bytes32 executionKey,address relayer,bytes32 signerSetHash,uint256 deadline,uint256 nonce)"
-    );
-    bytes32 public constant INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
-    bytes32 public constant INTERNAL_MATCH_ATTESTATION_NAME_HASH = keccak256("PhantomInternalMatchAttestation");
-    bytes32 public constant INTERNAL_MATCH_ATTESTATION_VERSION_HASH = keccak256("1");
     mapping(address => mapping(uint256 => bool)) public internalMatchAttestationNonceUsed;
     mapping(bytes32 => bool) public usedInternalMatchHashes;
     mapping(bytes32 => bool) public usedInternalDecisionHashes;
 
-    bytes32 public constant INTERNAL_MATCH_INTENT_TYPEHASH = keccak256(
-        "InternalMatchIntent(address user,uint8 side,uint256 inputAssetID,uint256 outputAssetID,uint256 amount,uint256 limitPrice,uint256 nonce,uint256 deadline,bytes32 ciphertextHash)"
-    );
-    bytes32 public constant INTERNAL_MATCH_INTENT_DOMAIN_NAME_HASH = keccak256("PhantomInternalMatchIntent");
-    bytes32 public constant INTERNAL_MATCH_INTENT_DOMAIN_VERSION_HASH = keccak256("1");
     mapping(address => mapping(uint256 => bool)) public internalMatchIntentNonceUsed;
     
     // ============ Compliance Module ============
@@ -156,11 +122,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     /// @notice Contract owner (can set compliance module)
     address internal poolOwner;
     
-    // ============ Fee Constants ============
-    uint256 public constant DEPOSIT_FEE_USD = 2 * 1e8; // $2 in USD (8 decimals)
-    uint256 public constant INTERNAL_MATCH_FEE_BPS = 20; // 0.2% = 20 basis points
-    uint256 public constant DEX_FALLBACK_FEE_BPS = 10; // 0.1% = 10 basis points
-
     // ============ Events ============
     event Deposit(
         address indexed depositor,
@@ -562,88 +523,13 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     function internalMatchSettle(
         InternalMatchSettlementData calldata settlementData
     ) external override nonReentrant onlyRelayer {
-        if (usedInternalMatchHashes[settlementData.matchHash]) revert PoolErr(52);
-        if (usedInternalDecisionHashes[settlementData.decisionHash]) revert PoolErr(53);
-        if (settlementData.attestationDeadline < block.timestamp) revert PoolErr(54);
-        if (internalMatchAttestationNonceUsed[msg.sender][settlementData.attestationNonce]) revert PoolErr(55);
-
-        bytes32 decisionHash = _computeInternalDecisionHash(settlementData.artifact);
-        if (decisionHash != settlementData.decisionHash) revert PoolErr(56);
-        if (!settlementData.artifact.approved) revert PoolErr(57);
-
-        if (settlementData.artifact.makerInputCommitment != settlementData.makerSwapData.publicInputs.inputCommitment) revert PoolErr(56);
-        if (settlementData.artifact.takerInputCommitment != settlementData.takerSwapData.publicInputs.inputCommitment) revert PoolErr(56);
-        if (settlementData.artifact.makerInputAssetID != settlementData.makerSwapData.publicInputs.inputAssetID) revert PoolErr(56);
-        if (settlementData.artifact.takerInputAssetID != settlementData.takerSwapData.publicInputs.inputAssetID) revert PoolErr(56);
-        if (settlementData.artifact.executionPrice == 0 || settlementData.artifact.quantity == 0) revert PoolErr(56);
-        if (!settlementData.artifact.makerIsSell || !settlementData.artifact.takerIsBuy) revert PoolErr(56);
-        if (settlementData.artifact.quantity > settlementData.takerSwapData.publicInputs.swapAmount) revert PoolErr(56);
-        if (settlementData.artifact.quantity > settlementData.makerSwapData.publicInputs.swapAmount) revert PoolErr(56);
-        bytes32 expectedTakerContextHash = _computeInternalProofContextHash(
-            settlementData.decisionHash,
-            settlementData.matchHash,
-            settlementData.executionKey,
-            settlementData.takerSwapData.publicInputs
-        );
-        bytes32 expectedMakerContextHash = _computeInternalProofContextHash(
-            settlementData.decisionHash,
-            settlementData.matchHash,
-            settlementData.executionKey,
-            settlementData.makerSwapData.publicInputs
-        );
-        if (settlementData.takerSwapData.proofContextHash == bytes32(0) || settlementData.takerSwapData.proofContextHash != expectedTakerContextHash) {
-            revert PoolErr(58);
-        }
-        if (settlementData.makerSwapData.proofContextHash == bytes32(0) || settlementData.makerSwapData.proofContextHash != expectedMakerContextHash) {
-            revert PoolErr(58);
-        }
-
-        bytes32 digest = _computeInternalMatchAttestationDigest(
-            settlementData.decisionHash,
-            settlementData.matchHash,
-            settlementData.executionKey,
+        InternalMatchIntentLib.processInternalMatchSettle(
+            settlementData,
             msg.sender,
-            settlementData.artifact.signerSetHash,
-            settlementData.attestationDeadline,
-            settlementData.attestationNonce
-        );
-        address recovered = _recoverAttestationSigner(digest, settlementData.attestationSig);
-        if (recovered != msg.sender) revert PoolErr(51);
-        if (settlementData.artifact.signerSetHash != keccak256(abi.encodePacked(msg.sender))) revert PoolErr(56);
-
-        _verifyInternalMatchUserIntent(
-            settlementData.makerSignedIntent,
-            settlementData.artifact.makerInputAssetID,
-            settlementData.artifact.takerInputAssetID,
-            settlementData.artifact.quantity,
-            settlementData.artifact.executionPrice,
-            settlementData.artifact.makerIsSell,
-            true
-        );
-        _verifyInternalMatchUserIntent(
-            settlementData.takerSignedIntent,
-            settlementData.artifact.takerInputAssetID,
-            settlementData.artifact.makerInputAssetID,
-            settlementData.artifact.quantity,
-            settlementData.artifact.executionPrice,
-            !settlementData.artifact.takerIsBuy,
-            false
-        );
-
-        internalMatchAttestationNonceUsed[msg.sender][settlementData.attestationNonce] = true;
-        internalMatchIntentNonceUsed[settlementData.makerSignedIntent.intent.user][settlementData.makerSignedIntent.intent.nonce] = true;
-        internalMatchIntentNonceUsed[settlementData.takerSignedIntent.intent.user][settlementData.takerSignedIntent.intent.nonce] = true;
-
-        usedInternalMatchHashes[settlementData.matchHash] = true;
-        usedInternalDecisionHashes[settlementData.decisionHash] = true;
-
-        emit InternalMatchSettled(
-            settlementData.matchHash,
-            settlementData.decisionHash,
-            settlementData.executionKey,
-            settlementData.artifact.makerOrderId,
-            settlementData.artifact.takerOrderId,
-            msg.sender
+            usedInternalMatchHashes,
+            usedInternalDecisionHashes,
+            internalMatchAttestationNonceUsed,
+            internalMatchIntentNonceUsed
         );
     }
 
@@ -793,204 +679,19 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         // Log transaction for history intentionally off-chain.
     }
 
-    function _computeInternalDecisionHash(
-        InternalMatchDecisionArtifact calldata artifact
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                artifact.makerOrderId,
-                artifact.takerOrderId,
-                artifact.makerInputCommitment,
-                artifact.takerInputCommitment,
-                artifact.makerInputAssetID,
-                artifact.takerInputAssetID,
-                artifact.executionPrice,
-                artifact.quantity,
-                artifact.makerIsSell,
-                artifact.takerIsBuy,
-                artifact.approved,
-                artifact.decidedAt,
-                artifact.decisionNonce,
-                artifact.signerSetHash
-            )
-        );
-    }
-
-    function _computeInternalMatchAttestationDigest(
-        bytes32 decisionHash,
-        bytes32 matchHash,
-        bytes32 executionKey,
-        address relayer,
-        bytes32 signerSetHash,
-        uint256 deadline,
-        uint256 nonce
-    ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                INTERNAL_MATCH_ATTESTATION_TYPEHASH,
-                decisionHash,
-                matchHash,
-                executionKey,
-                relayer,
-                signerSetHash,
-                deadline,
-                nonce
-            )
-        );
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH,
-                INTERNAL_MATCH_ATTESTATION_NAME_HASH,
-                INTERNAL_MATCH_ATTESTATION_VERSION_HASH,
-                block.chainid,
-                address(this)
-            )
-        );
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-    }
-
-    function _verifyInternalMatchUserIntent(
-        SignedInternalMatchIntent calldata signed,
-        uint256 expectedInputAssetID,
-        uint256 expectedOutputAssetID,
-        uint256 minAmount,
-        uint256 executionPrice,
-        bool expectedIsSell,
-        bool isMaker
-    ) internal view {
-        InternalMatchIntent calldata intent = signed.intent;
-        if (intent.user == address(0)) revert PoolErr(isMaker ? 59 : 60);
-        if (intent.deadline < block.timestamp) revert PoolErr(63);
-        if (internalMatchIntentNonceUsed[intent.user][intent.nonce]) revert PoolErr(62);
-        if (intent.inputAssetID != expectedInputAssetID || intent.outputAssetID != expectedOutputAssetID) {
-            revert PoolErr(61);
-        }
-        if (intent.amount < minAmount) revert PoolErr(61);
-        if (expectedIsSell) {
-            if (intent.side != 0 || executionPrice < intent.limitPrice) revert PoolErr(61);
-        } else {
-            if (intent.side != 1 || executionPrice > intent.limitPrice) revert PoolErr(61);
-        }
-        bytes32 digest = _computeInternalMatchIntentDigest(intent);
-        address recovered = _recoverAttestationSigner(digest, signed.signature);
-        if (recovered == address(0) || recovered != intent.user) {
-            revert PoolErr(isMaker ? 59 : 60);
-        }
-    }
-
-    function _computeInternalMatchIntentDigest(
-        InternalMatchIntent calldata intent
-    ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                INTERNAL_MATCH_INTENT_TYPEHASH,
-                intent.user,
-                intent.side,
-                intent.inputAssetID,
-                intent.outputAssetID,
-                intent.amount,
-                intent.limitPrice,
-                intent.nonce,
-                intent.deadline,
-                intent.ciphertextHash
-            )
-        );
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH,
-                INTERNAL_MATCH_INTENT_DOMAIN_NAME_HASH,
-                INTERNAL_MATCH_INTENT_DOMAIN_VERSION_HASH,
-                block.chainid,
-                address(this)
-            )
-        );
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-    }
-
-    function _computeInternalProofContextHash(
-        bytes32 decisionHash,
-        bytes32 matchHash,
-        bytes32 executionKey,
-        JoinSplitPublicInputs memory inputs
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                keccak256("PHANTOM_INTERNAL_MATCH_PROOF_CONTEXT_V1"),
-                decisionHash,
-                matchHash,
-                executionKey,
-                inputs.nullifier,
-                inputs.inputCommitment,
-                inputs.outputCommitmentSwap,
-                inputs.outputCommitmentChange,
-                inputs.inputAssetID,
-                inputs.outputAssetIDSwap,
-                inputs.outputAssetIDChange,
-                inputs.swapAmount
-            )
-        );
-    }
-
     function _verifyRelayerSwapAttestation(
         JoinSplitSwapData calldata swapData,
         JoinSplitPublicInputs memory inputs,
         address relayer
     ) internal {
-        if (swapData.relayerAttestationSig.length == 0) revert PoolErr(48);
-        if (swapData.relayerAttestationDeadline < block.timestamp) revert PoolErr(49);
-        if (relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce]) revert PoolErr(50);
-
-        bytes32 proofHash = keccak256(abi.encode(swapData.proof.a, swapData.proof.b, swapData.proof.c));
-        bytes32 publicInputHash = _computeRelayerPublicInputHash(inputs);
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                RELAYER_ATTESTATION_DOMAIN_TYPEHASH,
-                RELAYER_ATTESTATION_NAME_HASH,
-                RELAYER_ATTESTATION_VERSION_HASH,
-                block.chainid,
-                address(this)
-            )
+        InternalMatchIntentLib.verifyRelayerSwapAttestation(
+            swapData,
+            inputs,
+            relayer,
+            msg.sender,
+            _computeRelayerPublicInputHash(inputs),
+            relayerAttestationNonceUsed
         );
-        bytes32 hashFirstStructHash = keccak256(
-            abi.encode(
-                RELAYER_ATTESTATION_HASH_FIRST_TYPEHASH,
-                proofHash,
-                publicInputHash,
-                relayer,
-                address(this),
-                block.chainid,
-                swapData.relayerAttestationDeadline,
-                swapData.relayerAttestationNonce
-            )
-        );
-        bytes32 hashFirstDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, hashFirstStructHash));
-        bytes32 structHash = keccak256(
-            abi.encode(
-                RELAYER_ATTESTATION_TYPEHASH,
-                proofHash,
-                inputs.nullifier,
-                inputs.inputAssetID,
-                inputs.outputAssetIDSwap,
-                inputs.swapAmount,
-                inputs.minOutputAmountSwap,
-                relayer,
-                address(this),
-                block.chainid,
-                swapData.relayerAttestationDeadline,
-                swapData.relayerAttestationNonce
-            )
-        );
-        bytes32 legacyDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        address recovered = _recoverAttestationSigner(hashFirstDigest, swapData.relayerAttestationSig);
-        bytes32 usedDigest = hashFirstDigest;
-        if (recovered != msg.sender || recovered != relayer) {
-            recovered = _recoverAttestationSigner(legacyDigest, swapData.relayerAttestationSig);
-            usedDigest = legacyDigest;
-            if (recovered != msg.sender || recovered != relayer) revert PoolErr(51);
-        }
-
-        relayerAttestationNonceUsed[relayer][swapData.relayerAttestationNonce] = true;
-        emit RelayerAttestationVerified(relayer, swapData.relayerAttestationNonce, usedDigest);
     }
 
     function _computeRelayerPublicInputHash(
@@ -1025,20 +726,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         return MiMC7.mimc7(r8, withdrawMode);
     }
 
-    function _recoverAttestationSigner(bytes32 digest, bytes memory signature) internal pure returns (address) {
-        if (signature.length != 65) return address(0);
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := mload(add(signature, 32))
-            s := mload(add(signature, 64))
-            v := byte(0, mload(add(signature, 96)))
-        }
-        if (v < 27) v += 27;
-        if (v != 27 && v != 28) return address(0);
-        return ecrecover(digest, v, r, s);
-    }
 
     /**
      * @notice Executes a shielded withdrawal from the pool
@@ -1224,51 +911,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
      * @dev Rule: Must have at least 2 recipients
      * @param withdrawData Multi-output withdrawal data
      */
+    /// @dev Multi-output withdrawal disabled in the Phase 7 build. The previous
+    ///      implementation only partially validated proofs/nullifiers and was
+    ///      removed to keep the contract under the EIP-170 size limit. Callers
+    ///      should use {shieldedWithdraw} per recipient instead.
     function multiOutputWithdraw(
-        MultiOutputWithdrawData calldata withdrawData
+        MultiOutputWithdrawData calldata /* withdrawData */
     ) external override nonReentrant {
-        JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
-        WithdrawalRecipient[] memory recipients = withdrawData.recipients;
-        
-        if (recipients.length < 2) revert PoolErr(21);
-        
-        // Calculate total withdrawal amount
-        uint256 totalWithdrawAmount = 0;
-        for (uint256 i = 0; i < recipients.length; i++) {
-            if (recipients[i].recipient == address(0) || recipients[i].amount == 0) revert PoolErr(22);
-            totalWithdrawAmount += recipients[i].amount;
-        }
-        
-        // Verify withdrawal amount matches proof
-        if (inputs.swapAmount != totalWithdrawAmount) revert PoolErr(46);
-        
-        // Use same validation as single withdrawal
-        if (inputs.outputCommitmentSwap != bytes32(0) || inputs.outputAssetIDSwap != 0) revert PoolErr(23);
-        
-        // ============ STEP 0-8: SAME AS SINGLE WITHDRAWAL ============
-        // (nullifier check, proof verification, merkle root, etc.)
-        // For brevity, we'll reuse the same validation logic
-        
-        // ============ STEP 6: TRANSFER TO MULTIPLE RECIPIENTS ============
-        address inputToken = assetRegistry[inputs.inputAssetID];
-        if (inputToken == address(0)) revert PoolErr(11);
-        
-        for (uint256 i = 0; i < recipients.length; i++) {
-            if (inputToken == address(0)) {
-                payable(recipients[i].recipient).transfer(recipients[i].amount);
-            } else {
-                IERC20(inputToken).transfer(recipients[i].recipient, recipients[i].amount);
-            }
-        }
-        
-        // Rest of the function follows same pattern as shieldedWithdraw
-        // (merkle tree update, nullifier marking, relayer refund, etc.)
-        // For now, we'll call the internal logic
-        // Note: This is a simplified version - full implementation would include all validation steps
-
-        if (withdrawData.encryptedPayload.length > 0) {
-            emit EncryptedPayload(inputs.nullifier, withdrawData.encryptedPayload);
-        }
+        revert PoolErr(47);
     }
 
     // ============ View Functions ============
@@ -1381,44 +1031,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             arr[9] = _computeJoinSplitRoutingCommitment(inputs) % SNARK_SCALAR_FIELD;
         }
         return arr;
-    }
-
-    function _calculateDepositFeeOld(address token, uint256 amount) internal view returns (uint256) {
-        // CRITICAL: Minimum $2 USD fee, always deducted from principal
-        uint256 usdValue;
-        try feeOracle.getUSDValue(token, amount) returns (uint256 v) {
-            usdValue = v;
-        } catch {
-            // If oracle fails, use minimum $2 fee
-            // Assume BNB price ~$600, so $2 = ~0.0033 BNB
-            if (token == address(0)) {
-                return 3300000000000000; // 0.0033 BNB = ~$2 at $600/BNB
-            }
-            return 0; // For ERC20, need oracle
-        }
-        
-        if (usdValue == 0) {
-            // Fallback: minimum $2 fee
-            if (token == address(0)) {
-                return 3300000000000000; // 0.0033 BNB = ~$2 at $600/BNB
-            }
-            return 0;
-        }
-        
-        // Minimum $2 USD fee (2 * 1e8 = 200000000 with 8 decimals)
-        uint256 minFeeUsd = 2 * 1e8; // $2 minimum
-        
-        // Calculate fee: max(2%, $2)
-        uint256 percentFeeUsd = (usdValue * 200) / 10000; // 2% of deposit
-        uint256 feeUsd = percentFeeUsd > minFeeUsd ? percentFeeUsd : minFeeUsd;
-        
-        // Convert USD fee to token amount
-        uint256 tokenDecimals = token == address(0) ? 18 : 18;
-        uint256 fee = (feeUsd * (10 ** tokenDecimals)) / (10 ** 8);
-        
-        // Fee is always deducted from principal, but cannot exceed amount
-        if (fee > amount) return amount;
-        return fee;
     }
 
     function _depositInternal(

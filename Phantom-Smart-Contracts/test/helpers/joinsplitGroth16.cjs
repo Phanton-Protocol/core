@@ -1,6 +1,7 @@
 const path = require("path");
 const { ethers } = require("hardhat");
 const snarkjs = require("snarkjs");
+const { getShieldedPoolFactory } = require("./libraryLinker.cjs");
 
 const PSC_ROOT = path.resolve(__dirname, "..", "..");
 const WASM = path.join(
@@ -117,7 +118,7 @@ async function deployPoolWithRealJoinSplitVerifier() {
   const relayerRegistryAddr = await relayerRegistry.getAddress();
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  const ShieldedPool = await getShieldedPoolFactory("ShieldedPool");
   const pool = await ShieldedPool.deploy(
     joinAddr,
     portfolioAddr,

@@ -26,7 +26,10 @@ module.exports = {
         // Lower runs shrinks bytecode (helps EIP-170 warnings on large contracts).
         runs: useFullTree ? 1 : 200,
       },
-      ...(useFullTree ? { viaIR: true } : {}),
+      // Drop the trailing CBOR metadata hash from runtime bytecode to claw back
+      // ~50 bytes per contract — needed to keep ShieldedPool under EIP-170 on
+      // BSC testnet after the Phase 1 internal-match additions.
+      ...(useFullTree ? { viaIR: true, metadata: { bytecodeHash: "none" } } : {}),
     },
   },
   paths: {

@@ -58,7 +58,19 @@ async function main() {
   const regTx = await relayerRegistry.registerRelayer(deployer.address);
   await regTx.wait();
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  // Phase 7: ShieldedPool delegates EIP-712 + signature verification heavy
+  // lifting into InternalMatchIntentLib so the deployed bytecode stays under
+  // EIP-170 (24,576 bytes). The library must be deployed first and linked
+  // into the ShieldedPool contract factory.
+  const InternalMatchIntentLib = await ethers.getContractFactory("InternalMatchIntentLib");
+  const internalMatchIntentLib = await InternalMatchIntentLib.deploy();
+  await internalMatchIntentLib.waitForDeployment();
+  const internalMatchIntentLibAddr = await internalMatchIntentLib.getAddress();
+  console.log("InternalMatchIntentLib:", internalMatchIntentLibAddr);
+
+  const ShieldedPool = await ethers.getContractFactory("ShieldedPool", {
+    libraries: { InternalMatchIntentLib: internalMatchIntentLibAddr },
+  });
   const shieldedPool = await ShieldedPool.deploy(
     infra.joinSplit,
     infra.portfolio,
@@ -77,12 +89,14 @@ async function main() {
     swapAdaptor: infra.swapAdaptor,
     feeOracle: feeOracleAddr,
     relayerRegistry: relayerRegistryAddr,
+    internalMatchIntentLib: internalMatchIntentLibAddr,
     shieldedPool: shieldedPoolAddr,
   };
   const deploymentTxs: Record<string, string> = {
     ...infra.deploymentTxs,
     feeOracle: deploymentTxHash(feeOracle),
     relayerRegistry: deploymentTxHash(relayerRegistry),
+    internalMatchIntentLib: deploymentTxHash(internalMatchIntentLib),
     shieldedPool: deploymentTxHash(shieldedPool),
   };
   if (infra.groth16Verifier) {

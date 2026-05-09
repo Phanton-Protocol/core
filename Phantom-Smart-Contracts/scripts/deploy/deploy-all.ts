@@ -54,7 +54,14 @@ async function main() {
 
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  const InternalMatchIntentLib = await ethers.getContractFactory("InternalMatchIntentLib");
+  const internalMatchIntentLib = await InternalMatchIntentLib.deploy();
+  await internalMatchIntentLib.waitForDeployment();
+  const internalMatchIntentLibAddr = await internalMatchIntentLib.getAddress();
+
+  const ShieldedPool = await ethers.getContractFactory("ShieldedPool", {
+    libraries: { InternalMatchIntentLib: internalMatchIntentLibAddr },
+  });
   const shieldedPool = await ShieldedPool.deploy(
     infra.joinSplit,
     infra.portfolio,

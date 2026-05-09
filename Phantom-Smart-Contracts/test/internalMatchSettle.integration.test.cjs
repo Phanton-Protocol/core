@@ -21,7 +21,12 @@ async function deployPoolWithConfigurableVerifier() {
   await relayerRegistry.waitForDeployment();
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const ShieldedPool = await ethers.getContractFactory("ShieldedPool");
+  const InternalMatchIntentLib = await ethers.getContractFactory("InternalMatchIntentLib");
+  const internalMatchIntentLib = await InternalMatchIntentLib.deploy();
+  await internalMatchIntentLib.waitForDeployment();
+  const ShieldedPool = await ethers.getContractFactory("ShieldedPool", {
+    libraries: { InternalMatchIntentLib: await internalMatchIntentLib.getAddress() },
+  });
   const pool = await ShieldedPool.deploy(
     verifierAddr,
     verifierAddr,
