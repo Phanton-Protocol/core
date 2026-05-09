@@ -16,6 +16,7 @@ const {
   listMatchDecisionsByOrder,
 } = require("./db");
 const { ORDER_STATUS, assertLegalTransition } = require("./internalOrderLifecycle");
+const { decryptJsonAtRest } = require("./noteCipher");
 const router = express.Router();
 
 const FHE_MODE_RAW = String(process.env.FHE_MODE || "mock").trim().toLowerCase();
@@ -104,6 +105,7 @@ let matchingContext = {
   fhePolicyMode: DEFAULT_FHE_POLICY_MODE === "strict" ? "strict" : "degraded",
   degradedAllowUnavailable: DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE,
   fheCompatibilityEvaluator: null,
+  internalMatchCompareEvaluator: null,
 };
 let jsonFallbackLock = Promise.resolve();
 
@@ -375,6 +377,8 @@ function configureMatchingEngine(opts = {}) {
     fhePolicyMode: nextPolicyMode,
     degradedAllowUnavailable: nextDegradedAllowUnavailable,
     fheCompatibilityEvaluator: typeof opts.fheCompatibilityEvaluator === "function" ? opts.fheCompatibilityEvaluator : null,
+    internalMatchCompareEvaluator:
+      typeof opts.internalMatchCompareEvaluator === "function" ? opts.internalMatchCompareEvaluator : null,
   };
 }
 
@@ -559,6 +563,16 @@ function persistMatchAndFills(db, payload) {
       makerRemainingBefore: payload.maker.remainingAmount,
       takerRemainingBefore: payload.taker.remainingAmount,
       decisionArtifact: payload.decisionArtifact || null,
+      fheAttestation: payload.fheAttestation || null,
+      onchain: {
+        internalMatchData: {
+          decisionHash: payload.fheDecisionHash || null,
+          matchHash: payload.matchHash,
+          executionKey: payload.executionKey,
+          makerSignedIntent: payload.makerSignedIntent || null,
+          takerSignedIntent: payload.takerSignedIntent || null,
+        },
+      },
     },
     createdAt: now,
   });
@@ -586,6 +600,169 @@ function persistMatchAndFills(db, payload) {
     idempotent: false,
     match: getMatchByHash(db, payload.matchHash),
     fills: listFillsByMatch(db, matchId),
+  };
+}
+
+// ---------- Phase 4: real FHE compare + signed user intent persistence ----------
+//
+// When both orders carry an EIP-712 InternalMatchIntent (Phase 2) and the FHE
+// service is reachable, the matching service prefers the new
+// `/internal-match/compare` endpoint introduced in Phase 3. The endpoint
+// returns a signed match attestation; this module verifies the signature,
+// optionally checks it against EXPECTED_FHE_ATTESTATION_SIGNER, and persists
+// the user signed intents + attestation alongside the match so that the
+// settlement coordinator's `onchainSubmitter` can feed them into
+// `internalMatchSettle` (Phase 1 contract).
+
+function getExpectedFheAttestationSigner() {
+  const v = String(process.env.EXPECTED_FHE_ATTESTATION_SIGNER || "").trim();
+  if (!v) return null;
+  try {
+    return ethers.getAddress(v);
+  } catch {
+    return null;
+  }
+}
+
+function safeDecryptOrderEnvelope(order) {
+  try {
+    if (!order?.encryptedPayload) return null;
+    return decryptJsonAtRest(order.encryptedPayload);
+  } catch (e) {
+    return { _decryptError: e?.message || String(e) };
+  }
+}
+
+function extractMatchIntentBundle(order) {
+  const normalized = order?.normalizedPayload || {};
+  const intent = normalized?.matchIntent?.intent || null;
+  if (!intent) return null;
+  const envelope = safeDecryptOrderEnvelope(order) || {};
+  const ciphertext = envelope?.matchIntent?.ciphertext ?? null;
+  const signature =
+    envelope?.matchIntent?.signature ?? normalized?.matchIntent?.signature ?? null;
+  if (!ciphertext || !signature) return null;
+  return { intent, ciphertext, signature };
+}
+
+function verifyFheAttestation(attestation) {
+  if (!attestation || typeof attestation !== "object") {
+    return { valid: false, reason: "attestation_missing" };
+  }
+  const { decisionHash, signature, signerAddress, canonical } = attestation;
+  if (!decisionHash || !signature) {
+    return { valid: false, reason: "attestation_fields_missing" };
+  }
+  if (canonical && typeof canonical === "object") {
+    const recomputed = ethers.keccak256(ethers.toUtf8Bytes(stableStringify(canonical)));
+    if (recomputed.toLowerCase() !== String(decisionHash).toLowerCase()) {
+      return { valid: false, reason: "decision_hash_canonical_mismatch", recomputed };
+    }
+  }
+  let recovered;
+  try {
+    recovered = ethers.recoverAddress(decisionHash, signature);
+  } catch (e) {
+    return { valid: false, reason: "signature_recover_failed", error: e?.message || String(e) };
+  }
+  if (signerAddress) {
+    try {
+      const expected = ethers.getAddress(signerAddress);
+      if (expected.toLowerCase() !== recovered.toLowerCase()) {
+        return { valid: false, reason: "claimed_signer_mismatch", recovered, claimed: expected };
+      }
+    } catch {
+      return { valid: false, reason: "claimed_signer_invalid", recovered };
+    }
+  }
+  const expectedSigner = getExpectedFheAttestationSigner();
+  if (expectedSigner && expectedSigner.toLowerCase() !== recovered.toLowerCase()) {
+    return { valid: false, reason: "unexpected_signer", recovered, expected: expectedSigner };
+  }
+  return { valid: true, recovered };
+}
+
+async function evaluateInternalMatchCompare(taker, maker, traceId) {
+  if (typeof matchingContext.internalMatchCompareEvaluator === "function") {
+    try {
+      const out = await matchingContext.internalMatchCompareEvaluator({ taker, maker, traceId });
+      return out;
+    } catch (e) {
+      return {
+        availability: "unavailable",
+        compatible: false,
+        code: "evaluator_error",
+        attestationRef: null,
+        error: e?.message || String(e),
+      };
+    }
+  }
+
+  const takerBundle = extractMatchIntentBundle(taker);
+  const makerBundle = extractMatchIntentBundle(maker);
+  if (!takerBundle || !makerBundle) {
+    return null; // signal caller to fall back to legacy /compatibility path
+  }
+  if (!isRemoteEnabled()) {
+    return { availability: "unavailable", compatible: false, code: "service_not_configured", attestationRef: null };
+  }
+
+  let body;
+  try {
+    body = await fheRemoteFetch("/internal-match/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        traceId,
+        maker: { intent: makerBundle.intent, ciphertext: makerBundle.ciphertext, signature: makerBundle.signature },
+        taker: { intent: takerBundle.intent, ciphertext: takerBundle.ciphertext, signature: takerBundle.signature },
+        context: { matchTraceId: traceId },
+      }),
+    });
+  } catch (e) {
+    return {
+      availability: "unavailable",
+      compatible: false,
+      code: e?.name === "AbortError" ? "timeout" : "remote_error",
+      attestationRef: null,
+      error: e?.message || String(e),
+    };
+  }
+
+  const matched = Boolean(body?.matched);
+  const attestation = body?.attestation || null;
+  const verification = matched ? verifyFheAttestation(attestation) : { valid: !attestation || true };
+  if (matched && !verification.valid) {
+    return {
+      availability: "available",
+      compatible: false,
+      code: `attestation_invalid:${verification.reason || "unknown"}`,
+      attestationRef: attestation?.decisionHash || null,
+      attestationSignature: attestation?.signature || null,
+      attestationPayloadHash: attestation?.decisionHash || null,
+      decisionDomain: "phantom-fhe-attestation/v1",
+      error: verification.error || verification.reason || "attestation_invalid",
+      verifiedSigner: verification.recovered || null,
+      fheCanonical: attestation?.canonical || null,
+      fheResult: body?.result || null,
+      makerSignedIntent: { intent: makerBundle.intent, signature: makerBundle.signature },
+      takerSignedIntent: { intent: takerBundle.intent, signature: takerBundle.signature },
+    };
+  }
+  return {
+    availability: "available",
+    compatible: matched,
+    code: matched ? "fhe_compare_match" : `fhe_compare_${body?.reason || "no_match"}`,
+    attestationRef: attestation?.decisionHash || null,
+    attestationSignature: attestation?.signature || null,
+    attestationPayloadHash: attestation?.decisionHash || null,
+    decisionDomain: "phantom-fhe-attestation/v1",
+    decisionNonce: attestation?.canonical?.ts || null,
+    verifiedSigner: matched ? verification.recovered : null,
+    fheCanonical: attestation?.canonical || null,
+    fheResult: body?.result || null,
+    makerSignedIntent: { intent: makerBundle.intent, signature: makerBundle.signature },
+    takerSignedIntent: { intent: takerBundle.intent, signature: takerBundle.signature },
   };
 }
 
@@ -706,7 +883,10 @@ async function pickBestCompatibleCounterparty(db, taker, allOrders, nowSec, poli
       continue;
     }
 
-    const fhe = await evaluateFheCompatibility(taker, candidate, traceId);
+    let fhe = await evaluateInternalMatchCompare(taker, candidate, traceId);
+    if (fhe == null) {
+      fhe = await evaluateFheCompatibility(taker, candidate, traceId);
+    }
     const fheResultHash = computeFheResultHash(fhe);
     const unavailable = fhe.availability !== "available";
     if (unavailable) {
@@ -886,6 +1066,17 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       fheDecisionHash: decisionArtifactBundle.decisionHash,
       fheAttestationRef: selected.fheAttestationRef,
       decisionArtifact: decisionArtifactBundle.artifact,
+      makerSignedIntent: selected.fheDetails?.makerSignedIntent || null,
+      takerSignedIntent: selected.fheDetails?.takerSignedIntent || null,
+      fheAttestation: selected.fheDetails?.fheCanonical
+        ? {
+            decisionHash: selected.fheDetails?.attestationPayloadHash || null,
+            signature: selected.fheDetails?.attestationSignature || null,
+            signerAddress: selected.fheDetails?.verifiedSigner || null,
+            canonical: selected.fheDetails?.fheCanonical || null,
+            result: selected.fheDetails?.fheResult || null,
+          }
+        : null,
     });
 
     const takerAfter = derivePostFillState(takerReservedRow, fillQty, executionKey, actor);
@@ -1452,4 +1643,6 @@ module.exports.REASON_CODES = REASON_CODES;
 module.exports.deriveFheSecurityPolicy = deriveFheSecurityPolicy;
 module.exports.assertFheProductionSafety = assertFheProductionSafety;
 module.exports.FHE_PRODUCTION_MODE = FHE_PRODUCTION_MODE;
+module.exports.verifyFheAttestation = verifyFheAttestation;
+module.exports.evaluateInternalMatchCompare = evaluateInternalMatchCompare;
 loadOrderBook();
