@@ -101,6 +101,29 @@ async function signInternalMatchAttestation({
   });
 }
 
+async function signInternalMatchIntent({ signer, poolAddress, chainId, intent }) {
+  const domain = {
+    name: "PhantomInternalMatchIntent",
+    version: "1",
+    chainId,
+    verifyingContract: poolAddress,
+  };
+  const types = {
+    InternalMatchIntent: [
+      { name: "user", type: "address" },
+      { name: "side", type: "uint8" },
+      { name: "inputAssetID", type: "uint256" },
+      { name: "outputAssetID", type: "uint256" },
+      { name: "amount", type: "uint256" },
+      { name: "limitPrice", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "ciphertextHash", type: "bytes32" },
+    ],
+  };
+  return signer.signTypedData(domain, types, intent);
+}
+
 function computeProofContextHash({ decisionHash, matchHash, executionKey, publicInputs }) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   return ethers.keccak256(
@@ -140,6 +163,8 @@ function computeProofContextHash({ decisionHash, matchHash, executionKey, public
 async function buildSettlementData({ pool, deployer, overrides = {} }) {
   const network = await ethers.provider.getNetwork();
   const relayer = deployer.address;
+  const makerWallet = overrides.makerWallet || ethers.Wallet.createRandom();
+  const takerWallet = overrides.takerWallet || ethers.Wallet.createRandom();
   const matchHash = overrides.matchHash || ethers.keccak256(ethers.toUtf8Bytes("m6-match"));
   const executionKey = overrides.executionKey || ethers.keccak256(ethers.toUtf8Bytes("m6-exec"));
   const makerOrderId = overrides.makerOrderId || ethers.keccak256(ethers.toUtf8Bytes("m6-maker"));
@@ -249,6 +274,42 @@ async function buildSettlementData({ pool, deployer, overrides = {} }) {
     executionKey,
     publicInputs: makerLeg.publicInputs,
   });
+  const intentDeadline = overrides.intentDeadline ?? attestationDeadline;
+  const ciphertextHash = overrides.ciphertextHash ?? ethers.keccak256(ethers.toUtf8Bytes("ct-bundle"));
+  const makerIntent = {
+    user: makerWallet.address,
+    side: 0,
+    inputAssetID: artifact.makerInputAssetID,
+    outputAssetID: artifact.takerInputAssetID,
+    amount: artifact.quantity,
+    limitPrice: overrides.makerLimitPrice ?? artifact.executionPrice,
+    nonce: overrides.makerIntentNonce ?? 1001n,
+    deadline: intentDeadline,
+    ciphertextHash,
+  };
+  const takerIntent = {
+    user: takerWallet.address,
+    side: 1,
+    inputAssetID: artifact.takerInputAssetID,
+    outputAssetID: artifact.makerInputAssetID,
+    amount: artifact.quantity,
+    limitPrice: overrides.takerLimitPrice ?? artifact.executionPrice,
+    nonce: overrides.takerIntentNonce ?? 2002n,
+    deadline: intentDeadline,
+    ciphertextHash,
+  };
+  const makerSig = overrides.makerIntentSig || await signInternalMatchIntent({
+    signer: makerWallet,
+    poolAddress: await pool.getAddress(),
+    chainId: Number(network.chainId),
+    intent: makerIntent,
+  });
+  const takerSig = overrides.takerIntentSig || await signInternalMatchIntent({
+    signer: takerWallet,
+    poolAddress: await pool.getAddress(),
+    chainId: Number(network.chainId),
+    intent: takerIntent,
+  });
   return {
     takerSwapData: takerLeg,
     makerSwapData: makerLeg,
@@ -259,6 +320,8 @@ async function buildSettlementData({ pool, deployer, overrides = {} }) {
     attestationSig,
     attestationDeadline,
     attestationNonce,
+    makerSignedIntent: { intent: makerIntent, signature: makerSig },
+    takerSignedIntent: { intent: takerIntent, signature: takerSig },
   };
 }
 
@@ -318,5 +381,72 @@ describe("ShieldedPool.internalMatchSettle (Module 6)", function () {
     const data = await buildSettlementData({ pool, deployer });
     data.takerSwapData.proofContextHash = "0x" + "ee".repeat(32);
     await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(58);
+  });
+
+  it("rejects bad maker user signature", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({ pool, deployer });
+    const attacker = ethers.Wallet.createRandom();
+    data.makerSignedIntent.signature = await attacker.signMessage("not the right thing");
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(59);
+  });
+
+  it("rejects bad taker user signature", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({ pool, deployer });
+    const attacker = ethers.Wallet.createRandom();
+    data.takerSignedIntent.signature = await attacker.signMessage("not the right thing");
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(60);
+  });
+
+  it("rejects taker intent with worse-than-execution limit price", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: { takerLimitPrice: 5n },
+    });
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(61);
+  });
+
+  it("rejects expired user intent deadline", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const data = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: { intentDeadline: 1n },
+    });
+    await expect(pool.internalMatchSettle(data)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(63);
+  });
+
+  it("rejects replayed user intent nonce", async function () {
+    const { pool, deployer } = await deployPoolWithConfigurableVerifier();
+    const sharedMaker = ethers.Wallet.createRandom();
+    const sharedTaker = ethers.Wallet.createRandom();
+    const first = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: {
+        makerWallet: sharedMaker,
+        takerWallet: sharedTaker,
+        makerIntentNonce: 7777n,
+        takerIntentNonce: 8888n,
+      },
+    });
+    await pool.internalMatchSettle(first);
+    const second = await buildSettlementData({
+      pool,
+      deployer,
+      overrides: {
+        makerWallet: sharedMaker,
+        takerWallet: sharedTaker,
+        makerIntentNonce: 7777n,
+        takerIntentNonce: 9999n,
+        matchHash: ethers.keccak256(ethers.toUtf8Bytes("m6-match-2")),
+        decisionNonce: 88n,
+        attestationNonce: 444n,
+      },
+    });
+    await expect(pool.internalMatchSettle(second)).to.be.revertedWithCustomError(pool, "PoolErr").withArgs(62);
   });
 });

@@ -139,6 +139,13 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     mapping(address => mapping(uint256 => bool)) public internalMatchAttestationNonceUsed;
     mapping(bytes32 => bool) public usedInternalMatchHashes;
     mapping(bytes32 => bool) public usedInternalDecisionHashes;
+
+    bytes32 public constant INTERNAL_MATCH_INTENT_TYPEHASH = keccak256(
+        "InternalMatchIntent(address user,uint8 side,uint256 inputAssetID,uint256 outputAssetID,uint256 amount,uint256 limitPrice,uint256 nonce,uint256 deadline,bytes32 ciphertextHash)"
+    );
+    bytes32 public constant INTERNAL_MATCH_INTENT_DOMAIN_NAME_HASH = keccak256("PhantomInternalMatchIntent");
+    bytes32 public constant INTERNAL_MATCH_INTENT_DOMAIN_VERSION_HASH = keccak256("1");
+    mapping(address => mapping(uint256 => bool)) public internalMatchIntentNonceUsed;
     
     // ============ Compliance Module ============
     /// @notice Compliance module for Chainalysis checks
@@ -604,7 +611,28 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (recovered != msg.sender) revert PoolErr(51);
         if (settlementData.artifact.signerSetHash != keccak256(abi.encodePacked(msg.sender))) revert PoolErr(56);
 
+        _verifyInternalMatchUserIntent(
+            settlementData.makerSignedIntent,
+            settlementData.artifact.makerInputAssetID,
+            settlementData.artifact.takerInputAssetID,
+            settlementData.artifact.quantity,
+            settlementData.artifact.executionPrice,
+            settlementData.artifact.makerIsSell,
+            true
+        );
+        _verifyInternalMatchUserIntent(
+            settlementData.takerSignedIntent,
+            settlementData.artifact.takerInputAssetID,
+            settlementData.artifact.makerInputAssetID,
+            settlementData.artifact.quantity,
+            settlementData.artifact.executionPrice,
+            !settlementData.artifact.takerIsBuy,
+            false
+        );
+
         internalMatchAttestationNonceUsed[msg.sender][settlementData.attestationNonce] = true;
+        internalMatchIntentNonceUsed[settlementData.makerSignedIntent.intent.user][settlementData.makerSignedIntent.intent.nonce] = true;
+        internalMatchIntentNonceUsed[settlementData.takerSignedIntent.intent.user][settlementData.takerSignedIntent.intent.nonce] = true;
 
         usedInternalMatchHashes[settlementData.matchHash] = true;
         usedInternalDecisionHashes[settlementData.decisionHash] = true;
@@ -814,6 +842,64 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
                 INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH,
                 INTERNAL_MATCH_ATTESTATION_NAME_HASH,
                 INTERNAL_MATCH_ATTESTATION_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _verifyInternalMatchUserIntent(
+        SignedInternalMatchIntent calldata signed,
+        uint256 expectedInputAssetID,
+        uint256 expectedOutputAssetID,
+        uint256 minAmount,
+        uint256 executionPrice,
+        bool expectedIsSell,
+        bool isMaker
+    ) internal view {
+        InternalMatchIntent calldata intent = signed.intent;
+        if (intent.user == address(0)) revert PoolErr(isMaker ? 59 : 60);
+        if (intent.deadline < block.timestamp) revert PoolErr(63);
+        if (internalMatchIntentNonceUsed[intent.user][intent.nonce]) revert PoolErr(62);
+        if (intent.inputAssetID != expectedInputAssetID || intent.outputAssetID != expectedOutputAssetID) {
+            revert PoolErr(61);
+        }
+        if (intent.amount < minAmount) revert PoolErr(61);
+        if (expectedIsSell) {
+            if (intent.side != 0 || executionPrice < intent.limitPrice) revert PoolErr(61);
+        } else {
+            if (intent.side != 1 || executionPrice > intent.limitPrice) revert PoolErr(61);
+        }
+        bytes32 digest = _computeInternalMatchIntentDigest(intent);
+        address recovered = _recoverAttestationSigner(digest, signed.signature);
+        if (recovered == address(0) || recovered != intent.user) {
+            revert PoolErr(isMaker ? 59 : 60);
+        }
+    }
+
+    function _computeInternalMatchIntentDigest(
+        InternalMatchIntent calldata intent
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                INTERNAL_MATCH_INTENT_TYPEHASH,
+                intent.user,
+                intent.side,
+                intent.inputAssetID,
+                intent.outputAssetID,
+                intent.amount,
+                intent.limitPrice,
+                intent.nonce,
+                intent.deadline,
+                intent.ciphertextHash
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                INTERNAL_MATCH_ATTESTATION_DOMAIN_TYPEHASH,
+                INTERNAL_MATCH_INTENT_DOMAIN_NAME_HASH,
+                INTERNAL_MATCH_INTENT_DOMAIN_VERSION_HASH,
                 block.chainid,
                 address(this)
             )

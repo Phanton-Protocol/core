@@ -769,6 +769,25 @@ function normalizeInternalDecisionArtifactTuple(artifact = {}, payload = {}) {
   ];
 }
 
+function normalizeSignedInternalMatchIntentTuple(signed = {}) {
+  const intent = signed?.intent || {};
+  const sig = signed?.signature || "0x";
+  return [
+    [
+      String(intent?.user || ethers.ZeroAddress),
+      Number(intent?.side ?? 0),
+      toU256(intent?.inputAssetID),
+      toU256(intent?.outputAssetID),
+      toU256(intent?.amount),
+      toU256(intent?.limitPrice),
+      toU256(intent?.nonce),
+      toU256(intent?.deadline ?? Math.floor(Date.now() / 1000) + 900),
+      toBytes32(intent?.ciphertextHash),
+    ],
+    sig,
+  ];
+}
+
 function createOnchainInternalMatchSubmitter({
   rpcUrl = process.env.RPC_URL,
   privateKey = process.env.RELAYER_PRIVATE_KEY,
@@ -783,7 +802,7 @@ function createOnchainInternalMatchSubmitter({
   const provider = providerFactory ? providerFactory(rpcUrl) : new ethers.JsonRpcProvider(rpcUrl);
   const signer = signerFactory ? signerFactory(privateKey, provider) : new ethers.Wallet(privateKey, provider);
   const abi = [
-    "function internalMatchSettle((((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),bytes32,bytes32,bytes32,(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,bytes32),bytes,uint256,uint256)) external",
+    "function internalMatchSettle((((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),((bytes,bytes,bytes),(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256[10],uint256[10]),(address,address,uint256,uint256,uint24,uint160,bytes),address,bytes,bytes32,uint256,uint256,bytes,uint256,uint256,bytes32),bytes32,bytes32,bytes32,(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,bytes32),bytes,uint256,uint256,((address,uint8,uint256,uint256,uint256,uint256,uint256,uint256,bytes32),bytes),((address,uint8,uint256,uint256,uint256,uint256,uint256,uint256,bytes32),bytes))) external",
   ];
   const contract = contractFactory
     ? contractFactory(shieldedPoolAddress, abi, signer)
@@ -850,6 +869,11 @@ function createOnchainInternalMatchSubmitter({
         computeInternalProofContextHash(bindingDecisionHash, bindingMatchHash, bindingExecutionKey, makerLeg?.publicInputs || {}),
     });
     const decisionArtifact = payload?.fheBinding?.decisionArtifact || data?.decisionArtifact || {};
+    const makerSigned = data?.makerSignedIntent || payload?.makerSignedIntent || null;
+    const takerSigned = data?.takerSignedIntent || payload?.takerSignedIntent || null;
+    if (!makerSigned || !takerSigned) {
+      throw new Error("internal_match_user_signed_intents_missing");
+    }
     const settlementTuple = [
       takerTuple,
       makerTuple,
@@ -860,6 +884,8 @@ function createOnchainInternalMatchSubmitter({
       data.attestationSig || "0x",
       toU256(data.attestationDeadline ?? Math.floor(Date.now() / 1000) + 900),
       toU256(data.attestationNonce ?? data.relayerAttestationNonce ?? 0),
+      normalizeSignedInternalMatchIntentTuple(makerSigned),
+      normalizeSignedInternalMatchIntentTuple(takerSigned),
     ];
 
     const tx = await contract.internalMatchSettle(settlementTuple);

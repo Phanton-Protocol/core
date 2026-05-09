@@ -182,7 +182,35 @@ struct InternalMatchDecisionArtifact {
 }
 
 /**
+ * @notice EIP-712 InternalMatchIntent — signed off-chain by maker or taker.
+ * @dev `ciphertextHash` binds this intent to a specific FHE-encrypted price+amount
+ *      payload (computed off-chain), preventing reuse of a signature with a
+ *      different ciphertext.
+ */
+struct InternalMatchIntent {
+    address user;               // Wallet that submitted this intent
+    uint8 side;                 // 0 = sell, 1 = buy
+    uint256 inputAssetID;
+    uint256 outputAssetID;
+    uint256 amount;             // Plaintext amount cap (matched leg must be <= this)
+    uint256 limitPrice;         // Plaintext limit price (FHE service enforces compatibility)
+    uint256 nonce;              // Per-user nonce (replay protection)
+    uint256 deadline;           // Unix timestamp; settlement must happen before this
+    bytes32 ciphertextHash;     // keccak256 of the FHE ciphertext bundle
+}
+
+/**
+ * @notice Pair of an InternalMatchIntent + its signature.
+ */
+struct SignedInternalMatchIntent {
+    InternalMatchIntent intent;
+    bytes signature;            // EIP-712 signature by `intent.user`
+}
+
+/**
  * @notice Atomic internal-match settlement payload (dual leg + decision attestation).
+ * @dev Now also carries the maker + taker EIP-712 InternalMatchIntent signatures
+ *      so the on-chain settler can prove BOTH users authorized this match.
  */
 struct InternalMatchSettlementData {
     JoinSplitSwapData takerSwapData;
@@ -194,6 +222,8 @@ struct InternalMatchSettlementData {
     bytes attestationSig;
     uint256 attestationDeadline;
     uint256 attestationNonce;
+    SignedInternalMatchIntent makerSignedIntent;
+    SignedInternalMatchIntent takerSignedIntent;
 }
 
 /**

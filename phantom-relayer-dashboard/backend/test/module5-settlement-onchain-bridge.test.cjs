@@ -108,6 +108,8 @@ function seedOnchainMatch(db, options = {}) {
           matchHash,
           executionKey,
           encryptedPayload: "0x",
+          makerSignedIntent: makeStubSignedIntent({ user: "0x" + "11".repeat(20), nonce: "1" }),
+          takerSignedIntent: makeStubSignedIntent({ user: "0x" + "22".repeat(20), nonce: "2" }),
         },
       },
     },
@@ -183,6 +185,23 @@ function computeProofContextHash({ decisionHash, matchHash, executionKey, inputs
       ]
     )
   );
+}
+
+function makeStubSignedIntent({ user, nonce }) {
+  return {
+    intent: {
+      user,
+      side: 0,
+      inputAssetID: "0",
+      outputAssetID: "1",
+      amount: "1000000000000000000",
+      limitPrice: "10",
+      nonce,
+      deadline: String(Math.floor(Date.now() / 1000) + 600),
+      ciphertextHash: "0x" + "0c".repeat(32),
+    },
+    signature: "0x" + "00".repeat(65),
+  };
 }
 
 function buildDecisionArtifact({
@@ -339,6 +358,8 @@ test("module5 onchain submitter calls internalMatchSettle", async () => {
           merklePath: Array(10).fill("0"),
           merklePathIndices: Array(10).fill("0"),
         },
+        makerSignedIntent: makeStubSignedIntent({ user: "0x" + "11".repeat(20), nonce: "1" }),
+        takerSignedIntent: makeStubSignedIntent({ user: "0x" + "22".repeat(20), nonce: "2" }),
       },
     },
     fheBinding: {
