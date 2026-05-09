@@ -43,6 +43,38 @@ const INTERNAL_CANCEL_TYPES = {
   ],
 };
 
+// Phase 2: matches the on-chain `InternalMatchIntent` EIP-712 typehash on
+// `ShieldedPool` exactly. Both maker and taker sign this intent off-chain;
+// the relayer carries both signatures into `internalMatchSettle`, which then
+// re-verifies them on-chain (`_computeInternalMatchIntentDigest`).
+const INTERNAL_MATCH_INTENT_TYPES = {
+  InternalMatchIntent: [
+    { name: "user", type: "address" },
+    { name: "side", type: "uint8" },
+    { name: "inputAssetID", type: "uint256" },
+    { name: "outputAssetID", type: "uint256" },
+    { name: "amount", type: "uint256" },
+    { name: "limitPrice", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+    { name: "ciphertextHash", type: "bytes32" },
+  ],
+};
+const MATCH_INTENT_DOMAIN_NAME = "PhantomInternalMatchIntent";
+const MATCH_INTENT_DOMAIN_VERSION = "1";
+
+const matchIntentSchema = z.object({
+  user: z.string().refine((v) => ethers.isAddress(v)),
+  side: z.union([z.literal(0), z.literal(1)]),
+  inputAssetID: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  outputAssetID: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  amount: z.string().regex(/^\d+$/),
+  limitPrice: z.string().regex(/^\d+$/),
+  nonce: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  deadline: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]),
+  ciphertextHash: z.string().refine((v) => ethers.isHexString(v, 32)),
+}).strict();
+
 const orderIntentSchema = z.object({
   intent: z.object({
     owner: z.string().refine((v) => ethers.isAddress(v)),
@@ -58,6 +90,9 @@ const orderIntentSchema = z.object({
   }).strict(),
   signature: z.string().min(2),
   envelope: z.any().optional(),
+  matchIntent: matchIntentSchema.optional(),
+  matchSignature: z.string().min(2).optional(),
+  ciphertext: z.union([z.string().min(1), z.record(z.any())]).optional(),
 }).strict();
 
 const cancelSchema = z.object({
@@ -73,6 +108,39 @@ const cancelSchema = z.object({
 
 function nowSec() {
   return Math.floor(Date.now() / 1000);
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
+function computeCiphertextHash(ciphertext) {
+  if (ciphertext == null) return null;
+  if (typeof ciphertext === "string") {
+    return ethers.keccak256(ethers.toUtf8Bytes(ciphertext));
+  }
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(ciphertext)));
+}
+
+function isStrictUserIntentMode() {
+  if (String(process.env.MATCHING_REQUIRE_USER_INTENT || "").toLowerCase() === "true") return true;
+  if (String(process.env.NODE_ENV || "").toLowerCase() === "production") return true;
+  if (String(process.env.PHANTOM_DEPLOYMENT_TIER || "").toLowerCase() === "production") return true;
+  return false;
+}
+
+function isFheRemoteRequiredMode() {
+  if (String(process.env.MATCHING_FHE_POLICY_MODE || "degraded").toLowerCase() === "strict") return true;
+  if (String(process.env.NODE_ENV || "").toLowerCase() === "production") return true;
+  if (String(process.env.PHANTOM_DEPLOYMENT_TIER || "").toLowerCase() === "production") return true;
+  return false;
+}
+
+function fheModeRemote() {
+  return String(process.env.FHE_MODE || "mock").trim().toLowerCase() === "remote";
 }
 
 function computeOrderId(intent, domain) {
@@ -134,6 +202,111 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
     chainId: Number(chainId),
     verifyingContract: verifyingContract || ethers.ZeroAddress,
   };
+  const matchIntentDomain = {
+    name: MATCH_INTENT_DOMAIN_NAME,
+    version: MATCH_INTENT_DOMAIN_VERSION,
+    chainId: Number(chainId),
+    verifyingContract: verifyingContract || ethers.ZeroAddress,
+  };
+
+  function verifyMatchIntent(parsedBody, normalizedOperatorIntent) {
+    const requireMatchIntent = isStrictUserIntentMode();
+    const matchIntentRaw = parsedBody.matchIntent;
+    const matchSignature = parsedBody.matchSignature;
+    const ciphertext = parsedBody.ciphertext;
+
+    if (!matchIntentRaw && !matchSignature && !ciphertext) {
+      if (requireMatchIntent) {
+        return { ok: false, status: 400, body: { error: "match_intent_required", reason: "MATCH_INTENT_MISSING" } };
+      }
+      return { ok: true, value: null };
+    }
+    if (!matchIntentRaw || !matchSignature || !ciphertext) {
+      return { ok: false, status: 400, body: { error: "match_intent_incomplete", reason: "MATCH_INTENT_INCOMPLETE" } };
+    }
+
+    if (requireMatchIntent && (!fheModeRemote() || !isFheRemoteRequiredMode())) {
+      // Keep dev-mode tolerant; in strict mode user intent must come with real FHE
+      if (isFheRemoteRequiredMode() && !fheModeRemote()) {
+        return { ok: false, status: 503, body: { error: "fhe_remote_required", reason: "FHE_MOCK_FORBIDDEN" } };
+      }
+    }
+
+    const normalizedMatchIntent = {
+      user: ethers.getAddress(matchIntentRaw.user),
+      side: Number(matchIntentRaw.side),
+      inputAssetID: String(matchIntentRaw.inputAssetID),
+      outputAssetID: String(matchIntentRaw.outputAssetID),
+      amount: String(matchIntentRaw.amount),
+      limitPrice: String(matchIntentRaw.limitPrice),
+      nonce: String(matchIntentRaw.nonce),
+      deadline: String(matchIntentRaw.deadline),
+      ciphertextHash: ethers.hexlify(matchIntentRaw.ciphertextHash).toLowerCase(),
+    };
+
+    if (BigInt(normalizedMatchIntent.deadline) <= BigInt(nowSec())) {
+      return { ok: false, status: 400, body: { error: "match_intent_expired", reason: "MATCH_INTENT_EXPIRED" } };
+    }
+
+    if (normalizedMatchIntent.user.toLowerCase() !== normalizedOperatorIntent.owner.toLowerCase()) {
+      return { ok: false, status: 400, body: { error: "match_intent_user_mismatch", reason: "USER_MISMATCH" } };
+    }
+
+    const expectedSide = normalizedOperatorIntent.side === "sell" ? 0 : 1;
+    if (normalizedMatchIntent.side !== expectedSide) {
+      return { ok: false, status: 400, body: { error: "match_intent_side_mismatch", reason: "SIDE_MISMATCH" } };
+    }
+
+    if (BigInt(normalizedMatchIntent.amount) < BigInt(normalizedOperatorIntent.amount)) {
+      return { ok: false, status: 400, body: { error: "match_intent_amount_below_operator_amount", reason: "AMOUNT_MISMATCH" } };
+    }
+
+    if (expectedSide === 0) {
+      if (BigInt(normalizedMatchIntent.limitPrice) > BigInt(normalizedOperatorIntent.limitPrice)) {
+        return { ok: false, status: 400, body: { error: "match_intent_limit_price_mismatch", reason: "LIMIT_PRICE_MISMATCH" } };
+      }
+    } else {
+      if (BigInt(normalizedMatchIntent.limitPrice) < BigInt(normalizedOperatorIntent.limitPrice)) {
+        return { ok: false, status: 400, body: { error: "match_intent_limit_price_mismatch", reason: "LIMIT_PRICE_MISMATCH" } };
+      }
+    }
+
+    const recomputedCiphertextHash = computeCiphertextHash(ciphertext);
+    if (!recomputedCiphertextHash || recomputedCiphertextHash.toLowerCase() !== normalizedMatchIntent.ciphertextHash) {
+      return { ok: false, status: 400, body: { error: "ciphertext_hash_mismatch", reason: "CIPHERTEXT_HASH_MISMATCH" } };
+    }
+
+    const typed = {
+      user: normalizedMatchIntent.user,
+      side: normalizedMatchIntent.side,
+      inputAssetID: BigInt(normalizedMatchIntent.inputAssetID),
+      outputAssetID: BigInt(normalizedMatchIntent.outputAssetID),
+      amount: BigInt(normalizedMatchIntent.amount),
+      limitPrice: BigInt(normalizedMatchIntent.limitPrice),
+      nonce: BigInt(normalizedMatchIntent.nonce),
+      deadline: BigInt(normalizedMatchIntent.deadline),
+      ciphertextHash: normalizedMatchIntent.ciphertextHash,
+    };
+
+    let recoveredSigner;
+    try {
+      recoveredSigner = ethers.verifyTypedData(matchIntentDomain, INTERNAL_MATCH_INTENT_TYPES, typed, matchSignature);
+    } catch (e) {
+      return { ok: false, status: 400, body: { error: "invalid_match_intent_signature", reason: "BAD_SIGNATURE", message: e.message } };
+    }
+    if (recoveredSigner.toLowerCase() !== normalizedMatchIntent.user.toLowerCase()) {
+      return { ok: false, status: 400, body: { error: "match_intent_signer_mismatch", reason: "SIGNER_MISMATCH" } };
+    }
+
+    return {
+      ok: true,
+      value: {
+        intent: normalizedMatchIntent,
+        signature: matchSignature,
+        ciphertext,
+      },
+    };
+  }
 
   router.post("/", async (req, res) => {
     const parsed = orderIntentSchema.safeParse(req.body);
@@ -174,6 +347,12 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
       return res.status(400).json({ error: "invalid_internal_order_signer" });
     }
 
+    const matchIntentResult = verifyMatchIntent(parsed.data, normalizedIntent);
+    if (!matchIntentResult.ok) {
+      return res.status(matchIntentResult.status).json(matchIntentResult.body);
+    }
+    const matchIntentVerified = matchIntentResult.value;
+
     const orderId = computeOrderId(normalizedIntent, domain);
     const existingByReplay = getInternalOrderByReplayKey(db, normalizedIntent.replayKey);
     if (existingByReplay) {
@@ -197,6 +376,13 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
         intent: normalizedIntent,
         signature: parsed.data.signature,
         envelope: parsed.data.envelope ?? null,
+        matchIntent: matchIntentVerified
+          ? {
+              intent: matchIntentVerified.intent,
+              signature: matchIntentVerified.signature,
+              ciphertext: matchIntentVerified.ciphertext,
+            }
+          : null,
       });
     } catch (e) {
       return res.status(503).json({ error: "internal_order_encryption_unavailable", message: e.message });
@@ -224,6 +410,17 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
       }
     }
 
+    const normalizedWithMatchIntent = matchIntentVerified
+      ? {
+          ...normalizedIntent,
+          matchIntent: {
+            intent: matchIntentVerified.intent,
+            signature: matchIntentVerified.signature,
+            signatureHash: hashSignature(matchIntentVerified.signature),
+            ciphertextHash: matchIntentVerified.intent.ciphertextHash,
+          },
+        }
+      : normalizedIntent;
     const row = {
       id: orderId,
       ownerAddress: normalizedIntent.owner.toLowerCase(),
@@ -242,7 +439,7 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
       signatureHash: hashSignature(parsed.data.signature),
       expiryTs: Number(normalizedIntent.expiry),
       encryptedPayload,
-      normalizedPayload: normalizedIntent,
+      normalizedPayload: normalizedWithMatchIntent,
       matchRef: null,
       createdBy: normalizedIntent.owner.toLowerCase(),
       updatedBy: normalizedIntent.owner.toLowerCase(),
@@ -267,7 +464,12 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
       return res.status(409).json({ error: "internal_order_replay_conflict", message: e.message });
     }
 
-    return res.status(201).json({ orderId, status: ORDER_STATUS.OPEN, idempotent: false });
+    return res.status(201).json({
+      orderId,
+      status: ORDER_STATUS.OPEN,
+      idempotent: false,
+      matchIntentBound: !!matchIntentVerified,
+    });
   });
 
   router.post("/cancel", async (req, res) => {
@@ -386,5 +588,9 @@ module.exports = {
   createInternalOrderRouter,
   INTERNAL_ORDER_TYPES,
   INTERNAL_CANCEL_TYPES,
+  INTERNAL_MATCH_INTENT_TYPES,
+  MATCH_INTENT_DOMAIN_NAME,
+  MATCH_INTENT_DOMAIN_VERSION,
   computeOrderId,
+  computeCiphertextHash,
 };
