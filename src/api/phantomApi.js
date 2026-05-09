@@ -13,6 +13,10 @@ export async function getRelayer() {
   return req('/relayer');
 }
 
+export async function getRelayerConfig() {
+  return req('/config');
+}
+
 export async function createReportingKey(walletAddress, signature, message) {
   return req('/tax-reporting-keys', {
     method: 'POST',
