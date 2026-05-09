@@ -86,6 +86,53 @@ FHE_SERVICE_URL=http://127.0.0.1:9101
 
 This is **dev/demo** crypto (server holds the secret context), not production key custody.
 
+## Phase 3 — Signed match attestation
+
+The matching service (TenSEAL or stand-in) holds an ECDSA secp256k1 key whose
+address is published via `GET /attestation-pubkey`. After running the
+homomorphic compare, the service signs a deterministic decision hash over the
+canonical compare payload.
+
+Configure the signer key with:
+
+```bash
+MATCHING_SERVICE_PRIVATE_KEY=0x...   # default in dev: 0x11..11 (do not reuse in prod)
+```
+
+### Endpoints
+
+- `GET /attestation-pubkey` — returns `{ signerAddress, scheme, ... }`.
+- `POST /internal-match/compare` — body:
+  ```json
+  {
+    "maker": { "intent": { "user": "0x..", "side": 0, "inputAssetID": "0", "outputAssetID": "1", "amount": "100", "limitPrice": "10", "nonce": "1", "deadline": "<unix>", "ciphertextHash": "0x.." }, "ciphertext": { "_ckksAmount": "0x..", "_ckksPrice": "0x.." } },
+    "taker": { "intent": { ... side: 1 ... }, "ciphertext": { ... } }
+  }
+  ```
+  Response on a happy match:
+  ```json
+  {
+    "matched": true,
+    "result": { "execPrice": "11", "execAmount": "80", "ts": "<ms>" },
+    "bindings": { "makerCiphertextHash": "0x..", "takerCiphertextHash": "0x..", "makerUser": "0x..", "takerUser": "0x.." },
+    "attestation": {
+      "decisionHash": "0x..",
+      "signature": "0x..",
+      "signerAddress": "0x..",
+      "canonical": { ... payload that was hashed ... }
+    }
+  }
+  ```
+  The relayer verifies `keccak256(stableStringify(canonical)) == decisionHash`
+  and `recoverAddress(decisionHash, signature) == signerAddress`. Phase 4 wires
+  this signed attestation into the on-chain settlement attestation flow.
+
+### Failure reasons returned by the service
+
+`asset_mismatch`, `side_mismatch`, `maker_expired`, `taker_expired`,
+`price_cross_failed`, `amount_zero`, `fhe_decrypt_failed:<msg>`,
+`<role>_intent_missing_fields:<csv>`.
+
 ## Next step toward production-shaped FHE
 
 Move key generation toward a client or HSM, narrow the circuit, and keep the same HTTP contract so the relayer stays stable.

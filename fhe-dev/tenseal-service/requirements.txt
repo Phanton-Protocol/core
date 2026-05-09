@@ -1,3 +1,4 @@
 flask==3.0.3
 tenseal==0.3.16
 pycryptodome==3.21.0
+eth-account==0.13.4
