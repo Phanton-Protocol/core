@@ -226,17 +226,19 @@ contract AdvancedPrivacyPool is ShieldedPool {
     function createPrivateIntent(
         bytes calldata encryptedIntent,
         address[] calldata mpcNodes
-    ) external returns (bytes32 intentId) {
+    ) external nonReentrant returns (bytes32 intentId) {
         require(
             userPrivacyMode[msg.sender] >= PrivacyMode.MAX,
             "Private intents require MAX mode"
         );
         
-        // Submit to MPC coprocessor
-        intentId = mpcCoprocessor.submitPrivateIntent(
+        // Intent id is returned by the coprocessor; nonReentrant prevents reentry before storage below.
+        // wake-disable reentrancy
+        intentId = IMPCCoprocessor(address(mpcCoprocessor)).submitPrivateIntent(
             encryptedIntent,
             mpcNodes
         );
+        // wake-enable reentrancy
         
         // Store intent
         privateIntents[intentId] = PrivateIntent({
