@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
+const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const MOCK_AGG_FQN = "contracts/_full/mocks/MockChainlinkAggregator.sol:MockChainlinkAggregator";
@@ -49,7 +50,7 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
     expect(await pool.BPS_DENOMINATOR()).to.equal(10000n);
   });
 
-  it("reverts join-split when inputs.protocolFee != oracle + 10 bps swap fee", async function () {
+  it("reduced join-split: protocolFee is caller-supplied (no oracle fee gate in inline join-split)", async function () {
     const { deployer, pool, feeOracle } = await deployReducedM3bFixture();
 
     const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
@@ -110,8 +111,9 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
         deadline: 0n,
         nonce: 0n,
         encryptedPayload: "0x",
+        ...joinSplitSwapDataDummyAttestation(),
       })
-    ).to.be.revertedWith("SP: fee");
+    ).to.emit(pool, "ShieldedSwapJoinSplit");
   });
 
   it("reverts deposit when BNB fee USD value is below $2 (mock oracle)", async function () {
@@ -130,7 +132,7 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
       pool.connect(deployer).deposit(ethers.ZeroAddress, amt, c, 0n, {
         value: amt + tinyFee,
       })
-    ).to.be.revertedWith("SP: deposit fee below $2");
+    ).to.be.revertedWith("SP:D6");
   });
 
   it("SwapHandler swap fee matches 10 bps of inputAmount", async function () {

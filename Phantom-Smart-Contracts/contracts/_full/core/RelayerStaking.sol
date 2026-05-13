@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
 
@@ -9,7 +10,7 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
-contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
+contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     address public owner;
     address public token;
     uint256 public minStake;
@@ -68,7 +69,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
         return stakedBalance[relayer] >= minStake;
     }
 
-    function stake(uint256 amount) external {
+    function stake(uint256 amount) external nonReentrant {
         require(amount > 0, "RelayerStaking: zero amount");
         _updateAllRewards(msg.sender);
         IERC20(token).transferFrom(msg.sender, address(this), amount);
@@ -77,7 +78,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
         emit Staked(msg.sender, amount);
     }
 
-    function unstake(uint256 amount) external {
+    function unstake(uint256 amount) external nonReentrant {
         require(amount > 0, "RelayerStaking: zero amount");
         require(stakedBalance[msg.sender] >= amount, "RelayerStaking: insufficient stake");
         _updateAllRewards(msg.sender);
@@ -87,7 +88,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
         emit Unstaked(msg.sender, amount);
     }
 
-    function distributeFee(address feeToken, uint256 amount) external payable override {
+    function distributeFee(address feeToken, uint256 amount) external payable override nonReentrant {
         require(amount > 0, "RelayerStaking: zero amount");
         if (feeToken == address(0)) {
             require(msg.value == amount, "RelayerStaking: bad msg.value");
@@ -107,7 +108,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
         emit FeeDistributed(feeToken, amount);
     }
 
-    function claim(address feeToken) external {
+    function claim(address feeToken) external nonReentrant {
         uint256 pending = _pending(msg.sender, feeToken);
         if (pending == 0) return;
         rewardDebt[msg.sender][feeToken] = (stakedBalance[msg.sender] * accRewardPerShare[feeToken]) / 1e12;
@@ -161,8 +162,10 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
         return rewardTokens;
     }
 
+    /// @dev CEI: sync `rewardDebt` to accumulator before external payout (prevents reward reentrancy).
     function _updateReward(address user, address feeToken) internal {
         uint256 pending = _pending(user, feeToken);
+        rewardDebt[user][feeToken] = (stakedBalance[user] * accRewardPerShare[feeToken]) / 1e12;
         if (pending > 0) {
             _payout(user, feeToken, pending);
         }
@@ -170,9 +173,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
 
     function _updateAllRewards(address user) internal {
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            address t = rewardTokens[i];
-            _updateReward(user, t);
-            rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / 1e12;
+            _updateReward(user, rewardTokens[i]);
         }
     }
 
@@ -201,7 +202,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor {
      * @param staker The address to slash
      * @param amount The amount to slash
      */
-    function slash(address staker, uint256 amount) external onlySlasher {
+    function slash(address staker, uint256 amount) external onlySlasher nonReentrant {
         require(stakedBalance[staker] >= amount, "RelayerStaking: insufficient balance to slash");
         
         _updateAllRewards(staker);

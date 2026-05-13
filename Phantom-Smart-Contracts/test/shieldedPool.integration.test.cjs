@@ -6,6 +6,10 @@ const {
   deployPoolFixture,
   totalJoinSplitFeeBnb,
 } = require("./helpers/poolFixtures.cjs");
+const {
+  attachJoinSplitRelayerAttestation,
+  joinSplitSwapDataDummyAttestation,
+} = require("./helpers/relayerSwapAttestation.cjs");
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 
 describe("ShieldedPool — deposit / swap / withdraw (integration)", function () {
@@ -112,7 +116,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         merklePathIndices: indices,
       };
 
-      const swapData = {
+      const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
         proof: emptyProof(),
         publicInputs,
         swapParams: {
@@ -129,7 +133,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         deadline: 0n,
         nonce: 0n,
         encryptedPayload: "0x",
-      };
+      });
 
       const rootBefore = await pool.merkleRoot();
       await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(
@@ -197,6 +201,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         deadline: 0n,
         nonce: 0n,
         encryptedPayload: "0x",
+        ...joinSplitSwapDataDummyAttestation(),
       };
 
       await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData))
@@ -263,6 +268,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         deadline: 0n,
         nonce: 0n,
         encryptedPayload: "0x",
+        ...joinSplitSwapDataDummyAttestation(),
       };
 
       await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData))

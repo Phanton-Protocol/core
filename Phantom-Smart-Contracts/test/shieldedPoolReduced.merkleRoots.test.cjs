@@ -3,6 +3,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { proveJoinSplitPublic9FromPublicInputs } = require("./helpers/joinsplitGroth16.cjs");
+const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 const { computeCommitment, computeNullifier } = require(path.join(
   __dirname,
   "..",
@@ -167,11 +168,10 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
       deadline: 0n,
       nonce: 0n,
       encryptedPayload: "0x",
+      ...joinSplitSwapDataDummyAttestation(),
     };
 
-    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitStub)).to.be.revertedWith(
-      "SP: merkle root not spendable"
-    );
+    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitStub)).to.be.revertedWith("SP:M0");
   });
 
   it("allows join-split spend using a historical Merkle root after a later deposit", async function () {
@@ -242,6 +242,7 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
       deadline: 0n,
       nonce: 0n,
       encryptedPayload: "0x",
+      ...joinSplitSwapDataDummyAttestation(),
     };
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(pool, "ShieldedSwapJoinSplit");

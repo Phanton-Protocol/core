@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
+const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const MOCK_SWAP_SUB1_FQN = "contracts/_full/mocks/MockSwapAdaptorSubtractWei.sol:MockSwapAdaptorSubtractWei";
@@ -65,6 +66,7 @@ function joinSplitTx(poolSigner, publicInputs, outTokenAddr) {
     deadline: 0n,
     nonce: 0n,
     encryptedPayload: "0x",
+    ...joinSplitSwapDataDummyAttestation(),
   });
 }
 
@@ -152,7 +154,7 @@ describe("ShieldedPoolUpgradeableReduced — M3a join-split conservation + DEX b
       merklePathIndices: indices,
     };
 
-    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWith("SP:out");
+    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWith("SP:S2");
   });
 
   it("reverts shieldedWithdraw when join-split conservation breaks", async function () {

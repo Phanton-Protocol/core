@@ -20,6 +20,10 @@ const {
   deployPoolFixture,
   totalJoinSplitFeeBnb,
 } = require("./helpers/poolFixtures.cjs");
+const {
+  attachJoinSplitRelayerAttestation,
+  joinSplitSwapDataDummyAttestation,
+} = require("./helpers/relayerSwapAttestation.cjs");
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 
@@ -80,7 +84,7 @@ describe("M6 — E2E local gate (mock pool)", function () {
       merklePathIndices: idxIn,
     };
 
-    const swapData = {
+    const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
       proof: emptyProof(),
       publicInputs: swapPublic,
       swapParams: {
@@ -97,7 +101,7 @@ describe("M6 — E2E local gate (mock pool)", function () {
       deadline: 0n,
       nonce: 0n,
       encryptedPayload: "0x",
-    };
+    });
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(pool, "ShieldedSwapJoinSplit");
     expect(await pool.commitmentCount()).to.equal(3n);
@@ -208,6 +212,7 @@ describe("M6 — E2E local gate (mock pool)", function () {
         deadline: 0n,
         nonce: 0n,
         encryptedPayload: "0x",
+        ...joinSplitSwapDataDummyAttestation(),
       })
     )
       .to.be.revertedWithCustomError(pool, "PoolErr")
@@ -250,26 +255,27 @@ describe("M6 — E2E local gate (mock pool)", function () {
       merklePathIndices: indices,
     };
 
-    await expect(
-      pool.connect(deployer).shieldedSwapJoinSplit({
-        proof: emptyProof(),
-        publicInputs,
-        swapParams: {
-          tokenIn: ethers.ZeroAddress,
-          tokenOut: await outTok.getAddress(),
-          amountIn: swapAmount,
-          minAmountOut: swapAmount + 1n,
-          fee: 0,
-          sqrtPriceLimitX96: 0n,
-          path: "0x",
-        },
-        relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
-        encryptedPayload: "0x",
-      })
-    )
+    const joinSplitBase = {
+      proof: emptyProof(),
+      publicInputs,
+      swapParams: {
+        tokenIn: ethers.ZeroAddress,
+        tokenOut: await outTok.getAddress(),
+        amountIn: swapAmount,
+        minAmountOut: swapAmount + 1n,
+        fee: 0,
+        sqrtPriceLimitX96: 0n,
+        path: "0x",
+      },
+      relayer: ethers.ZeroAddress,
+      commitment: ethers.ZeroHash,
+      deadline: 0n,
+      nonce: 0n,
+      encryptedPayload: "0x",
+    };
+    const joinSplitSig = await attachJoinSplitRelayerAttestation(deployer, pool, joinSplitBase, 2n);
+
+    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitSig))
       .to.be.revertedWithCustomError(pool, "PoolErr")
       .withArgs(15);
   });
