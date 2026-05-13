@@ -312,7 +312,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         _depositInternal(msg.sender, token, amount, commitment, assetID, msg.value, address(0));
         // Transaction logging handled off-chain to reduce stack depth
     }
@@ -323,7 +323,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         if (depositor == address(0)) revert PoolErr(1);
         if (token == address(0)) revert PoolErr(8);
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
@@ -338,7 +338,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         address depositor,
         bytes32 commitment,
         uint256 assetID
-    ) external payable {
+    ) external payable nonReentrant {
         if (depositor == address(0)) revert PoolErr(1);
         if (msg.value == 0) revert PoolErr(9);
         _depositInternal(depositor, address(0), msg.value, commitment, assetID, msg.value, msg.sender);
@@ -744,9 +744,9 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
      * 3. Verify Merkle root matches current state
      * 4. Verify conservation: inputAmount == withdrawAmount + changeAmount + fees
      * 5. Calculate fees using oracle
-     * 6. Transfer withdraw amount to recipient
-     * 7. Add change commitment to Merkle tree
-     * 8. Mark nullifier as used
+     * 6. Add change commitment to Merkle tree (effects before external calls)
+     * 7. Mark nullifier as used
+     * 8. Transfer withdraw amount to recipient
      * 9. Refund relayer
      */
     function shieldedWithdraw(
@@ -834,27 +834,21 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (inputs.protocolFee < protocolFee - (protocolFee / 100)) revert PoolErr(5);
         if (inputs.gasRefund > inputs.inputAmount) revert PoolErr(7);
 
-        // ============ STEP 6: TRANSFER TO RECIPIENT ============
-        // Transfer withdraw amount to recipient
-        if (inputToken == address(0)) {
-            payable(recipient).transfer(withdrawAmount);
-        } else {
-            IERC20(inputToken).transfer(recipient, withdrawAmount);
-        }
-
-        // ============ STEP 7: UPDATE MERKLE TREE (CHANGE COMMITMENT) ============
+        // ============ STEP 6: UPDATE MERKLE TREE (CHANGE COMMITMENT) — EFFECTS FIRST ============
         (uint256 changeIndex, bytes32 changeRoot) = tree.insert(inputs.outputCommitmentChange);
         commitments[changeIndex] = inputs.outputCommitmentChange;
         merkleRoot = changeRoot;
         commitmentCount = tree.nextIndex;
-        
-        // ============ UPDATE SINGLE NOTE SYSTEM ============
-        // Update user's note after withdrawal (change commitment is new note)
-        // Note: In production, we'd need to extract user address from proof
-        // For now, we track via commitment mapping
 
-        // ============ STEP 8: MARK NULLIFIER ============
+        // ============ STEP 7: MARK NULLIFIER ============
         nullifiers[inputs.nullifier] = true;
+
+        // ============ STEP 8: TRANSFER TO RECIPIENT (INTERACTIONS) ============
+        if (inputToken == address(0)) {
+            payable(recipient).transfer(withdrawAmount);
+        } else {
+            IERC20(inputToken).safeTransfer(recipient, withdrawAmount);
+        }
 
         // ============ STEP 9: RELAYER REFUND ============
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
@@ -878,7 +872,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
                 if (inputToken == address(0)) {
                     payable(relayer).transfer(inputs.gasRefund);
                 } else {
-                    IERC20(inputToken).transfer(relayer, inputs.gasRefund);
+                    IERC20(inputToken).safeTransfer(relayer, inputs.gasRefund);
                 }
             }
             emit GasRefunded(relayer, inputs.gasRefund);

@@ -283,7 +283,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         _depositInternal(msg.sender, token, amount, commitment, assetID, msg.value, address(0));
     }
 
@@ -293,7 +293,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         require(depositor != address(0), "SP: zero depositor");
         require(token != address(0), "SP:D1");
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
@@ -303,7 +303,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         address depositor,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         require(depositor != address(0), "SP: zero depositor");
         require(msg.value > 0, "SP: zero value");
         _depositInternal(depositor, address(0), msg.value, commitment, assetID, msg.value, msg.sender);
@@ -591,8 +591,15 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             revert SP();
         }
 
-        // CRITICAL: handler validates economics/proofs but does not transfer payout.
-        // The pool must transfer the withdraw leg to the requested recipient.
+        // Effects before external payout (CEI): prevents cross-function reentrancy via deposit paths.
+        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
+        commitments[newIndex] = inputs.outputCommitmentChange;
+        commitmentCount = tree.nextIndex;
+        _setMerkleRoot(newRoot);
+
+        nullifiers[inputs.nullifier] = true;
+
+        // Handler validates economics/proofs; pool sends withdraw leg to recipient.
         if (inputToken == address(0)) {
             (bool ok,) = payable(withdrawData.recipient).call{value: withdrawAmount}("");
             require(ok, "SP:W2");
@@ -600,14 +607,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             bool ok = IERC20(inputToken).transfer(withdrawData.recipient, withdrawAmount);
             require(ok, "SP:W3");
         }
-
-        // Insert change commitment (withdrawal creates change note)
-        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
-        commitments[newIndex] = inputs.outputCommitmentChange;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
-
-        nullifiers[inputs.nullifier] = true;
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {
@@ -690,6 +689,14 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (inputToken == address(0) && inputs.inputAssetID != 0) {
             revert("SP: unknown asset for withdraw");
         }
+
+        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
+        commitments[newIndex] = inputs.outputCommitmentChange;
+        commitmentCount = tree.nextIndex;
+        _setMerkleRoot(newRoot);
+
+        nullifiers[inputs.nullifier] = true;
+
         if (inputToken == address(0)) {
             (bool ok,) = payable(withdrawData.recipients[0].recipient).call{value: withdrawAmount}("");
             require(ok, "SP: native withdraw transfer failed");
@@ -697,14 +704,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             bool ok = IERC20(inputToken).transfer(withdrawData.recipients[0].recipient, withdrawAmount);
             require(ok, "SP: token withdraw transfer failed");
         }
-
-        // Insert change commitment
-        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
-        commitments[newIndex] = inputs.outputCommitmentChange;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
-
-        nullifiers[inputs.nullifier] = true;
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {

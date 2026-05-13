@@ -361,7 +361,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         _depositInternal(msg.sender, token, amount, commitment, assetID, msg.value, address(0));
         // Transaction logging handled off-chain to reduce stack depth
     }
@@ -372,7 +372,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override {
+    ) external payable override nonReentrant {
         require(depositor != address(0), "ShieldedPool: zero depositor");
         require(token != address(0), "ShieldedPool: relayed deposit ERC20 only");
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
@@ -387,7 +387,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         address depositor,
         bytes32 commitment,
         uint256 assetID
-    ) external payable {
+    ) external payable nonReentrant {
         require(depositor != address(0), "ShieldedPool: zero depositor");
         require(msg.value > 0, "ShieldedPool: zero value");
         _depositInternal(depositor, address(0), msg.value, commitment, assetID, msg.value, msg.sender);
@@ -766,9 +766,9 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      * 3. Verify Merkle root matches current state
      * 4. Verify conservation: inputAmount == withdrawAmount + changeAmount + fees
      * 5. Calculate fees using oracle
-     * 6. Transfer withdraw amount to recipient
-     * 7. Add change commitment to Merkle tree
-     * 8. Mark nullifier as used
+     * 6. Add change commitment to Merkle tree
+     * 7. Mark nullifier as used
+     * 8. Transfer withdraw amount to recipient
      * 9. Refund relayer
      */
     function shieldedWithdraw(
@@ -807,23 +807,22 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         require(verifiedWithdrawAmount == withdrawAmount, "ShieldedPool: withdraw amount mismatch");
         require(withdrawAmount == inputs.swapAmount, "ShieldedPool: withdraw amount mismatch");
 
-        // ============ STEP 4: TRANSFER TO RECIPIENT ============
-        if (inputToken == address(0)) {
-            payable(recipient).transfer(withdrawAmount);
-        } else {
-            IERC20(inputToken).transfer(recipient, withdrawAmount);
-        }
-
-        // ============ STEP 5: UPDATE MERKLE TREE (CHANGE COMMITMENT) ============
+        // ============ STEP 4: UPDATE MERKLE TREE + NULLIFIER (EFFECTS BEFORE INTERACTIONS) ============
         (uint256 changeIndex, bytes32 changeRoot) = tree.insert(inputs.outputCommitmentChange);
         commitments[changeIndex] = inputs.outputCommitmentChange;
         merkleRoot = changeRoot;
         commitmentCount = tree.nextIndex;
 
-        // ============ STEP 6: MARK NULLIFIER ============
         nullifiers[inputs.nullifier] = true;
 
-        // ============ STEP 7: GAS REFUND (from reserve) ============
+        // ============ STEP 5: TRANSFER TO RECIPIENT ============
+        if (inputToken == address(0)) {
+            payable(recipient).transfer(withdrawAmount);
+        } else {
+            require(IERC20(inputToken).transfer(recipient, withdrawAmount), "ShieldedPool: withdraw transfer failed");
+        }
+
+        // ============ STEP 6: GAS REFUND (from reserve) ============
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputToken == address(0)) {
             gasReserve -= inputs.gasRefund;
@@ -846,61 +845,14 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     }
     
     /**
-     * @notice Executes a multi-output shielded withdrawal (2+ recipients)
-     * @dev Enhanced privacy: splits withdrawal across multiple addresses
-     * @dev Rule: Must have at least 2 recipients
-     * @param withdrawData Multi-output withdrawal data
+     * @notice Multi-output shielded withdrawal (disabled)
+     * @dev Previous stub transferred funds without proof/nullifier/Merkle enforcement — unsafe.
+     *      Use {shieldedWithdraw} per recipient until a full audited implementation exists.
      */
     function multiOutputWithdraw(
-        MultiOutputWithdrawData calldata withdrawData
-    ) external override nonReentrant {
-        JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
-        WithdrawalRecipient[] memory recipients = withdrawData.recipients;
-        
-        require(recipients.length >= 2, "ShieldedPool: minimum 2 recipients required");
-        
-        // Calculate total withdrawal amount
-        uint256 totalWithdrawAmount = 0;
-        for (uint256 i = 0; i < recipients.length; i++) {
-            require(recipients[i].recipient != address(0), "ShieldedPool: zero recipient");
-            require(recipients[i].amount > 0, "ShieldedPool: zero amount");
-            totalWithdrawAmount += recipients[i].amount;
-        }
-        
-        // Verify withdrawal amount matches proof
-        require(
-            inputs.swapAmount == totalWithdrawAmount,
-            "ShieldedPool: withdrawal amount mismatch"
-        );
-        
-        // Use same validation as single withdrawal
-        require(inputs.outputCommitmentSwap == bytes32(0), "ShieldedPool: swap commitment must be zero");
-        require(inputs.outputAssetIDSwap == 0, "ShieldedPool: swap asset ID must be zero");
-        
-        // ============ STEP 0-8: SAME AS SINGLE WITHDRAWAL ============
-        // (nullifier check, proof verification, merkle root, etc.)
-        // For brevity, we'll reuse the same validation logic
-        
-        // ============ STEP 6: TRANSFER TO MULTIPLE RECIPIENTS ============
-        address inputToken = assetRegistry[inputs.inputAssetID];
-        require(inputToken != address(0), "ShieldedPool: invalid input asset");
-        
-        for (uint256 i = 0; i < recipients.length; i++) {
-            if (inputToken == address(0)) {
-                payable(recipients[i].recipient).transfer(recipients[i].amount);
-            } else {
-                IERC20(inputToken).transfer(recipients[i].recipient, recipients[i].amount);
-            }
-        }
-        
-        // Rest of the function follows same pattern as shieldedWithdraw
-        // (merkle tree update, nullifier marking, relayer refund, etc.)
-        // For now, we'll call the internal logic
-        // Note: This is a simplified version - full implementation would include all validation steps
-
-        if (withdrawData.encryptedPayload.length > 0) {
-            emit EncryptedPayload(inputs.nullifier, withdrawData.encryptedPayload);
-        }
+        MultiOutputWithdrawData calldata /* withdrawData */
+    ) external override {
+        revert("ShieldedPool: multi-output withdraw disabled");
     }
 
     // ============ View Functions ============
