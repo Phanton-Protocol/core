@@ -12,7 +12,7 @@ contract MockSwapAdaptor is IPancakeSwapAdaptor {
     function executeSwap(SwapParams calldata params) external payable override returns (uint256) {
         return params.amountIn; // 1:1 for E2E testing
     }
-    function getExpectedOutput(SwapParams calldata params) external view override returns (uint256) {
+    function getExpectedOutput(SwapParams calldata params) external pure override returns (uint256) {
         return params.amountIn;
     }
 }

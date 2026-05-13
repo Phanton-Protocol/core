@@ -90,19 +90,23 @@ contract EncryptedPool is AdvancedPrivacyPool {
         bytes calldata encryptedAmountOut,
         bytes32 commitment,
         bytes calldata proof
-    ) external override returns (bytes32 executionId) {
-        // Use integrated FHE coprocessor
-        FHECoprocessor fheCoprocessor = FHECoprocessor(fheCoprocessorAddress);
-        executionId = fheCoprocessor.submitEncryptedSwap(
+    ) external nonReentrant override returns (bytes32 executionId) {
+        require(
+            userPrivacyMode[msg.sender] >= PrivacyMode.STANDARD,
+            "FHE swaps require STANDARD mode or higher"
+        );
+
+        // CEI: persist commitment before external call (matches AdvancedPrivacyPool; avoids reentrancy window)
+        encryptedCommitments[commitment] = encryptedAmountOut;
+
+        // Call immutable coprocessor only (trusted per Wake: address set once in constructor)
+        executionId = FHECoprocessor(fheCoprocessorAddress).submitEncryptedSwap(
             encryptedAmountIn,
             encryptedAmountOut,
             commitment,
             proof
         );
-        
-        // Store encrypted commitment
-        encryptedCommitments[commitment] = encryptedAmountOut;
-        
+
         emit FHESwapSubmitted(
             msg.sender,
             keccak256(encryptedAmountIn),
