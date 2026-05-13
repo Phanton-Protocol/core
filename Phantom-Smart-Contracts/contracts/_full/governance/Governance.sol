@@ -22,6 +22,7 @@ contract Governance {
         address target;
         bytes data;
         bytes32 operationId;
+        uint256 snapshotBlock;
         uint256 votesFor;
         uint256 votesAgainst;
         uint256 startTime;
@@ -33,7 +34,7 @@ contract Governance {
     mapping(uint256 => Proposal) public proposals;
     uint256 public proposalCount;
     
-    event ProposalCreated(uint256 indexed proposalId, address target, bytes32 operationId, uint256 endTime);
+    event ProposalCreated(uint256 indexed proposalId, address target, bytes32 operationId, uint256 endTime, uint256 snapshotBlock);
     event VoteCast(uint256 indexed proposalId, address voter, bool support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId);
     
@@ -58,12 +59,13 @@ contract Governance {
         proposal.data = data;
         proposal.startTime = block.timestamp;
         proposal.endTime = block.timestamp + VOTING_PERIOD;
+        proposal.snapshotBlock = block.number == 0 ? 0 : block.number - 1;
         
         // Schedule in timelock
         operationId = timelock.scheduleUpgrade(target, data);
         proposal.operationId = operationId;
         
-        emit ProposalCreated(proposalId, target, operationId, proposal.endTime);
+        emit ProposalCreated(proposalId, target, operationId, proposal.endTime, proposal.snapshotBlock);
         return (proposalId, operationId);
     }
     
@@ -73,7 +75,7 @@ contract Governance {
         require(!proposal.hasVoted[msg.sender], "Governance: already voted");
         require(!proposal.executed, "Governance: proposal executed");
         
-        uint256 weight = protocolToken.balanceOf(msg.sender);
+        uint256 weight = protocolToken.getPastVotes(msg.sender, proposal.snapshotBlock);
         require(weight > 0, "Governance: no tokens");
         
         proposal.hasVoted[msg.sender] = true;
@@ -113,7 +115,8 @@ contract Governance {
         uint256 votesFor,
         uint256 votesAgainst,
         uint256 endTime,
-        bool executed
+        bool executed,
+        uint256 snapshotBlock
     ) {
         Proposal storage proposal = proposals[proposalId];
         return (
@@ -122,7 +125,8 @@ contract Governance {
             proposal.votesFor,
             proposal.votesAgainst,
             proposal.endTime,
-            proposal.executed
+            proposal.executed,
+            proposal.snapshotBlock
         );
     }
 }

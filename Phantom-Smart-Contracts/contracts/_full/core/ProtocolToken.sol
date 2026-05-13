@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-contract ProtocolToken {
-    string public name = "Shadow Token";
-    string public symbol = "SHDW";
-    uint8 public decimals = 18;
-    uint256 public totalSupply;
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+
+/**
+ * @title ProtocolToken
+ * @notice Governance token with Compound-style checkpoints (ERC20Votes).
+ * @dev Holders who receive tokens after deployment should call {delegate} (e.g. delegate to self)
+ *      once so voting power is tracked; the initial supply holder is self-delegated in the constructor.
+ */
+contract ProtocolToken is ERC20Votes {
     address public owner;
 
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyOwner() {
@@ -20,31 +19,11 @@ contract ProtocolToken {
         _;
     }
 
-    constructor(address initialOwner) {
+    constructor(address initialOwner) ERC20("Shadow Token", "SHDW") ERC20Permit("Shadow Token") {
+        require(initialOwner != address(0), "ProtocolToken: zero address");
         owner = initialOwner;
-        uint256 supply = 1_000_000_000 * 1e18;
-        totalSupply = supply;
-        balanceOf[initialOwner] = supply;
-        emit Transfer(address(0), initialOwner, supply);
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        uint256 allowed = allowance[from][msg.sender];
-        require(allowed >= amount, "ProtocolToken: insufficient allowance");
-        allowance[from][msg.sender] = allowed - amount;
-        _transfer(from, to, amount);
-        return true;
+        _mint(initialOwner, 1_000_000_000 * 10 ** decimals());
+        _delegate(initialOwner, initialOwner);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -54,12 +33,15 @@ contract ProtocolToken {
         emit OwnershipTransferred(oldOwner, newOwner);
     }
 
-    function _transfer(address from, address to, uint256 amount) internal {
-        require(to != address(0), "ProtocolToken: zero address");
-        uint256 bal = balanceOf[from];
-        require(bal >= amount, "ProtocolToken: insufficient balance");
-        balanceOf[from] = bal - amount;
-        balanceOf[to] += amount;
-        emit Transfer(from, to, amount);
+    function _afterTokenTransfer(address from, address to, uint256 amount) internal override(ERC20Votes) {
+        super._afterTokenTransfer(from, to, amount);
+    }
+
+    function _mint(address account, uint256 amount) internal override(ERC20Votes) {
+        super._mint(account, amount);
+    }
+
+    function _burn(address account, uint256 amount) internal override(ERC20Votes) {
+        super._burn(account, amount);
     }
 }
