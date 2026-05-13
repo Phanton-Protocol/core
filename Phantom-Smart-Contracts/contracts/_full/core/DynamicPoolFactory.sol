@@ -214,10 +214,9 @@ contract DynamicPoolFactory {
     
     /**
      * @notice Query TVL for specific pools (FHE-encrypted)
-     * @param _poolAddresses Array of pool addresses to query
      * @return fheEncryptedSum FHE-encrypted sum (euint)
      */
-    function getPoolsTVLFHE(address[] calldata _poolAddresses)
+    function getPoolsTVLFHE(address[] calldata /* poolAddresses */)
         external
         pure
         returns (bytes memory fheEncryptedSum)

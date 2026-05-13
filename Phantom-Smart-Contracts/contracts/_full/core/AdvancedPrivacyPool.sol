@@ -188,7 +188,7 @@ contract AdvancedPrivacyPool is ShieldedPool {
         bytes calldata encryptedAmountOut,
         bytes32 commitment,
         bytes calldata proof
-    ) external virtual returns (bytes32 executionId) {
+    ) external virtual nonReentrant returns (bytes32 executionId) {
         require(
             userPrivacyMode[msg.sender] >= PrivacyMode.STANDARD,
             "FHE swaps require STANDARD mode or higher"
@@ -198,6 +198,7 @@ contract AdvancedPrivacyPool is ShieldedPool {
         encryptedCommitments[commitment] = encryptedAmountOut;
         
         // Submit to FHE executor (Zama coprocessor)
+        // wake-disable-next-line reentrancy
         executionId = fheExecutor.submitEncryptedSwap(
             encryptedAmountIn,
             encryptedAmountOut,
@@ -233,12 +234,11 @@ contract AdvancedPrivacyPool is ShieldedPool {
         );
         
         // Intent id is returned by the coprocessor; nonReentrant prevents reentry before storage below.
-        // wake-disable reentrancy
-        intentId = IMPCCoprocessor(address(mpcCoprocessor)).submitPrivateIntent(
+        // wake-disable-next-line reentrancy
+        intentId = mpcCoprocessor.submitPrivateIntent(
             encryptedIntent,
             mpcNodes
         );
-        // wake-enable reentrancy
         
         // Store intent
         privateIntents[intentId] = PrivateIntent({
@@ -302,12 +302,11 @@ contract AdvancedPrivacyPool is ShieldedPool {
     /**
      * @notice Verify disclosure proof (for compliance)
      * @param user User address
-     * @param _disclosureType Type to check
      * @return bool True if user has valid proof
      */
     function verifyDisclosure(
         address user,
-        DisclosureType _disclosureType
+        DisclosureType
     ) external view returns (bool) {
         // In production: verify zk predicate
         // For now: check if proof exists
@@ -364,11 +363,10 @@ contract AdvancedPrivacyPool is ShieldedPool {
      * @notice Verify client-generated Plonky3/Halo2 proof
      * @dev Proof generated on user's device, verified on-chain
      * @param proof Universal proof (Plonky3 format)
-     * @param _publicInputs Public inputs
      */
     function verifyClientProof(
         bytes calldata proof,
-        uint256[] calldata _publicInputs
+        uint256[] calldata
     ) public pure returns (bool) {
         // TODO: Integrate Plonky3 verifier
         // For now: always true (mock)
@@ -406,7 +404,7 @@ contract MockFHEExecutor is IFHEExecutor {
         bytes calldata encryptedAmountIn,
         bytes calldata encryptedAmountOut,
         bytes32 commitment,
-        bytes calldata _proof
+        bytes calldata
     ) external override returns (bytes32 executionId) {
         executionId = keccak256(abi.encodePacked(
             encryptedAmountIn,
@@ -441,7 +439,7 @@ contract MockMPCCoprocessor is IMPCCoprocessor {
     
     function submitPrivateIntent(
         bytes calldata encryptedIntent,
-        address[] calldata _mpcNodes
+        address[] calldata
     ) external override returns (bytes32 intentId) {
         intentId = keccak256(abi.encodePacked(
             encryptedIntent,
@@ -454,7 +452,7 @@ contract MockMPCCoprocessor is IMPCCoprocessor {
         return intentId;
     }
     
-    function executeIntent(bytes32 intentId, bytes calldata _mpcProof) 
+    function executeIntent(bytes32 intentId, bytes calldata) 
         external 
         view
         override 
@@ -471,7 +469,7 @@ contract MockMPCCoprocessor is IMPCCoprocessor {
 contract MockThresholdEncryption is IThresholdEncryption {
     function encryptTransaction(
         bytes calldata txData,
-        uint256 _threshold
+        uint256
     ) external pure override returns (bytes memory ciphertext) {
         // Mock: simple XOR encryption
         ciphertext = txData;
@@ -480,7 +478,7 @@ contract MockThresholdEncryption is IThresholdEncryption {
     
     function requestDecryption(
         bytes memory ciphertext,
-        bytes32[] calldata _shares
+        bytes32[] calldata
     ) external pure override returns (bytes memory plaintext) {
         // Mock: return as-is
         return ciphertext;

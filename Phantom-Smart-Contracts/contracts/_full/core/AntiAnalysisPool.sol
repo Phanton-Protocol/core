@@ -166,11 +166,10 @@ contract AntiAnalysisPool is FHEEncryptedPool {
      * @notice Execute withdrawal with blinded signature
      * @dev Recipient not visible until execution
      * @param blindedMessage Blinded message
-     * @param _unblindedProof Proof that unblinds signature
      */
     function executeBlindedWithdrawal(
         bytes32 blindedMessage,
-        bytes calldata _unblindedProof
+        bytes calldata /* unblindedProof */
     ) external {
         BlindedSignature storage sig = blindedSignatures[blindedMessage];
         require(!sig.used, "AntiAnalysisPool: signature already used");

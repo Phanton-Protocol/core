@@ -164,14 +164,13 @@ contract FHECoprocessor {
      * @param encryptedAmountIn FHE encrypted input amount (for commitment generation)
      * @param encryptedAmountOut FHE encrypted output amount (for commitment generation)
      * @param commitment Output commitment (hash of expected result)
-     * @param _proof ZK proof (optional, for verification)
      * @return executionId Unique execution identifier
      */
     function submitEncryptedSwap(
         bytes calldata encryptedAmountIn,
         bytes calldata encryptedAmountOut,
         bytes32 commitment,
-        bytes calldata _proof
+        bytes calldata
     ) external returns (bytes32 executionId) {
         require(encryptedAmountIn.length > 0, "FHECoprocessor: empty input");
         require(encryptedAmountOut.length > 0, "FHECoprocessor: empty output");

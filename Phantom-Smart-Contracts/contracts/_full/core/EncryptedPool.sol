@@ -141,7 +141,6 @@ contract EncryptedPool is AdvancedPrivacyPool {
         );
         (bool success, bytes memory result) = selectiveDisclosureAddress.call(callData);
         require(success, "EncryptedPool: selective disclosure call failed");
-        require(success, "EncryptedPool: selective disclosure call failed");
         proofHash = abi.decode(result, (bytes32));
         
         // Also store in parent contract for compatibility
