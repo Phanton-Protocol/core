@@ -2,15 +2,14 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
 
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-}
-
 contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     address public owner;
     address public token;
     uint256 public minStake;
@@ -19,6 +18,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
 
     uint256 public totalStaked;
     mapping(address => uint256) public stakedBalance;
+
+    uint256 public constant MAX_REWARD_TOKENS = 20;
 
     address[] public rewardTokens;
     mapping(address => bool) public isRewardToken;
@@ -72,7 +73,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     function stake(uint256 amount) external nonReentrant {
         require(amount > 0, "RelayerStaking: zero amount");
         _updateAllRewards(msg.sender);
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         stakedBalance[msg.sender] += amount;
         totalStaked += amount;
         emit Staked(msg.sender, amount);
@@ -84,7 +85,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         _updateAllRewards(msg.sender);
         stakedBalance[msg.sender] -= amount;
         totalStaked -= amount;
-        IERC20(token).transfer(msg.sender, amount);
+        IERC20(token).safeTransfer(msg.sender, amount);
         emit Unstaked(msg.sender, amount);
     }
 
@@ -93,10 +94,11 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         if (feeToken == address(0)) {
             require(msg.value == amount, "RelayerStaking: bad msg.value");
         } else {
-            IERC20(feeToken).transferFrom(msg.sender, address(this), amount);
+            IERC20(feeToken).safeTransferFrom(msg.sender, address(this), amount);
         }
 
         if (!isRewardToken[feeToken]) {
+            require(rewardTokens.length < MAX_REWARD_TOKENS, "RelayerStaking: max reward tokens reached");
             isRewardToken[feeToken] = true;
             rewardTokens.push(feeToken);
             emit RewardTokenAdded(feeToken);
@@ -134,6 +136,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
 
     function addRewardToken(address feeToken) external onlyOwner {
         if (isRewardToken[feeToken]) return;
+        require(rewardTokens.length < MAX_REWARD_TOKENS, "RelayerStaking: max reward tokens reached");
         isRewardToken[feeToken] = true;
         rewardTokens.push(feeToken);
         emit RewardTokenAdded(feeToken);
@@ -162,18 +165,14 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         return rewardTokens;
     }
 
-    /// @dev CEI: sync `rewardDebt` to accumulator before external payout (prevents reward reentrancy).
-    function _updateReward(address user, address feeToken) internal {
-        uint256 pending = _pending(user, feeToken);
-        rewardDebt[user][feeToken] = (stakedBalance[user] * accRewardPerShare[feeToken]) / 1e12;
-        if (pending > 0) {
-            _payout(user, feeToken, pending);
-        }
-    }
-
     function _updateAllRewards(address user) internal {
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            _updateReward(user, rewardTokens[i]);
+            address t = rewardTokens[i];
+            uint256 pending = _pending(user, t);
+            rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / 1e12;
+            if (pending > 0) {
+                _payout(user, t, pending);
+            }
         }
     }
 
@@ -184,14 +183,14 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
             if (feeToken == address(0)) {
                 payable(feeRecipient).transfer(fee);
             } else {
-                IERC20(feeToken).transfer(feeRecipient, fee);
+                IERC20(feeToken).safeTransfer(feeRecipient, fee);
             }
         }
         if (net > 0) {
             if (feeToken == address(0)) {
                 payable(user).transfer(net);
             } else {
-                IERC20(feeToken).transfer(user, net);
+                IERC20(feeToken).safeTransfer(user, net);
             }
         }
         emit RewardClaimed(user, feeToken, net);
@@ -204,14 +203,13 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
      */
     function slash(address staker, uint256 amount) external onlySlasher nonReentrant {
         require(stakedBalance[staker] >= amount, "RelayerStaking: insufficient balance to slash");
-        
+
         _updateAllRewards(staker);
         stakedBalance[staker] -= amount;
         totalStaked -= amount;
-        
-        // Slashed tokens go to fee recipient (or could be burned)
-        IERC20(token).transfer(feeRecipient, amount);
-        
+
+        IERC20(token).safeTransfer(feeRecipient, amount);
+
         emit Slashed(staker, amount, msg.sender);
     }
 

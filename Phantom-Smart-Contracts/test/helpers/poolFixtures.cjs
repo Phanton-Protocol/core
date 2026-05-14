@@ -102,10 +102,20 @@ async function totalJoinSplitFeeBnb(feeOracle, inputAmount) {
   return protocolPart + swapFee;
 }
 
+/** Register commit-reveal state required by ShieldedPool._verifyMEVProtection before join-split swap. */
+async function commitJoinSplitMevProtection(pool, signer, tag = "mev-commit") {
+  const { time } = require("@nomicfoundation/hardhat-network-helpers");
+  const commitment = ethers.keccak256(ethers.toUtf8Bytes(tag));
+  const deadline = BigInt(await time.latest()) + 3500n;
+  await pool.connect(signer).commitSwap(commitment, deadline);
+  return { commitment, deadline, nonce: 1n };
+}
+
 module.exports = {
   merkleProofForFirstLeaf,
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  commitJoinSplitMevProtection,
   TREE_DEPTH,
 };

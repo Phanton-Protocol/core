@@ -1,6 +1,18 @@
+# Dependencies
+node_modules/
+
+# Hardhat outputs
+artifacts/
+cache/
+
+# Secrets / local env (never commit)
+.env
+.env.*
+
 # Local trusted-setup intermediates (Hermez PTAU is large — download via `npm run circuit:build:joinsplit`)
 /circuits/trusted_setup/powersOfTau28_hez_final_14.ptau
 /circuits/joinsplit_public9/circuit_0000.zkey
+/circuits/joinsplit_public9/circuit_final.zkey
 # Legacy tiny pot (optional)
 /pot8_0000.ptau
 /pot8_0001.ptau

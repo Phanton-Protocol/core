@@ -19,6 +19,7 @@ const {
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  commitJoinSplitMevProtection,
 } = require("./helpers/poolFixtures.cjs");
 const {
   attachJoinSplitRelayerAttestation,
@@ -84,6 +85,8 @@ describe("M6 — E2E local gate (mock pool)", function () {
       merklePathIndices: idxIn,
     };
 
+    const mev = await commitJoinSplitMevProtection(pool, deployer, "m6-e2e-mev-1");
+
     const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
       proof: emptyProof(),
       publicInputs: swapPublic,
@@ -97,9 +100,9 @@ describe("M6 — E2E local gate (mock pool)", function () {
         path: "0x",
       },
       relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
+      commitment: mev.commitment,
+      deadline: mev.deadline,
+      nonce: mev.nonce,
       encryptedPayload: "0x",
     });
 
@@ -194,27 +197,28 @@ describe("M6 — E2E local gate (mock pool)", function () {
       merklePathIndices: indices,
     };
 
-    await expect(
-      pool.connect(deployer).shieldedSwapJoinSplit({
-        proof: emptyProof(),
-        publicInputs,
-        swapParams: {
-          tokenIn: ethers.ZeroAddress,
-          tokenOut: await outTok.getAddress(),
-          amountIn: swapAmount,
-          minAmountOut: swapAmount,
-          fee: 0,
-          sqrtPriceLimitX96: 0n,
-          path: "0x",
-        },
-        relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
-        encryptedPayload: "0x",
-        ...joinSplitSwapDataDummyAttestation(),
-      })
-    )
+    const mev = await commitJoinSplitMevProtection(pool, deployer, "m6-neg01-mev");
+
+    const joinData = await attachJoinSplitRelayerAttestation(deployer, pool, {
+      proof: emptyProof(),
+      publicInputs,
+      swapParams: {
+        tokenIn: ethers.ZeroAddress,
+        tokenOut: await outTok.getAddress(),
+        amountIn: swapAmount,
+        minAmountOut: swapAmount,
+        fee: 0,
+        sqrtPriceLimitX96: 0n,
+        path: "0x",
+      },
+      relayer: ethers.ZeroAddress,
+      commitment: mev.commitment,
+      deadline: mev.deadline,
+      nonce: mev.nonce,
+      encryptedPayload: "0x",
+    });
+
+    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinData))
       .to.be.revertedWithCustomError(pool, "PoolErr")
       .withArgs(43);
   });
@@ -255,6 +259,8 @@ describe("M6 — E2E local gate (mock pool)", function () {
       merklePathIndices: indices,
     };
 
+    const mev = await commitJoinSplitMevProtection(pool, deployer, "m6-neg02-mev");
+
     const joinSplitBase = {
       proof: emptyProof(),
       publicInputs,
@@ -268,9 +274,9 @@ describe("M6 — E2E local gate (mock pool)", function () {
         path: "0x",
       },
       relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
+      commitment: mev.commitment,
+      deadline: mev.deadline,
+      nonce: mev.nonce,
       encryptedPayload: "0x",
     };
     const joinSplitSig = await attachJoinSplitRelayerAttestation(deployer, pool, joinSplitBase, 2n);

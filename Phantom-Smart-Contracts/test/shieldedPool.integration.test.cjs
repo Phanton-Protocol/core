@@ -5,10 +5,10 @@ const {
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  commitJoinSplitMevProtection,
 } = require("./helpers/poolFixtures.cjs");
 const {
   attachJoinSplitRelayerAttestation,
-  joinSplitSwapDataDummyAttestation,
 } = require("./helpers/relayerSwapAttestation.cjs");
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 
@@ -116,6 +116,8 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         merklePathIndices: indices,
       };
 
+      const mev = await commitJoinSplitMevProtection(pool, deployer, "int-swap-1");
+
       const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
         proof: emptyProof(),
         publicInputs,
@@ -129,9 +131,9 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
           path: "0x",
         },
         relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
+        commitment: mev.commitment,
+        deadline: mev.deadline,
+        nonce: mev.nonce,
         encryptedPayload: "0x",
       });
 
@@ -184,7 +186,9 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         merklePathIndices: indices,
       };
 
-      const swapData = {
+      const mev = await commitJoinSplitMevProtection(pool, deployer, "int-bad-root");
+
+      const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
         proof: emptyProof(),
         publicInputs,
         swapParams: {
@@ -197,12 +201,11 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
           path: "0x",
         },
         relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
+        commitment: mev.commitment,
+        deadline: mev.deadline,
+        nonce: mev.nonce,
         encryptedPayload: "0x",
-        ...joinSplitSwapDataDummyAttestation(),
-      };
+      });
 
       await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData))
         .to.be.revertedWithCustomError(pool, "PoolErr")
@@ -251,7 +254,9 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
         merklePathIndices: indices,
       };
 
-      const swapData = {
+      const mev = await commitJoinSplitMevProtection(pool, deployer, "int-bad-path");
+
+      const swapData = await attachJoinSplitRelayerAttestation(deployer, pool, {
         proof: emptyProof(),
         publicInputs,
         swapParams: {
@@ -264,12 +269,11 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
           path: "0x",
         },
         relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
+        commitment: mev.commitment,
+        deadline: mev.deadline,
+        nonce: mev.nonce,
         encryptedPayload: "0x",
-        ...joinSplitSwapDataDummyAttestation(),
-      };
+      });
 
       await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData))
         .to.be.revertedWithCustomError(pool, "PoolErr")

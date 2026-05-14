@@ -4,6 +4,7 @@ const { ethers } = require("hardhat");
 const {
   merkleProofForFirstLeaf,
   totalJoinSplitFeeBnb,
+  commitJoinSplitMevProtection,
 } = require("./helpers/poolFixtures.cjs");
 const {
   proveJoinSplitPublic9FromPublicInputs,
@@ -112,6 +113,8 @@ describe("Join-split Groth16 (real verifier)", function () {
       deadline: attestationDeadline,
     });
 
+    const mev = await commitJoinSplitMevProtection(pool, deployer, "groth16-mev-1");
+
     const swapData = {
       proof: poolProof,
       publicInputs,
@@ -125,9 +128,9 @@ describe("Join-split Groth16 (real verifier)", function () {
         path: "0x",
       },
       relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
+      commitment: mev.commitment,
+      deadline: mev.deadline,
+      nonce: mev.nonce,
       encryptedPayload: "0x",
       relayerAttestationSig,
       relayerAttestationDeadline: attestationDeadline,
@@ -179,6 +182,8 @@ describe("Join-split Groth16 (real verifier)", function () {
       deadline: attestationDeadline,
     });
 
+    const mev = await commitJoinSplitMevProtection(pool, deployer, "groth16-mev-2");
+
     const swapData = {
       proof: tamperedProof,
       publicInputs,
@@ -192,9 +197,9 @@ describe("Join-split Groth16 (real verifier)", function () {
         path: "0x",
       },
       relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
+      commitment: mev.commitment,
+      deadline: mev.deadline,
+      nonce: mev.nonce,
       encryptedPayload: "0x",
       relayerAttestationSig,
       relayerAttestationDeadline: attestationDeadline,

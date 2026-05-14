@@ -38,6 +38,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     error PoolErr(uint8 code);
+    // PoolErr(48): oracle USD value unavailable for this path and bnbFallbackPriceUSD is zero or token is non-BNB.
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Matches circuit/array sizes
@@ -93,6 +94,9 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     // ============ Gas Reserve System ============
     /// @notice Pool's BNB gas reserve (for paying gas on transactions)
     uint256 public gasReserve;
+
+    /// @notice BNB fallback USD price (whole USD per 1 BNB, scaled like the old 600 constant); 0 = disabled.
+    uint256 public bnbFallbackPriceUSD;
     
     // ============ Relayer Blacklisting ============
     /// @notice Blacklisted relayers (cannot submit transactions)
@@ -179,6 +183,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     event PortfolioStateReset(address indexed user, bytes32 oldCommitment, uint256 oldNonce);
     event NullifierMarked(bytes32 indexed nullifier);
     event GasRefunded(address indexed relayer, uint256 amount);
+    event BnbFallbackPriceUpdated(uint256 newPrice);
     event RelayerAttestationVerified(address indexed relayer, uint256 indexed nonce, bytes32 digest);
     event InternalMatchSettled(
         bytes32 indexed matchHash,
@@ -297,6 +302,12 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         _registerAsset(assetID, token);
     }
 
+    function setBnbFallbackPrice(uint256 priceUSD) external {
+        if (msg.sender != poolOwner) revert PoolErr(3);
+        bnbFallbackPriceUSD = priceUSD;
+        emit BnbFallbackPriceUpdated(priceUSD);
+    }
+
     // ============ Public Functions ============
 
     /**
@@ -386,7 +397,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             if (msg.value != amount) revert PoolErr(13);
         } else {
             if (msg.value != 0) revert PoolErr(14);
-            IERC20(token).transferFrom(msg.sender, address(this), amount);
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
         _registerAsset(inputs.inputAssetID, token);
@@ -451,7 +462,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             if (inputToken == address(0)) {
                 payable(relayer).transfer(inputs.gasRefund);
             } else {
-                IERC20(inputToken).transfer(relayer, inputs.gasRefund);
+                IERC20(inputToken).safeTransfer(relayer, inputs.gasRefund);
             }
         }
 
@@ -478,7 +489,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (token == address(0)) {
             payable(data.recipient).transfer(withdrawAmount);
         } else {
-            IERC20(token).transfer(data.recipient, withdrawAmount);
+            IERC20(token).safeTransfer(data.recipient, withdrawAmount);
         }
 
         _updatePortfolioState(data.owner, inputs);
@@ -537,10 +548,8 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         JoinSplitSwapData calldata swapData
     ) internal {
         // ============ MEV & FRONTRUNNING PROTECTION ============
-        // Optional: Only verify if commitment is provided (backward compatibility)
-        if (swapData.commitment != bytes32(0)) {
-            _verifyMEVProtection(swapData.commitment, swapData.deadline, swapData.nonce, swapData.publicInputs.nullifier);
-        }
+        require(swapData.commitment != bytes32(0), "ShieldedPool: swap commitment required");
+        _verifyMEVProtection(swapData.commitment, swapData.deadline, swapData.nonce, swapData.publicInputs.nullifier);
 
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
 
@@ -650,7 +659,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             if (inputToken == address(0)) {
                 payable(relayer).transfer(inputs.gasRefund);
             } else {
-                IERC20(inputToken).transfer(relayer, inputs.gasRefund);
+                IERC20(inputToken).safeTransfer(relayer, inputs.gasRefund);
             }
         }
 
@@ -806,11 +815,10 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         try feeOracle.getUSDValue(inputToken, inputs.inputAmount) returns (uint256 v) {
             usdValue = v;
         } catch {
-            if (inputToken == address(0)) {
-                // Assume $600/BNB, rough USD value calculation
-                usdValue = (inputs.inputAmount * 600) / 1e18;
+            if (inputToken == address(0) && bnbFallbackPriceUSD > 0) {
+                usdValue = (inputs.inputAmount * bnbFallbackPriceUSD) / 1e18;
             } else {
-                usdValue = 0;
+                revert PoolErr(48);
             }
         }
         
@@ -818,7 +826,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (usdValue > 0) {
             uint256 percentFeeUsd = (usdValue * 200) / 10000; // 2% of amount
             uint256 feeUsd = percentFeeUsd > minFeeUsd ? percentFeeUsd : minFeeUsd;
-            uint256 tokenDecimals = inputToken == address(0) ? 18 : 18;
+            uint256 tokenDecimals = _getTokenDecimals(inputToken);
             protocolFee = (feeUsd * (10 ** tokenDecimals)) / (10 ** 8);
             if (protocolFee > inputs.inputAmount) protocolFee = inputs.inputAmount;
         } else {
@@ -1206,6 +1214,17 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (protocolFeeAmount > 0) {
             IFeeDistributor(address(relayerRegistry)).distributeFee{value: protocolFeeAmount}(address(0), protocolFeeAmount);
         }
+    }
+
+    function _getTokenDecimals(address token) internal view returns (uint256) {
+        if (token == address(0)) return 18;
+        (bool ok, bytes memory data) = token.staticcall(
+            abi.encodeWithSignature("decimals()")
+        );
+        if (ok && data.length >= 32) {
+            return uint256(uint8(bytes1(data[31])));
+        }
+        return 18;
     }
 
     function _calculateSwapFee(uint256 amount) internal pure returns (uint256) {

@@ -31,6 +31,9 @@ contract DynamicPoolFactory {
     
     /// @notice Last rotation block
     uint256 public lastRotationBlock;
+
+    /// @notice Rolling entropy for pool selection (updated on each pool creation / rotation).
+    bytes32 private _rollingEntropy;
     
     /// @notice Number of active pools to maintain
     uint256 public constant ACTIVE_POOL_COUNT = 10;
@@ -80,6 +83,13 @@ contract DynamicPoolFactory {
         fheCoprocessor = FHECoprocessor(_fheCoprocessor);
         
         lastRotationBlock = block.number;
+        _rollingEntropy = keccak256(abi.encodePacked(address(this), block.number, block.timestamp));
+    }
+
+    function _advanceEntropy(bytes32 contribution) internal {
+        _rollingEntropy = keccak256(
+            abi.encodePacked(_rollingEntropy, contribution, block.number, block.prevrandao)
+        );
     }
     
     // ============ Public Functions ============
@@ -114,6 +124,7 @@ contract DynamicPoolFactory {
      * @return poolAddress Address of created pool
      */
     function _createPoolInternal() internal returns (address poolAddress) {
+        _advanceEntropy(bytes32(uint256(uint160(address(this)))));
         FHEEncryptedPool pool = new FHEEncryptedPool(
             verifier,
             thresholdVerifier,
@@ -145,7 +156,9 @@ contract DynamicPoolFactory {
             block.number >= lastRotationBlock + ROTATION_INTERVAL,
             "DynamicPoolFactory: rotation too soon"
         );
-        
+
+        _advanceEntropy(bytes32(lastRotationBlock));
+
         address[] memory oldActivePools = activePools;
         
         // Create new pools
@@ -163,19 +176,17 @@ contract DynamicPoolFactory {
     
     /**
      * @notice Get random active pool for deposit
-     * @dev Random selection makes tracking harder
+     * @dev Random selection makes tracking harder. Uses rolling entropy updated on pool creation/rotation.
+     *      For high-value mainnet routing, prefer Chainlink VRF v2+ (https://docs.chain.link/vrf) over on-chain entropy.
      * @return poolAddress Random active pool address
      */
     function getRandomActivePool() external view returns (address poolAddress) {
         require(activePools.length > 0, "DynamicPoolFactory: no active pools");
-        
-        // Pseudo-random selection based on block data
-        uint256 index = uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            msg.sender
-        ))) % activePools.length;
-        
+
+        uint256 index = uint256(
+            keccak256(abi.encodePacked(_rollingEntropy, block.number, msg.sender))
+        ) % activePools.length;
+
         return activePools[index];
     }
     

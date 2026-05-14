@@ -21,13 +21,13 @@ contract FeeOracle is IFeeOracle {
     uint256 public constant FEE_PERCENTAGE = 5; // 0.5% = 5 basis points (scaled by 1000)
     uint256 public constant BASIS_POINTS = 1000;
     uint256 public constant PRICE_FEED_DECIMALS = 8;
-    /// @dev Max age for Chainlink answer (MVP testnet-friendly; tighten for mainnet)
-    uint256 public constant MAX_FEED_AGE_SECONDS = 24 hours;
+    uint256 public maxFeedAgeSeconds = 3 minutes;
 
     address public owner;
 
     event PriceFeedUpdated(address indexed token, address indexed priceFeed);
     event OffchainOracleUpdated(address indexed oracle);
+    event MaxFeedAgeUpdated(uint256 newAge);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "FeeOracle: not owner");
@@ -58,6 +58,13 @@ contract FeeOracle is IFeeOracle {
         require(oracle != address(0), "FeeOracle: zero address");
         offchainOracle = oracle;
         emit OffchainOracleUpdated(oracle);
+    }
+
+    function setMaxFeedAge(uint256 newAge) external onlyOwner {
+        require(newAge >= 1 minutes, "FeeOracle: too tight");
+        require(newAge <= 1 hours, "FeeOracle: too permissive");
+        maxFeedAgeSeconds = newAge;
+        emit MaxFeedAgeUpdated(newAge);
     }
 
     /**
@@ -99,8 +106,8 @@ contract FeeOracle is IFeeOracle {
             if (answer <= 0) {
                 return 0;
             }
-            if (block.timestamp - updatedAt > MAX_FEED_AGE_SECONDS) {
-                return 0;
+            if (block.timestamp - updatedAt > maxFeedAgeSeconds) {
+                revert("FeeOracle: stale Chainlink price feed");
             }
             uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
             uint256 tokenDecimals = _getTokenDecimals(token);
@@ -205,8 +212,11 @@ contract FeeOracle is IFeeOracle {
             uint256 updatedAt,
             uint80
         ) {
-            if (answer <= 0 || block.timestamp - updatedAt > MAX_FEED_AGE_SECONDS) {
+            if (answer <= 0) {
                 return (0, false);
+            }
+            if (block.timestamp - updatedAt > maxFeedAgeSeconds) {
+                revert("FeeOracle: stale Chainlink price feed");
             }
             uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
             if (feedDecimals == PRICE_FEED_DECIMALS) {
