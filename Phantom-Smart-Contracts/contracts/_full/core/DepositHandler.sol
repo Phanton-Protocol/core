@@ -6,14 +6,17 @@ import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
 import "../interfaces/IShieldedPool.sol";
 import "./ComplianceModule.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title DepositHandler
  * @notice Separate contract to handle deposit logic and reduce stack depth in ShieldedPool
  * @dev This contract is called by ShieldedPool to process deposits
  * Security: Only ShieldedPool can call this contract's functions
+ * @dev **Module 2:** `nonReentrant` on `processDeposit` — defense-in-depth during the
+ *      `finalizeDeposit` callback chain (fee distributor / relayer hooks must not recurse here).
  */
-contract DepositHandler {
+contract DepositHandler is ReentrancyGuard {
     // ============ State Variables ============
     address public immutable shieldedPool; // Only ShieldedPool can call
     IFeeOracle public immutable feeOracle;
@@ -86,7 +89,7 @@ contract DepositHandler {
         uint256 value,
         address complianceModule,
         address relayer
-    ) external onlyShieldedPool {
+    ) external onlyShieldedPool nonReentrant {
         // Check compliance
         if (complianceModule != address(0)) {
             ComplianceModule module = ComplianceModule(complianceModule);

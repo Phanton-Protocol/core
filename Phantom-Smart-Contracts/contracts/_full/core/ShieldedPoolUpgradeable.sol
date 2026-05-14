@@ -21,6 +21,8 @@ import "../libraries/DexSwapFee.sol";
 import "./ComplianceModule.sol";
 import "./TransactionHistory.sol";
 import "../governance/TimelockController.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title ShieldedPool
@@ -37,6 +39,7 @@ import "../governance/TimelockController.sol";
 contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using MerkleTree for bytes32;
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
+    using SafeERC20 for IERC20;
 
     /// @dev Module 1 audit fix (initializer hardening): prevents an attacker
     ///      from initializing the *implementation* directly (proxy-only init).
@@ -490,7 +493,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         
         if (inputToken != address(0)) {
             // Approve swapAdaptor for token transfer (handler will call swapAdaptor)
-            IERC20(inputToken).approve(address(swapAdaptor), swapInputAmount);
+            IERC20(inputToken).safeApprove(address(swapAdaptor), swapInputAmount);
         }
         
         (uint256 swapOutput, ) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
@@ -558,6 +561,11 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      * 8. Add BOTH commitments to Merkle tree (swap result + change)
      * 9. Mark nullifier as used
      * 10. Refund relayer
+     *
+     * **Module 2 — reentrancy:** External swap / matching calls intentionally precede Merkle
+     * inserts and the nullifier burn (swap must succeed first). The contract-wide
+     * `nonReentrant` lock prevents cross-function reentrancy into `deposit`,
+     * `shieldedWithdraw`, or other spend paths during adaptor / handler execution.
      */
     function shieldedSwapJoinSplit(
         JoinSplitSwapData calldata swapData
@@ -675,7 +683,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         } else {
             // ============ STEP 4: DELEGATE TO SWAP HANDLER ============
             if (inputTokenAddr != address(0)) {
-                IERC20(inputTokenAddr).approve(address(swapAdaptor), inputs.swapAmount);
+                IERC20(inputTokenAddr).safeApprove(address(swapAdaptor), inputs.swapAmount);
             }
             
             (swapOutput, totalProtocolFee) = ISwapHandler(swapHandler).processJoinSplitSwap{value: inputTokenAddr == address(0) ? inputs.swapAmount : 0}(swapData);
@@ -863,7 +871,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         if (inputToken == address(0)) {
             payable(recipient).transfer(withdrawAmount);
         } else {
-            require(IERC20(inputToken).transfer(recipient, withdrawAmount), "ShieldedPool: withdraw transfer failed");
+            IERC20(inputToken).safeTransfer(recipient, withdrawAmount);
         }
 
         // ============ STEP 6: GAS REFUND (from reserve) ============
@@ -1259,7 +1267,8 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      * @param relayer Relayer address to refund
      * @param gasCost Gas cost to refund
      */
-    function refundRelayerGas(address relayer, uint256 gasCost) external {
+    /// @dev Module 2: `nonReentrant` — gas reserve mutation must not interleave with other spends.
+    function refundRelayerGas(address relayer, uint256 gasCost) external nonReentrant {
         require(
             msg.sender == address(this) || msg.sender == owner(),
             "ShieldedPool: unauthorized"
@@ -1382,7 +1391,8 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      * @param commitmentHash Hash of (nullifier, swapParams, deadline, nonce, salt)
      * @param deadline Transaction deadline timestamp
      */
-    function commitSwap(bytes32 commitmentHash, uint256 deadline) external {
+    /// @dev Module 2: `nonReentrant` — mutates MEV maps; blocks nested entry from token/router hooks.
+    function commitSwap(bytes32 commitmentHash, uint256 deadline) external nonReentrant {
         require(commitmentHash != bytes32(0), "ShieldedPool: zero commitment");
         require(deadline > block.timestamp, "ShieldedPool: invalid deadline");
         require(deadline <= block.timestamp + MAX_DEADLINE_DURATION, "ShieldedPool: deadline too far");
@@ -1459,10 +1469,4 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     
     event SwapCommitted(bytes32 indexed commitment, uint256 deadline);
     event MEVProtectionVerified(bytes32 indexed commitment, uint256 deadline, uint256 nonce);
-}
-
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
 }

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "../interfaces/IPancakeSwapAdaptor.sol";
 import "../types/Types.sol";
 
@@ -8,8 +12,10 @@ import "../types/Types.sol";
  * @title PancakeSwapAdaptor
  * @notice Adaptor for executing swaps on PancakeSwap V3
  * @dev Handles both BNB and ERC20 token swaps
+ * @dev **Module 2:** `nonReentrant` on value-moving entry points; SafeERC20 for token pulls/payouts.
  */
-contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
+contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
+    using SafeERC20 for IERC20;
     // PancakeSwap V2 Router addresses
     address public router;
     address public wbnb;
@@ -41,7 +47,7 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
      */
     function executeSwap(
         SwapParams calldata swapParams
-    ) external payable override returns (uint256 amountOut) {
+    ) external payable override nonReentrant returns (uint256 amountOut) {
         require(swapParams.amountIn > 0, "PancakeSwapAdaptor: zero amount");
         require(swapParams.tokenOut != address(0), "PancakeSwapAdaptor: invalid token out");
         
@@ -61,8 +67,8 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
             );
             amountOut = amounts[amounts.length - 1];
         } else if (isBNBOut) {
-            IERC20(swapParams.tokenIn).transferFrom(msg.sender, address(this), swapParams.amountIn);
-            IERC20(swapParams.tokenIn).approve(router, swapParams.amountIn);
+            IERC20(swapParams.tokenIn).safeTransferFrom(msg.sender, address(this), swapParams.amountIn);
+            IERC20(swapParams.tokenIn).safeApprove(router, swapParams.amountIn);
             uint256[] memory amounts = IPancakeRouter02(router).swapExactTokensForETH(
                 swapParams.amountIn,
                 swapParams.minAmountOut,
@@ -72,8 +78,8 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
             );
             amountOut = amounts[amounts.length - 1];
         } else {
-            IERC20(swapParams.tokenIn).transferFrom(msg.sender, address(this), swapParams.amountIn);
-            IERC20(swapParams.tokenIn).approve(router, swapParams.amountIn);
+            IERC20(swapParams.tokenIn).safeTransferFrom(msg.sender, address(this), swapParams.amountIn);
+            IERC20(swapParams.tokenIn).safeApprove(router, swapParams.amountIn);
             uint256[] memory amounts = IPancakeRouter02(router).swapExactTokensForTokens(
                 swapParams.amountIn,
                 swapParams.minAmountOut,
@@ -108,11 +114,11 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
     /**
      * @notice Allows owner to withdraw stuck tokens
      */
-    function withdrawToken(address token, uint256 amount) external onlyOwner {
+    function withdrawToken(address token, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) {
-            payable(owner).transfer(amount);
+            Address.sendValue(payable(owner), amount);
         } else {
-            IERC20(token).transfer(owner, amount);
+            IERC20(token).safeTransfer(owner, amount);
         }
     }
 
@@ -134,12 +140,6 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor {
         path[1] = outToken;
         return path;
     }
-}
-
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 interface IPancakeRouter02 {

@@ -464,6 +464,8 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
                 IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, totalProtocolFee);
             }
         }
+        // Module 2 CEI: commit portfolio state before relayer gas payout (external).
+        _updatePortfolioState(data.owner, inputs);
         if (inputs.gasRefund > 0) {
             if (inputToken == address(0)) {
                 payable(relayer).transfer(inputs.gasRefund);
@@ -471,8 +473,6 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
                 IERC20(inputToken).safeTransfer(relayer, inputs.gasRefund);
             }
         }
-
-        _updatePortfolioState(data.owner, inputs);
     }
 
     /**
@@ -492,13 +492,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         uint256 withdrawAmount = inputs.swapAmount;
         if (withdrawAmount == 0) revert PoolErr(18);
 
+        // Module 2 CEI: finalize portfolio note state before any external payout.
+        _updatePortfolioState(data.owner, inputs);
+
         if (token == address(0)) {
             payable(data.recipient).transfer(withdrawAmount);
         } else {
             IERC20(token).safeTransfer(data.recipient, withdrawAmount);
         }
-
-        _updatePortfolioState(data.owner, inputs);
     }
 
     /**
@@ -550,6 +551,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         );
     }
 
+    /**
+     * @dev **Module 2 — CEI / reentrancy:** The DEX / fee `external` calls run **before**
+     *      Merkle inserts and the nullifier burn because the swap must succeed to know
+     *      `swapOutput` and to avoid bricking funds on a failed router call. **All**
+     *      user-facing spend paths on this contract use `nonReentrant`, so a malicious
+     *      token/router cannot re-enter `deposit`, `shieldedWithdraw`, or another spend
+     *      in the same transaction (OZ `ReentrancyGuard` is contract-wide).
+     */
     function _executeShieldedSwapJoinSplit(
         JoinSplitSwapData calldata swapData
     ) internal {
@@ -1245,7 +1254,9 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
      * @param relayer Relayer address to refund
      * @param gasCost Gas cost to refund
      */
-    function refundRelayerGas(address relayer, uint256 gasCost) external {
+    /// @dev Module 2: `nonReentrant` so callbacks (e.g. from future fee distributors) cannot
+    ///      re-enter other fund-moving pool functions in the same transaction.
+    function refundRelayerGas(address relayer, uint256 gasCost) external nonReentrant {
         if (msg.sender != address(this) && msg.sender != poolOwner) revert PoolErr(3);
         if (gasReserve < gasCost || relayer == address(0)) revert PoolErr(36);
         if (!relayerRegistry.isRelayer(relayer)) revert PoolErr(44);
@@ -1329,7 +1340,9 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
      * @param commitmentHash Hash of (nullifier, swapParams, deadline, nonce, salt)
      * @param deadline Transaction deadline timestamp
      */
-    function commitSwap(bytes32 commitmentHash, uint256 deadline) external {
+    /// @dev Module 2: `nonReentrant` — mutates MEV maps; must not be callable mid-flight from
+    ///      token/router hooks while another `nonReentrant` spend holds the lock.
+    function commitSwap(bytes32 commitmentHash, uint256 deadline) external nonReentrant {
         if (commitmentHash == bytes32(0) || deadline <= block.timestamp || deadline > block.timestamp + MAX_DEADLINE_DURATION || swapCommitments[commitmentHash]) revert PoolErr(37);
         
         swapCommitments[commitmentHash] = true;

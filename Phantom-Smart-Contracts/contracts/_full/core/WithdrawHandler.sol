@@ -8,14 +8,17 @@ import "../interfaces/IFeeDistributor.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../types/Types.sol";
 import "../libraries/MiMC7.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title WithdrawHandler
  * @notice External contract to handle withdraw operations and reduce main contract size
  * @dev Similar to DepositHandler - moves heavy withdraw logic out of ShieldedPool
  * Security: Only ShieldedPool can call this contract's functions
+ * @dev **Module 2:** `nonReentrant` on `processWithdraw` — external fee distribution must not
+ *      recurse into this handler mid-flight.
  */
-contract WithdrawHandler {
+contract WithdrawHandler is ReentrancyGuard {
     IShieldedPool public immutable shieldedPool;
     IVerifier public immutable verifier;
     IVerifier public immutable thresholdVerifier;
@@ -52,7 +55,7 @@ contract WithdrawHandler {
      */
     function processWithdraw(
         ShieldedWithdrawData calldata withdrawData
-    ) external onlyShieldedPool returns (uint256 withdrawAmount, uint256 protocolFee) {
+    ) external onlyShieldedPool nonReentrant returns (uint256 withdrawAmount, uint256 protocolFee) {
         JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
         
         // Validator consensus

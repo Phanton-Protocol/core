@@ -17,6 +17,8 @@ import "../types/Types.sol";
 import "../libraries/MerkleTree.sol";
 import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/JoinSplitPublicInputValidation.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title ShieldedPoolUpgradeableReduced
@@ -32,6 +34,7 @@ import "../libraries/JoinSplitPublicInputValidation.sol";
  */
 contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
+    using SafeERC20 for IERC20;
     error SP();
     error NotTimelock();
     error NotEmergencyAdmin();
@@ -535,7 +538,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 swapInputAmount = inputs.inputAmount - inputs.protocolFee - inputs.gasRefund;
         
         if (inputToken != address(0)) {
-            IERC20(inputToken).approve(address(swapAdaptor), swapInputAmount);
+            IERC20(inputToken).safeApprove(address(swapAdaptor), swapInputAmount);
         }
         
         (uint256 swapOutput, ) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
@@ -570,6 +573,13 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         emit CommitmentAdded(inputs.outputCommitment, newIndex);
     }
 
+    /**
+     * @notice Join-split swap: spend one note, DEX leg, two output commitments.
+     * @dev **Module 2:** The adaptor `executeSwap` call precedes Merkle inserts and the
+     *      nullifier burn by protocol necessity (need `dexOut` before committing state).
+     *      `nonReentrant` on this entry blocks cross-function reentrancy into `deposit` /
+     *      `shieldedWithdraw` / `shieldedSwap` during the DEX call.
+     */
     function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData) external override nonReentrant {
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
@@ -605,7 +615,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 swapAmount = inputs.swapAmount;
 
         if (inputToken != address(0)) {
-            IERC20(inputToken).approve(address(swapAdaptor), swapAmount);
+            IERC20(inputToken).safeApprove(address(swapAdaptor), swapAmount);
         }
 
         uint256 dexOut = IPancakeSwapAdaptor(swapAdaptor).executeSwap{value: inputToken == address(0) ? swapAmount : 0}(
@@ -619,7 +629,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             if (inputToken == address(0)) {
                 IFeeDistributor(address(relayerRegistry)).distributeFee{value: totalProtocolFee}(address(0), totalProtocolFee);
             } else {
-                IERC20(inputToken).approve(address(relayerRegistry), totalProtocolFee);
+                IERC20(inputToken).safeApprove(address(relayerRegistry), totalProtocolFee);
                 IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, totalProtocolFee);
             }
         }
@@ -712,8 +722,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             (bool ok,) = payable(withdrawData.recipient).call{value: withdrawAmount}("");
             require(ok, "SP:W2");
         } else {
-            bool ok = IERC20(inputToken).transfer(withdrawData.recipient, withdrawAmount);
-            require(ok, "SP:W3");
+            IERC20(inputToken).safeTransfer(withdrawData.recipient, withdrawAmount);
         }
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
@@ -809,8 +818,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             (bool ok,) = payable(withdrawData.recipients[0].recipient).call{value: withdrawAmount}("");
             require(ok, "SP: native withdraw transfer failed");
         } else {
-            bool ok = IERC20(inputToken).transfer(withdrawData.recipients[0].recipient, withdrawAmount);
-            require(ok, "SP: token withdraw transfer failed");
+            IERC20(inputToken).safeTransfer(withdrawData.recipients[0].recipient, withdrawAmount);
         }
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
@@ -878,10 +886,4 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         }
     }
 
-}
-
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
 }

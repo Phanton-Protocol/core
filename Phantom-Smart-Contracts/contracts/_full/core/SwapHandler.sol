@@ -10,14 +10,17 @@ import "../interfaces/IRelayerRegistry.sol";
 import "../types/Types.sol";
 import "../libraries/DexSwapFee.sol";
 import "../libraries/MiMC7.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title SwapHandler
  * @notice External contract to handle swap operations and reduce main contract size
  * @dev Similar to DepositHandler - moves heavy swap logic out of ShieldedPool
  * Security: Only ShieldedPool can call this contract's functions
+ * @dev **Module 2:** `nonReentrant` on swap entry points — defense-in-depth if a malicious adaptor
+ *      ever invoked nested `processSwap` / `processJoinSplitSwap` while `msg.sender` remains the pool.
  */
-contract SwapHandler {
+contract SwapHandler is ReentrancyGuard {
     IShieldedPool public immutable shieldedPool;
     IVerifier public immutable verifier;
     IVerifier public immutable thresholdVerifier;
@@ -61,7 +64,7 @@ contract SwapHandler {
      */
     function processSwap(
         ShieldedSwapData calldata swapData
-    ) external payable onlyShieldedPool returns (uint256 swapOutput, uint256 totalProtocolFee) {
+    ) external payable onlyShieldedPool nonReentrant returns (uint256 swapOutput, uint256 totalProtocolFee) {
         PublicInputs memory inputs = swapData.publicInputs;
         
         // Validator consensus
@@ -131,7 +134,7 @@ contract SwapHandler {
      */
     function processJoinSplitSwap(
         JoinSplitSwapData calldata swapData
-    ) external payable onlyShieldedPool returns (uint256 swapOutput, uint256 totalProtocolFee) {
+    ) external payable onlyShieldedPool nonReentrant returns (uint256 swapOutput, uint256 totalProtocolFee) {
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         
         // Validator consensus
