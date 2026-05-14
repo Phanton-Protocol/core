@@ -239,14 +239,20 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     }
     
     /**
-     * @notice Set compliance module address (can be set after deployment)
-     * @dev Can be set by owner or relayer registry
+     * @notice Set compliance module address (can be set after deployment).
+     * @dev Module 1 audit fix: previously the **relayer registry** could
+     *      mutate this pointer — that was a hidden centralized mutation path.
+     *      Restricted to `poolOwner` (or, in upgradeable variants, to a
+     *      governance-controlled timelock via `setComplianceModule` overrides).
+     *      Emits {ComplianceModuleUpdated}.
      */
+    event ComplianceModuleUpdated(address indexed previous, address indexed current);
     function setComplianceModule(address _complianceModule) external virtual {
-        // Allow owner or relayer registry to set
-        if (msg.sender != poolOwner && msg.sender != address(relayerRegistry)) revert PoolErr(3);
+        if (msg.sender != poolOwner) revert PoolErr(3);
         if (_complianceModule == address(0)) revert PoolErr(1);
+        address prev = complianceModuleAddress;
         complianceModuleAddress = _complianceModule;
+        emit ComplianceModuleUpdated(prev, _complianceModule);
     }
 
     /**

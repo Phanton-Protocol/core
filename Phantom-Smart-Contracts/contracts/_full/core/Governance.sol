@@ -24,6 +24,10 @@ contract Governance {
     uint256 public votingPeriod;
     uint256 public quorum;
     uint256 public minProposalThreshold;
+    /// @notice Retained for storage-layout / ABI compatibility with the
+    ///         deployed BSC-testnet contract. Module 1 audit note: this
+    ///         field is **not** used for access control; all gating is via
+    ///         token balance + snapshot votes. Treat as informational only.
     address public owner;
 
     uint256 public constant EXECUTION_DELAY = 2 days;

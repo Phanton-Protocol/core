@@ -2,6 +2,9 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
+const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
+
+const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const MOCK_SWAP_SUB1_FQN = "contracts/_full/mocks/MockSwapAdaptorSubtractWei.sol:MockSwapAdaptorSubtractWei";
@@ -32,18 +35,13 @@ async function deployReducedForM3a(useSubtractWeiAdaptor) {
   await relayerRegistry.waitForDeployment();
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const Pool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
-  const pool = await Pool.deploy();
-  await pool.waitForDeployment();
-  await (
-    await pool.initialize(
-      await joinV.getAddress(),
-      await threshV.getAddress(),
-      await swapAdaptor.getAddress(),
-      await feeOracle.getAddress(),
-      await relayerRegistry.getAddress()
-    )
-  ).wait();
+  const pool = await deployBehindProxy(REDUCED_FQN, [
+    await joinV.getAddress(),
+    await threshV.getAddress(),
+    await swapAdaptor.getAddress(),
+    await feeOracle.getAddress(),
+    await relayerRegistry.getAddress(),
+  ]);
 
   return { deployer, pool, feeOracle, swapAdaptor };
 }

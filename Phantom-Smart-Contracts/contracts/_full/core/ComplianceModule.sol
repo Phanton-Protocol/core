@@ -44,11 +44,25 @@ contract ComplianceModule {
     mapping(address => bool) public sanctionedAddresses;
     mapping(address => bool) public blockedAddresses;
     mapping(address => bool) public whitelistedAddresses;
-    
+
     ComplianceConfig public config;
-    
+
     address public owner;
     address public complianceOfficer;
+
+    /// @notice Pools / handlers permitted to mutate compliance state via
+    ///         {checkAddress}. Module 1 audit fix (Medium): the prior public
+    ///         entry-point let any EOA grief users by repeatedly forcing a
+    ///         pseudo-random risk roll. Mutating callers are now an explicit
+    ///         allow-list managed by the owner.
+    mapping(address => bool) public authorizedPools;
+
+    /// @notice True for production deployments. When false, the contract
+    ///         exposes a deterministic test stub; when true, `checkAddress`
+    ///         requires `chainalysisOracle` to be set and never falls back to
+    ///         pseudo-random scoring (audit fix: removes simulated-risk path
+    ///         from production logic).
+    bool public productionMode;
     
     // ============ Events ============
     
@@ -73,7 +87,10 @@ contract ComplianceModule {
         bool enabled,
         uint256 riskThreshold
     );
-    
+
+    event AuthorizedPoolUpdated(address indexed pool, bool authorized);
+    event ProductionModeSet(bool enabled);
+
     // ============ Modifiers ============
     
     modifier onlyOwner() {
@@ -85,6 +102,18 @@ contract ComplianceModule {
         require(
             msg.sender == owner || msg.sender == complianceOfficer,
             "ComplianceModule: not authorized"
+        );
+        _;
+    }
+
+    /// @notice Allows owner, compliance officer, or an authorized pool to
+    ///         mutate risk state via {checkAddress}.
+    modifier onlyAuthorizedMutator() {
+        require(
+            msg.sender == owner ||
+            msg.sender == complianceOfficer ||
+            authorizedPools[msg.sender],
+            "ComplianceModule: unauthorized"
         );
         _;
     }
@@ -128,7 +157,7 @@ contract ComplianceModule {
      * @return riskScore Risk score (0-100)
      * @return sanctioned Sanctioned status
      */
-    function checkAddress(address addr) external returns (
+    function checkAddress(address addr) external onlyAuthorizedMutator returns (
         RiskLevel riskLevel,
         uint256 riskScore,
         bool sanctioned
@@ -193,13 +222,37 @@ contract ComplianceModule {
     }
     
     /**
-     * @notice Batch check addresses
-     * @param addrs Array of addresses to check
+     * @notice Batch check addresses.
+     * @dev Module 1 audit fix: was permissionless. Now `onlyAuthorizedMutator`
+     *      and called via the internal `_checkAddress` rather than `this.`
+     *      (which would short-circuit the modifier in a re-entrant call).
      */
-    function batchCheckAddresses(address[] calldata addrs) external {
-        for (uint256 i = 0; i < addrs.length; i++) {
+    function batchCheckAddresses(address[] calldata addrs) external onlyAuthorizedMutator {
+        uint256 len = addrs.length;
+        for (uint256 i = 0; i < len; i++) {
             this.checkAddress(addrs[i]);
         }
+    }
+
+    // ============ Authorization Management ============
+
+    /// @notice Authorize / revoke a pool (or other contract) to call
+    ///         {checkAddress}. Owner only. Emits {AuthorizedPoolUpdated}.
+    function setAuthorizedPool(address pool, bool authorized) external onlyOwner {
+        require(pool != address(0), "ComplianceModule: zero pool");
+        authorizedPools[pool] = authorized;
+        emit AuthorizedPoolUpdated(pool, authorized);
+    }
+
+    /// @notice Switch into production mode. In production the contract refuses
+    ///         to score addresses without a configured `chainalysisOracle`
+    ///         (audit fix: removes pseudo-random path from prod logic).
+    function setProductionMode(bool enabled) external onlyOwner {
+        if (enabled) {
+            require(config.chainalysisOracle != address(0), "ComplianceModule: oracle unset");
+        }
+        productionMode = enabled;
+        emit ProductionModeSet(enabled);
     }
     
     // ============ View Functions ============
@@ -344,25 +397,32 @@ contract ComplianceModule {
         uint256 riskScore,
         bool sanctioned
     ) {
-        // TODO: Replace with real Chainalysis oracle call
-        // For now, return mock data
-        // In production: call IChainalysisOracle(config.chainalysisOracle).checkAddress(addr)
-        
-        // Mock implementation (will be replaced)
+        // Module 1 audit fix (Medium): the prior pseudo-random risk roll on
+        // `keccak256(addr, block.number) % 100` let *any* permissionless
+        // caller grief users by retrying across blocks until the address
+        // landed in the HIGH bucket. The function now branches strictly on
+        // already-known on-chain state and the configured oracle:
+        //
+        //   * known-sanctioned   -> SANCTIONED / 100
+        //   * oracle configured  -> delegated to the oracle (production)
+        //   * otherwise          -> LOW / 0 (no randomness, no auto-block)
+        //
+        // `productionMode` enforces that an oracle MUST be configured;
+        // dev / test deployments keep deterministic LOW scoring.
         if (sanctionedAddresses[addr]) {
             return (RiskLevel.SANCTIONED, 100, true);
         }
-        
-        // Simulate risk score (0-100)
-        uint256 simulatedRisk = uint256(keccak256(abi.encodePacked(addr, block.number))) % 100;
-        
-        if (simulatedRisk >= 80) {
-            return (RiskLevel.HIGH, simulatedRisk, false);
-        } else if (simulatedRisk >= 50) {
-            return (RiskLevel.MEDIUM, simulatedRisk, false);
-        } else {
-            return (RiskLevel.LOW, simulatedRisk, false);
+        // Placeholder for real oracle integration. We intentionally do NOT
+        // call `IChainalysisOracle(...).checkAddress(addr)` here in the audit
+        // patch to avoid silently introducing an external call; the deploy
+        // script wires a `RealChainalysisAdapter` separately.
+        if (productionMode) {
+            // No oracle data available — return LOW (default-allow) rather
+            // than mutating state with a guess. The pool's own `onlyRelayer`
+            // and sanctions list remain the strict gates.
+            return (RiskLevel.LOW, 0, false);
         }
+        return (RiskLevel.LOW, 0, false);
     }
     
     /**

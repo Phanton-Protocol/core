@@ -33,6 +33,17 @@ import "../libraries/JoinSplitPublicInputValidation.sol";
 contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
     error SP();
+    error NotTimelock();
+    error NotEmergencyAdmin();
+    error EmergencyPausedErr();
+    error InvalidSweepAmount();
+    error ZeroAddr();
+
+    /// @dev Module 1 audit fix — disable initializers on the implementation.
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Reduced from 20 to save space
@@ -77,7 +88,31 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     // Compliance (optional - can be set later)
     address internal complianceModuleAddress;
     address internal poolOwner;
-    
+
+    // ============ Module 1 Security Upgrade (reinitializer v2) ============
+    // Appended at the end of the v1 storage layout. Set via {initializeV2}
+    // by the existing OZ owner. Constants below do not occupy slots so this
+    // append is layout-safe for already-deployed proxies.
+
+    /// @notice OZ-backed `TimelockController` that authorizes UUPS upgrades.
+    ///         When set, `_authorizeUpgrade` requires `msg.sender == timelock`.
+    address public timelock;
+    /// @notice Address (typically a multisig) that may invoke
+    ///         {sweepGasReserveNative}. Strictly separated from `owner()` so a
+    ///         compromised owner key cannot drain native balance.
+    address public emergencyAdmin;
+    /// @notice When true, deposits/swap/withdraw entry points must revert.
+    ///         Toggled by `emergencyAdmin` (pause) or `owner()` (unpause).
+    bool public emergencyPaused;
+    /// @notice Future-proofing gap — reserve 47 slots so subsequent security
+    ///         upgrades can append state without touching downstream layout.
+    uint256[47] private __moduleOneSecurityGap;
+
+    event TimelockSet(address indexed previous, address indexed current);
+    event EmergencyAdminSet(address indexed previous, address indexed current);
+    event EmergencyPaused(address indexed by);
+    event EmergencyUnpaused(address indexed by);
+
     /// @notice DEX protocol swap fee = 10 bps (0.10%); see `DexSwapFee` / E-paper §1.8.
     uint256 public constant DEX_SWAP_FEE_BPS = 10;
     uint256 public constant BPS_DENOMINATOR = 10000;
@@ -178,7 +213,72 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     // ============ UUPS Authorization ============
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    /// @notice Module 1 audit fix — upgrades require the configured timelock
+    ///         (which is in turn gated by Governance). If `timelock` is unset
+    ///         we fall back to `onlyOwner` for **bootstrap only**; once
+    ///         {initializeV2} has been called this path becomes unreachable.
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        if (newImplementation == address(0)) revert ZeroAddr();
+        if (timelock == address(0)) {
+            // Bootstrap path — owner-driven, used **only** between v1 → v2
+            // initialization. The deploy/migration script MUST immediately
+            // call {initializeV2} to switch to timelock authorization.
+            if (msg.sender != owner()) revert SP();
+        } else {
+            if (msg.sender != timelock) revert NotTimelock();
+        }
+    }
+
+    /// @notice Module 1 audit migration entry-point for already-deployed
+    ///         proxies. Switches upgrade authorization from `onlyOwner` to
+    ///         the OZ-backed `TimelockController`, sets the emergency admin
+    ///         (separate from `owner()`), and syncs `poolOwner` to `owner()`.
+    /// @dev Uses `reinitializer(2)` so it can only run once per proxy and
+    ///      never re-runs after future upgrades.
+    function initializeV2(address _timelock, address _emergencyAdmin)
+        external
+        reinitializer(2)
+        onlyOwner
+    {
+        if (_timelock == address(0) || _emergencyAdmin == address(0)) revert ZeroAddr();
+        timelock = _timelock;
+        emergencyAdmin = _emergencyAdmin;
+        emit TimelockSet(address(0), _timelock);
+        emit EmergencyAdminSet(address(0), _emergencyAdmin);
+        // Sync legacy `poolOwner` shadow (no event — `OwnershipTransferred`
+        // covers the canonical owner change).
+        if (poolOwner != owner()) {
+            poolOwner = owner();
+        }
+    }
+
+    /// @dev Keep `poolOwner` in sync with the canonical OZ owner.
+    function _transferOwnership(address newOwner) internal override {
+        super._transferOwnership(newOwner);
+        poolOwner = newOwner;
+    }
+
+    function setEmergencyAdmin(address newAdmin) external onlyOwner {
+        if (newAdmin == address(0)) revert ZeroAddr();
+        emit EmergencyAdminSet(emergencyAdmin, newAdmin);
+        emergencyAdmin = newAdmin;
+    }
+
+    function pauseEmergency() external {
+        if (msg.sender != emergencyAdmin) revert NotEmergencyAdmin();
+        emergencyPaused = true;
+        emit EmergencyPaused(msg.sender);
+    }
+
+    function unpauseEmergency() external onlyOwner {
+        emergencyPaused = false;
+        emit EmergencyUnpaused(msg.sender);
+    }
+
+    modifier whenNotEmergencyPaused() {
+        if (emergencyPaused) revert EmergencyPausedErr();
+        _;
+    }
 
     /// @dev Records `newRoot` as spendable and updates `merkleRoot` (canonical head).
     function _setMerkleRoot(bytes32 newRoot) internal {
@@ -223,6 +323,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     function setComplianceModule(address _complianceModule) external onlyOwner {
+        if (_complianceModule == address(0)) revert ZeroAddr();
         complianceModuleAddress = _complianceModule;
     }
 
@@ -242,30 +343,37 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
      * @param to Recipient (typically pool owner / treasury).
      * @param maxWei Max native amount to move; if 0, sweeps entire current `gasReserve`.
      */
-    function sweepGasReserveNative(address payable to, uint256 maxWei) external onlyOwner nonReentrant {
-        require(to != address(0), "SP: zero to");
+    /// @notice Sweep at most `gasReserve` native wei.
+    /// @dev Module 1 audit fix: gated by the **emergency admin** (a separate
+    ///      multisig role), not the upgrade owner, so a compromised owner key
+    ///      alone cannot drain liquidity. Capped at `gasReserve` so
+    ///      commitment-backing balance is unaffected.
+    function sweepGasReserveNative(address payable to, uint256 maxWei) external nonReentrant whenNotEmergencyPaused {
+        if (msg.sender != emergencyAdmin) revert NotEmergencyAdmin();
+        if (to == address(0)) revert ZeroAddr();
         uint256 available = gasReserve;
         uint256 sweep = maxWei == 0 ? available : maxWei;
         if (sweep > available) sweep = available;
-        require(sweep > 0, "SP: nothing to sweep");
-        require(address(this).balance >= sweep, "SP:S2");
+        if (sweep == 0) revert InvalidSweepAmount();
+        if (address(this).balance < sweep) revert InvalidSweepAmount();
         gasReserve -= sweep;
         (bool ok,) = to.call{value: sweep}("");
         require(ok, "SP:S3");
     }
 
-    /**
-     * @notice Sends the contract's **entire** native balance to `to` (owner-only).
-     * @dev Testnet / emergency / pool retirement only. Does not unwind Merkle commitments; any remaining
-     *      shielded notes become unbacked. Resets `gasReserve` to zero after the transfer.
-     */
-    function emergencySendAllNativeBalance(address payable to) external onlyOwner nonReentrant {
-        require(to != address(0), "SP: zero to");
+    /// @notice Full native-balance drain — **only** reachable via a
+    ///         successful governance proposal (timelock execution).
+    /// @dev Module 1 audit fix: the previous `onlyOwner` path let a single
+    ///      compromised key empty the pool unilaterally. Now the caller must
+    ///      be the configured `timelock`, i.e. a vote-then-delay flow.
+    function emergencySendAllNativeBalance(address payable to) external nonReentrant {
+        if (msg.sender != timelock || timelock == address(0)) revert NotTimelock();
+        if (to == address(0)) revert ZeroAddr();
         uint256 b = address(this).balance;
-        require(b > 0, "SP:N1");
+        if (b == 0) revert InvalidSweepAmount();
+        gasReserve = 0;
         (bool ok,) = to.call{value: b}("");
         require(ok, "SP:N2");
-        gasReserve = 0;
     }
 
     /**

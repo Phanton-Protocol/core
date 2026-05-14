@@ -41,7 +41,14 @@ module.exports = {
   networks: {
     hardhat: {
       chainId: 31337,
-      allowUnlimitedContractSize: useFullTree,
+      // Module 1 hardening note: the in-memory hardhat-network is **test
+      // infra only** and never sees real users — keep size enforcement off
+      // here so a missing `HH_FULL=1` env on a direct `npx hardhat test`
+      // invocation can't break the suite. Real BSC mainnet / testnet
+      // configs below do NOT set this flag, so EIP-170 still applies at
+      // deploy time and the oversized experimental pools (flagged in
+      // `docs/SECURITY_FIXES_MODULE1.md` §8) cannot accidentally ship.
+      allowUnlimitedContractSize: true,
     },
     bscTestnet: {
       url: process.env.BSC_TESTNET_RPC || bscTestnetCfg.rpcUrl,

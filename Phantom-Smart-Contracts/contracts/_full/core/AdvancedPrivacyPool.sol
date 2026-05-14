@@ -375,20 +375,43 @@ contract AdvancedPrivacyPool is ShieldedPool {
     }
     
     // ============ Admin Functions ============
-    
-    function updateFHEExecutor(address newExecutor) external {
-        // Add access control
+    // Module 1 audit fix (Critical): these setters were permissionless and
+    // allowed anyone to swap FHE / MPC / threshold-encryption backends to
+    // malicious contracts. Now gated to the inherited `poolOwner` (kept in
+    // sync with OZ ownership in the upgradeable variants). Zero-address
+    // writes are rejected and every change emits an event.
+
+    error AdvancedPrivacyPoolNotOwner();
+    error AdvancedPrivacyPoolZeroAddress();
+
+    event FHEExecutorUpdated(address indexed previous, address indexed current);
+    event MPCCoprocessorUpdated(address indexed previous, address indexed current);
+    event ThresholdEncryptionUpdated(address indexed previous, address indexed current);
+
+    modifier onlyPoolOwner() {
+        if (msg.sender != poolOwner) revert AdvancedPrivacyPoolNotOwner();
+        _;
+    }
+
+    function updateFHEExecutor(address newExecutor) external onlyPoolOwner {
+        if (newExecutor == address(0)) revert AdvancedPrivacyPoolZeroAddress();
+        address prev = address(fheExecutor);
         fheExecutor = IFHEExecutor(newExecutor);
+        emit FHEExecutorUpdated(prev, newExecutor);
     }
-    
-    function updateMPCCoprocessor(address newCoprocessor) external {
-        // Add access control
+
+    function updateMPCCoprocessor(address newCoprocessor) external onlyPoolOwner {
+        if (newCoprocessor == address(0)) revert AdvancedPrivacyPoolZeroAddress();
+        address prev = address(mpcCoprocessor);
         mpcCoprocessor = IMPCCoprocessor(newCoprocessor);
+        emit MPCCoprocessorUpdated(prev, newCoprocessor);
     }
-    
-    function updateThresholdEncryption(address newEncryption) external {
-        // Add access control
+
+    function updateThresholdEncryption(address newEncryption) external onlyPoolOwner {
+        if (newEncryption == address(0)) revert AdvancedPrivacyPoolZeroAddress();
+        address prev = address(thresholdEncryption);
         thresholdEncryption = IThresholdEncryption(newEncryption);
+        emit ThresholdEncryptionUpdated(prev, newEncryption);
     }
 }
 

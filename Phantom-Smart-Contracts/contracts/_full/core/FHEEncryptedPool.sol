@@ -79,14 +79,29 @@ contract FHEEncryptedPool is ShieldedPool {
         fheEnabled = false;
     }
     
+    error FHEEncryptedPoolNotOwner();
+    event FHEEnabledChanged(bool enabled, address indexed by);
+
     /**
-     * @notice Enable FHE mode (when Zama supports BSC)
-     * @dev Only callable by owner/governance
+     * @notice Enable FHE mode (when Zama supports BSC).
+     * @dev Module 1 audit fix (Critical): previously **anyone** could flip
+     *      this flag and change deposit / commitment behavior pool-wide.
+     *      Now restricted to the inherited `poolOwner` (governance/timelock
+     *      once ownership is transferred). One-way design retained — calling
+     *      while already enabled is a no-op event.
      */
     function enableFHE() external {
-        // TODO: Add access control (onlyOwner/governance)
-        // For now: Allow enabling when ready
+        if (msg.sender != poolOwner) revert FHEEncryptedPoolNotOwner();
         fheEnabled = true;
+        emit FHEEnabledChanged(true, msg.sender);
+    }
+
+    /// @notice Allow `poolOwner` to disable FHE mode if Zama integration is
+    ///         later removed; useful for safe rollback after testing.
+    function disableFHE() external {
+        if (msg.sender != poolOwner) revert FHEEncryptedPoolNotOwner();
+        fheEnabled = false;
+        emit FHEEnabledChanged(false, msg.sender);
     }
     
     // ============ FHE-Encrypted Deposits ============

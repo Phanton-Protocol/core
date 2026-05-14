@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
+
 /**
  * @title FHECoprocessor
  * @notice Interface/Registry for off-chain Zama fhEVM decentralized coprocessor network
@@ -20,8 +22,8 @@ pragma solidity ^0.8.20;
  * 4. Result commitment is posted to this contract
  * 5. User can verify result matches commitment
  */
-contract FHECoprocessor {
-    
+contract FHECoprocessor is Ownable {
+
     // ============ State Variables ============
     
     /// @notice Execution commitments (executionId => commitment)
@@ -239,20 +241,23 @@ contract FHECoprocessor {
     }
     
     /**
-     * @notice Register new FHE network endpoint
-     * @dev Can be called by governance or admin
+     * @notice Register new FHE network endpoint.
+     * @dev Module 1 audit fix (High): previously **anyone** could pollute
+     *      `fheNetworkEndpoints` / `endpointCount`. Now `onlyOwner`
+     *      (governance/timelock once ownership is transferred).
+     *      Enforces non-empty endpoint strings.
      * @param endpoint URL/identifier of FHE network endpoint
      * @return endpointId Assigned endpoint ID
      */
-    function registerFHEEndpoint(string memory endpoint) 
-        external 
-        returns (uint256 endpointId) 
+    function registerFHEEndpoint(string memory endpoint)
+        external
+        onlyOwner
+        returns (uint256 endpointId)
     {
-        // TODO: Add access control (governance only)
+        require(bytes(endpoint).length > 0, "FHECoprocessor: empty endpoint");
         endpointId = endpointCount++;
         fheNetworkEndpoints[endpointId] = endpoint;
         emit FHEEndpointRegistered(endpointId, endpoint);
-        return endpointId;
     }
     
     /**

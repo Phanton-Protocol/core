@@ -13,6 +13,9 @@ const { computeCommitment, computeNullifier } = require(path.join(
   "src",
   "noteModel.js"
 ));
+const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
+
+const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const FIELD = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
@@ -57,18 +60,13 @@ async function deployReducedPoolWithJoinSplitVerifier() {
   await relayerRegistry.waitForDeployment();
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const Pool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
-  const pool = await Pool.deploy();
-  await pool.waitForDeployment();
-  await (
-    await pool.initialize(
-      await joinAdapter.getAddress(),
-      await threshold.getAddress(),
-      await swapAdaptor.getAddress(),
-      await feeOracle.getAddress(),
-      await relayerRegistry.getAddress()
-    )
-  ).wait();
+  const pool = await deployBehindProxy(REDUCED_FQN, [
+    await joinAdapter.getAddress(),
+    await threshold.getAddress(),
+    await swapAdaptor.getAddress(),
+    await feeOracle.getAddress(),
+    await relayerRegistry.getAddress(),
+  ]);
 
   return { deployer, pool, feeOracle };
 }

@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
+
 /**
  * @title TransactionHistory
  * @notice Manages platform-specific transaction keys and encrypted transaction history
- * @dev Users get platform-specific keys (separate from wallet keys) for tax reporting
+ * @dev Users get platform-specific keys (separate from wallet keys) for tax reporting.
+ *
+ * Module 1 audit fix (High): the prior `setShieldedPool` permitted any caller
+ * to claim the pool slot while `shieldedPool == address(0)` — a deploy-time
+ * front-running window. The contract is now `Ownable`; only the owner may set
+ * the pool, the slot is **one-shot** (cannot be repointed once non-zero), and
+ * the binding is event-emitting.
  */
-contract TransactionHistory {
+contract TransactionHistory is Ownable {
     // User address => platform transaction key
     mapping(address => bytes32) public userTransactionKeys;
     
@@ -79,19 +87,26 @@ contract TransactionHistory {
         _;
     }
     
+    event ShieldedPoolSet(address indexed pool);
+
     constructor(address _shieldedPool) {
-        // Allow zero address for initial deployment, can be set later
+        // Allow zero address at deploy for two-step bootstrap; the owner
+        // (deployer/multisig) must then call `setShieldedPool` exactly once.
         shieldedPool = _shieldedPool;
+        if (_shieldedPool != address(0)) emit ShieldedPoolSet(_shieldedPool);
     }
-    
+
     /**
-     * @notice Set ShieldedPool address (for testnet deployment)
-     * @dev Only callable once, before any transactions are logged
+     * @notice Set ShieldedPool address. One-shot, owner-only.
+     * @dev Module 1 audit fix: previously front-runnable by any EOA while the
+     *      slot was zero. Now `onlyOwner` and irreversible once set non-zero,
+     *      eliminating the squatting window.
      */
-    function setShieldedPool(address _shieldedPool) external {
+    function setShieldedPool(address _shieldedPool) external onlyOwner {
         require(_shieldedPool != address(0), "TransactionHistory: zero address");
-        require(shieldedPool == address(0) || shieldedPool == msg.sender, "TransactionHistory: already set");
+        require(shieldedPool == address(0), "TransactionHistory: already set");
         shieldedPool = _shieldedPool;
+        emit ShieldedPoolSet(_shieldedPool);
     }
     
     function logTransaction(

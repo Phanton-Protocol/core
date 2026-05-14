@@ -2,6 +2,9 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
+const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
+
+const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const MOCK_AGG_FQN = "contracts/_full/mocks/MockChainlinkAggregator.sol:MockChainlinkAggregator";
@@ -27,18 +30,13 @@ async function deployReducedM3bFixture() {
   await relayerRegistry.waitForDeployment();
   await (await relayerRegistry.registerRelayer(deployer.address)).wait();
 
-  const Pool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
-  const pool = await Pool.deploy();
-  await pool.waitForDeployment();
-  await (
-    await pool.initialize(
-      await v1.getAddress(),
-      await v2.getAddress(),
-      await swapAdaptor.getAddress(),
-      await feeOracle.getAddress(),
-      await relayerRegistry.getAddress()
-    )
-  ).wait();
+  const pool = await deployBehindProxy(REDUCED_FQN, [
+    await v1.getAddress(),
+    await v2.getAddress(),
+    await swapAdaptor.getAddress(),
+    await feeOracle.getAddress(),
+    await relayerRegistry.getAddress(),
+  ]);
 
   return { deployer, pool, feeOracle };
 }
@@ -149,12 +147,13 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
     await reg.waitForDeployment();
     await (await reg.registerRelayer(deployer.address)).wait();
 
-    const Pool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
-    const pool = await Pool.deploy();
-    await pool.waitForDeployment();
-    await (
-      await pool.initialize(await v.getAddress(), await t.getAddress(), await ad.getAddress(), await feeOracle.getAddress(), await reg.getAddress())
-    ).wait();
+    const pool = await deployBehindProxy(REDUCED_FQN, [
+      await v.getAddress(),
+      await t.getAddress(),
+      await ad.getAddress(),
+      await feeOracle.getAddress(),
+      await reg.getAddress(),
+    ]);
 
     const SH = await ethers.getContractFactory("SwapHandler");
     const sh = await SH.deploy(

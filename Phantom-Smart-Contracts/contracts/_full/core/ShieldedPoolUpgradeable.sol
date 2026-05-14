@@ -38,6 +38,15 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     using MerkleTree for bytes32;
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
 
+    /// @dev Module 1 audit fix (initializer hardening): prevents an attacker
+    ///      from initializing the *implementation* directly (proxy-only init).
+    ///      Has no effect on already-initialized proxies, but protects new
+    ///      implementations after upgrade.
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 20; // Increased from 10 to 20 (1,048,576 commitments)
     uint256 public constant MAX_ASSETS = 256; // Support up to 256 different assets
@@ -248,7 +257,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         swapAdaptor = IPancakeSwapAdaptor(_swapAdaptor);
         feeOracle = IFeeOracle(_feeOracle);
         relayerRegistry = IRelayerRegistry(_relayerRegistry);
-        timelock = TimelockController(_timelock);
+        timelock = TimelockController(payable(_timelock));
         // FHE and ThresholdEncryption can be set later via setters
         fheCoprocessor = address(0);
         thresholdEncryption = address(0);
@@ -265,26 +274,63 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         poolOwner = msg.sender; // Set owner
     }
 
-    // ============ UUPS Authorization (via Governance) ============
-    function _authorizeUpgrade(address) internal view override {
-        // Upgrades must go through governance voting with protocol token
-        // Governance contract calls timelock, which then calls upgrade
-        require(msg.sender == address(timelock), "ShieldedPool: only timelock (via governance)");
+    // ============ UUPS Authorization (via Governance Timelock) ============
+    /// @notice Upgrades must originate from the configured timelock, which is
+    ///         driven by the on-chain `Governance` (vote → queue → execute).
+    /// @dev Module 1 audit fix: the timelock itself must be the OZ-backed
+    ///      `TimelockController` whose `PROPOSER_ROLE` is held only by the
+    ///      Governance contract. Setting `timelock` to an EOA-controlled
+    ///      contract is now an explicit deploy-time error (see deploy
+    ///      script).
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        require(newImplementation != address(0), "ShieldedPool: zero impl");
+        require(address(timelock) != address(0), "ShieldedPool: timelock unset");
+        require(msg.sender == address(timelock), "ShieldedPool: only timelock");
     }
-    
+
     /**
-     * @notice Set compliance module address (can be set after deployment)
-     * @dev Can be set by owner or relayer registry
+     * @notice Module 1 audit fix — keep the legacy internal `poolOwner` field
+     *         and the OpenZeppelin `Ownable` owner in lock-step.
+     *
+     *         Previously `transferOwnership` only updated OZ `_owner`, leaving
+     *         `poolOwner` (used by several setters) frozen on the old key —
+     *         which bricked admin paths after a normal ownership rotation.
+     *
+     *         Overriding `_transferOwnership` makes the two fields a single
+     *         logical owner, while preserving storage layout for upgrades.
      */
-    function setComplianceModule(address _complianceModule) external virtual {
-        // Allow owner or relayer registry to set
-        require(
-            msg.sender == poolOwner ||
-            msg.sender == address(relayerRegistry),
-            "ShieldedPool: unauthorized"
-        );
+    function _transferOwnership(address newOwner) internal override {
+        super._transferOwnership(newOwner);
+        poolOwner = newOwner;
+    }
+
+    /**
+     * @notice One-shot migration for live proxies whose `poolOwner` may have
+     *         desynced from `owner()` under the legacy code. Callable only
+     *         by the current OZ owner; idempotent.
+     * @dev Module 1 audit fix #3. Bytecode-conservative — no event; rely on
+     *      OZ `OwnershipTransferred` which is emitted whenever `owner()`
+     *      changes.
+     */
+    function syncPoolOwner() external onlyOwner {
+        if (poolOwner != owner()) {
+            poolOwner = owner();
+        }
+    }
+
+    /**
+     * @notice Set compliance module address.
+     * @dev Module 1 audit fix: removed the previous "relayer registry can
+     *      also set" branch (hidden centralized mutation path). Now strictly
+     *      `onlyOwner` — i.e. governance/timelock once ownership is
+     *      transferred to it.
+     */
+    event ComplianceModuleUpdated(address indexed previous, address indexed current);
+    function setComplianceModule(address _complianceModule) external virtual onlyOwner {
         require(_complianceModule != address(0), "ShieldedPool: zero address");
+        address prev = complianceModuleAddress;
         complianceModuleAddress = _complianceModule;
+        emit ComplianceModuleUpdated(prev, _complianceModule);
     }
     
     /**
@@ -295,53 +341,51 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     }
     
     /**
-     * @notice Set transaction history contract (can be set after deployment)
-     * @dev Only owner can set this
+     * @notice Set transaction history contract (can be set after deployment).
+     * @dev Module 1 audit fix: relies on a single `onlyOwner` modifier rather
+     *      than a separate `poolOwner` check (which previously could be out of
+     *      sync with `owner()` after `transferOwnership`). Emits
+     *      {TransactionHistorySet}.
      */
-    function setTransactionHistory(address _transactionHistory) external {
-        require(msg.sender == poolOwner, "ShieldedPool: unauthorized");
+    function setTransactionHistory(address _transactionHistory) external onlyOwner {
         require(_transactionHistory != address(0), "ShieldedPool: zero address");
         transactionHistory = TransactionHistory(_transactionHistory);
     }
-    
+
     /**
-     * @notice Set deposit handler contract (reduces stack depth)
-     * @dev Only owner can set this
-     * @param _depositHandler Address of DepositHandler contract
+     * @notice Set deposit handler contract (reduces stack depth).
+     * @dev Module 1 audit fix: dropped the redundant `poolOwner` check.
+     *      `onlyOwner` is now the single source of truth and is kept in sync
+     *      with `poolOwner` by `_transferOwnership`. Allows zero to disable
+     *      the handler (legacy direct path).
      */
     function setDepositHandler(address _depositHandler) external onlyOwner {
-        require(msg.sender == poolOwner, "ShieldedPool: unauthorized");
-        // Allow setting to zero to disable handler (fallback to direct logic)
         depositHandler = _depositHandler;
         emit DepositHandlerSet(_depositHandler);
     }
-    
+
     function setFHECoprocessor(address _fheCoprocessor) external onlyOwner {
         fheCoprocessor = _fheCoprocessor;
-        // Also set in MatchingHandler if it exists
         if (matchingHandler != address(0)) {
             IMatchingHandler(matchingHandler).setFHECoprocessor(_fheCoprocessor);
         }
     }
-    
+
     function setThresholdEncryption(address _thresholdEncryption) external onlyOwner {
         thresholdEncryption = _thresholdEncryption;
     }
-    
+
     function setSwapHandler(address _swapHandler) external onlyOwner {
-        require(msg.sender == poolOwner, "ShieldedPool: unauthorized");
         swapHandler = _swapHandler;
         emit SwapHandlerSet(_swapHandler);
     }
-    
+
     function setWithdrawHandler(address _withdrawHandler) external onlyOwner {
-        require(msg.sender == poolOwner, "ShieldedPool: unauthorized");
         withdrawHandler = _withdrawHandler;
         emit WithdrawHandlerSet(_withdrawHandler);
     }
     
     function setMatchingHandler(address _matchingHandler) external onlyOwner {
-        require(msg.sender == poolOwner, "ShieldedPool: unauthorized");
         matchingHandler = _matchingHandler;
         emit MatchingHandlerSet(_matchingHandler);
     }
@@ -1217,7 +1261,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      */
     function refundRelayerGas(address relayer, uint256 gasCost) external {
         require(
-            msg.sender == address(this) || msg.sender == poolOwner,
+            msg.sender == address(this) || msg.sender == owner(),
             "ShieldedPool: unauthorized"
         );
         require(gasReserve >= gasCost, "ShieldedPool: insufficient gas reserve");
@@ -1243,31 +1287,25 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     // ============ Relayer Blacklisting ============
     
     /**
-     * @notice Blacklist relayer (only owner/authorized)
-     * @param relayer Relayer address to blacklist
+     * @notice Blacklist relayer.
+     * @dev Module 1 audit fix: removed dual-key authorization that allowed the
+     *      `relayerRegistry` contract to mutate pool state. Blacklisting is
+     *      now strictly an `onlyOwner` (governance/timelock) action; the
+     *      registry independently controls registration via
+     *      `RelayerRegistry.removeRelayer`.
      */
-    function blacklistRelayer(address relayer) external {
-        require(
-            msg.sender == poolOwner || msg.sender == address(relayerRegistry),
-            "ShieldedPool: unauthorized"
-        );
+    function blacklistRelayer(address relayer) external onlyOwner {
         require(relayer != address(0), "ShieldedPool: zero relayer");
-        
         blacklistedRelayers[relayer] = true;
         emit RelayerBlacklisted(relayer);
     }
-    
+
     /**
-     * @notice Unblacklist relayer (only owner/authorized)
-     * @param relayer Relayer address to unblacklist
+     * @notice Unblacklist relayer.
+     * @dev Module 1 audit fix — see {blacklistRelayer}.
      */
-    function unblacklistRelayer(address relayer) external {
-        require(
-            msg.sender == poolOwner || msg.sender == address(relayerRegistry),
-            "ShieldedPool: unauthorized"
-        );
+    function unblacklistRelayer(address relayer) external onlyOwner {
         require(relayer != address(0), "ShieldedPool: zero relayer");
-        
         blacklistedRelayers[relayer] = false;
         emit RelayerUnblacklisted(relayer);
     }
