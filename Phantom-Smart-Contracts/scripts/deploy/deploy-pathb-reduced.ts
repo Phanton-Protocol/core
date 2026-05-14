@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import hre from "hardhat";
 import { deployVerifiersAndSwapAdaptor } from "./deployInfrastructure";
+import { deployCoreGovernance } from "./deployGovernance";
 
 const { ethers, network } = hre;
 
@@ -39,6 +40,19 @@ async function main() {
   await protocolToken.waitForDeployment();
   const protocolTokenAddr = await protocolToken.getAddress();
   console.log("[path-b] ProtocolToken:", protocolTokenAddr);
+
+  const govOwner = String(process.env.GOVERNANCE_OWNER || "").trim() || deployer.address;
+  const { address: governanceAddr, deployTx: govDeployTx } = await deployCoreGovernance(deployer, {
+    tokenAddress: protocolTokenAddr,
+    ownerAddress: govOwner,
+  });
+  if (govDeployTx) {
+    console.log("[path-b][tx] Governance.deploy:", govDeployTx.hash);
+  }
+  console.log("[path-b] Governance (core):", governanceAddr);
+  console.log(
+    "[path-b] governance ops: after a proposal passes voting, queue(id) then wait EXECUTION_DELAY (2 days on-chain) then execute(id) — see DEPLOY.md"
+  );
 
   const minStake = ethers.parseUnits("1000", 18);
   const RelayerStaking = await ethers.getContractFactory("RelayerStaking");
@@ -122,6 +136,7 @@ async function main() {
     note: "Path-B reduced stack: new SHDW + RelayerStaking + pool + walletB stake",
     contracts: {
       protocolToken: protocolTokenAddr,
+      governance: governanceAddr,
       relayerStaking: relayerStakingAddr,
       joinSplitVerifier: infra.joinSplit,
       portfolioVerifier: infra.portfolio,

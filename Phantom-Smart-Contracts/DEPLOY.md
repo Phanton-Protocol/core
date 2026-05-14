@@ -64,6 +64,30 @@ HH_FULL=1 npx hardhat run scripts/deploy/deploy-core.ts --network bscTestnet
 HH_FULL=1 npx hardhat run scripts/deploy/seed-assets.ts --network bscTestnet
 ```
 
+## Governance (`contracts/_full/core/Governance.sol`)
+
+Token-weighted proposals with a **two-step execution delay**: after voting ends and the proposal passes, call **`queue(proposalId)`**, wait **`EXECUTION_DELAY` (2 days)** from `queuedAt[proposalId]`, then call **`execute(proposalId)`**. Do **not** skip straight from “voting passed” to `execute` — `execute` requires `queue` first.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROTOCOL_TOKEN_ADDRESS` | *(required for `deployGovernance.ts`)* | Token implementing `IProtocolToken` (votes + proposal threshold). |
+| `GOVERNANCE_OWNER` | deployer | On-chain `owner` field. |
+| `GOVERNANCE_VOTING_PERIOD_BLOCKS` | `50400` | Voting window in blocks (~7d @ ~12s/block). |
+| `GOVERNANCE_QUORUM` | `1000000000000000000` | Minimum combined for+against voting weight for `queue`. |
+| `GOVERNANCE_MIN_PROPOSAL_THRESHOLD` | `100000000000000000000000` | **100k tokens** (18 decimals) minimum `balanceOf` to `propose`. |
+
+**Production:** after `queue`, wait the full **2-day** on-chain delay before `execute`. **Local tests:** advance time with Hardhat helpers between `queue` and `execute`.
+
+Standalone deploy (token already deployed):
+
+```bash
+cd core/Phantom-Smart-Contracts
+export PROTOCOL_TOKEN_ADDRESS=0x...
+HH_FULL=1 npx hardhat run scripts/deploy/deployGovernance.ts --network bscTestnet
+```
+
+`deploy-pathb-reduced.ts` also deploys this Governance next to a fresh `ProtocolToken`.
+
 ## Scripts (incremental)
 
 | Phase | Script | Purpose |
@@ -71,6 +95,7 @@ HH_FULL=1 npx hardhat run scripts/deploy/seed-assets.ts --network bscTestnet
 | 1 | `scripts/deploy/deploy-core.ts` | Infra profile + `FeeOracle` + `RelayerRegistry` + **`ShieldedPool`** |
 | 2 | `scripts/deploy/deploy-handlers.ts` | `DepositHandler` + `TransactionHistory`, then `setDepositHandler` / `setTransactionHistory` on the pool |
 | All-in-one | `scripts/deploy/deploy-all.ts` | Same as 1+2 in **one** `hardhat run` (use for **`--network hardhat`**; see below) |
+| Optional | `scripts/deploy/deployGovernance.ts` | Deploy **`Governance`** (core) against an existing `PROTOCOL_TOKEN_ADDRESS` |
 | Optional | `scripts/deploy/seed-assets.ts` | Register `assetId` ↔ tokens + Chainlink feeds (see env vars above) |
 
 Outputs are merged into **`deployments/<networkName>.json`** (e.g. `deployments/bscTestnet.json`).
