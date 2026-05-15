@@ -10,6 +10,7 @@ import "../interfaces/IRelayerRegistry.sol";
 import "../types/Types.sol";
 import "../libraries/DexSwapFee.sol";
 import "../libraries/MiMC7.sol";
+import "../libraries/ProtocolFeeMath.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
@@ -88,8 +89,8 @@ contract SwapHandler is ReentrancyGuard {
         uint256 swapFee = DexSwapFee.swapFee(inputs.inputAmount);
         totalProtocolFee = protocolFee + swapFee;
         
-        require(inputs.protocolFee == totalProtocolFee, "SwapHandler: fee mismatch");
-        require(inputs.gasRefund <= inputs.inputAmount, "SwapHandler: invalid gas refund");
+        ProtocolFeeMath.requireExactProtocolFee(inputs.protocolFee, totalProtocolFee);
+        ProtocolFeeMath.requireGasRefundBounded(inputs.gasRefund, inputs.inputAmount);
         
         // Execute swap
         uint256 swapInputAmount = inputs.inputAmount - totalProtocolFee - inputs.gasRefund;
@@ -155,7 +156,8 @@ contract SwapHandler is ReentrancyGuard {
         uint256 swapFee = DexSwapFee.swapFee(inputs.inputAmount);
         totalProtocolFee = protocolFee + swapFee;
         
-        require(inputs.protocolFee == totalProtocolFee, "SwapHandler: fee mismatch");
+        ProtocolFeeMath.requireExactProtocolFee(inputs.protocolFee, totalProtocolFee);
+        ProtocolFeeMath.requireGasRefundBounded(inputs.gasRefund, inputs.inputAmount);
         require(inputs.swapAmount > 0, "SwapHandler: zero swap amount");
         
         // Execute swap
@@ -210,6 +212,7 @@ contract SwapHandler is ReentrancyGuard {
         uint256 r7 = MiMC7.mimc7(r6, inputs.protocolFee);
         uint256 r8 = MiMC7.mimc7(r7, inputs.gasRefund);
         uint256 withdrawMode = inputs.outputCommitmentSwap == bytes32(0) ? 1 : 0;
+        // Safe: modulo SNARK_SCALAR_FIELD; values are circuit public inputs.
         unchecked {
             publicInputs[0] = uint256(inputs.nullifier) % SNARK_SCALAR_FIELD;
             publicInputs[1] = uint256(inputs.inputCommitment) % SNARK_SCALAR_FIELD;

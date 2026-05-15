@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import hre from "hardhat";
+import { getReducedPoolFactory } from "./joinSplitFeeValidationLink";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const solc = require("solc");
 
@@ -67,7 +68,7 @@ async function main() {
   const adapterAddr = await adapter.getAddress();
   console.log("[path-b] verifier adapter:", adapterAddr);
 
-  const ReducedPool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
+  const ReducedPool = await getReducedPoolFactory(deployer);
   const pool = await ReducedPool.deploy();
   await pool.waitForDeployment();
   const poolAddr = await pool.getAddress();

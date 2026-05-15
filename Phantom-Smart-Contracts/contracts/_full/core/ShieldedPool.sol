@@ -13,6 +13,7 @@ import "../libraries/MerkleTree.sol";
 import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/MiMC7.sol";
 import "../libraries/DexSwapFee.sol";
+import "../libraries/ProtocolFeeMath.sol";
 import "../libraries/InternalMatchIntentLib.sol";
 import "../libraries/TokenAccounting.sol";
 import "./ComplianceModule.sol";
@@ -613,7 +614,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         // Verify fees match proof
         uint256 totalProtocolFee = protocolFee + swapFee;
         if (inputs.protocolFee != totalProtocolFee) revert PoolErr(5);
-        if (inputs.gasRefund > inputs.inputAmount) revert PoolErr(7);
+        ProtocolFeeMath.requireGasRefundBounded(inputs.gasRefund, inputs.inputAmount);
 
         // ============ STEP 6: EXECUTE SWAP ============
         // Only swapAmount is sent to PancakeSwap, changeAmount stays in pool
@@ -820,45 +821,12 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         // Verify change amount is non-zero
         if (inputs.changeAmount == 0) revert PoolErr(19);
 
-        // ============ STEP 5: FEE CALCULATION ============
-        // CRITICAL: Minimum $2 USD fee, always deducted from principal
-        // assetID 0 = BNB (address(0)), same as swap
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
         if (inputToken == address(0) && inputs.inputAssetID != 0) revert PoolErr(11);
         feeOracle.requireFreshPrice(inputToken);
-        
-        // Calculate minimum $2 fee (same as deposit)
-        uint256 minFeeUsd = 2 * 1e8; // $2 minimum (8 decimals)
-        uint256 usdValue;
-        try feeOracle.getUSDValue(inputToken, inputs.inputAmount) returns (uint256 v) {
-            usdValue = v;
-        } catch {
-            if (inputToken == address(0) && bnbFallbackPriceUSD > 0) {
-                usdValue = (inputs.inputAmount * bnbFallbackPriceUSD) / 1e18;
-            } else {
-                revert PoolErr(48);
-            }
-        }
-        
-        uint256 protocolFee;
-        if (usdValue > 0) {
-            uint256 percentFeeUsd = (usdValue * 200) / 10000; // 2% of amount
-            uint256 feeUsd = percentFeeUsd > minFeeUsd ? percentFeeUsd : minFeeUsd;
-            uint256 tokenDecimals = _getTokenDecimals(inputToken);
-            protocolFee = (feeUsd * (10 ** tokenDecimals)) / (10 ** 8);
-            if (protocolFee > inputs.inputAmount) protocolFee = inputs.inputAmount;
-        } else {
-            // Fallback: minimum $2 fee = 0.0033 BNB (at $600/BNB)
-            if (inputToken == address(0)) {
-                protocolFee = 3300000000000000; // 0.0033 BNB = ~$2 at $600/BNB
-            } else {
-                protocolFee = 0;
-            }
-        }
-        
-        // Verify fees match proof (allow small tolerance)
-        if (inputs.protocolFee < protocolFee - (protocolFee / 100)) revert PoolErr(5);
-        if (inputs.gasRefund > inputs.inputAmount) revert PoolErr(7);
+        uint256 protocolFee = feeOracle.calculateFee(inputToken, inputs.inputAmount);
+        if (inputs.protocolFee != protocolFee) revert PoolErr(5);
+        ProtocolFeeMath.requireGasRefundBounded(inputs.gasRefund, inputs.inputAmount);
 
         // ============ STEP 6: UPDATE MERKLE TREE (CHANGE COMMITMENT) — EFFECTS FIRST ============
         (uint256 changeIndex, bytes32 changeRoot) = tree.insert(inputs.outputCommitmentChange);
@@ -1038,6 +1006,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         // [nullifier, inputCommitment, outputCommitmentSwap, outputCommitmentChange, merkleRoot,
         //  outputAmountSwap, minOutputAmountSwap, protocolFee, gasRefund, routingCommitment]
         uint256[] memory arr = new uint256[](10);
+        // Safe: modulo SNARK_SCALAR_FIELD; bounded public-input packing for verifier.
         unchecked {
             arr[0] = uint256(inputs.nullifier) % SNARK_SCALAR_FIELD;
             arr[1] = uint256(inputs.inputCommitment) % SNARK_SCALAR_FIELD;
@@ -1111,8 +1080,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         commitmentCount = tree.nextIndex;
         
         // Calculate and distribute fees (DepositHandler can't send BNB, so we do it here)
-        uint256 estimatedGasCost = tx.gasprice * 200000;
-        uint256 gasRefundAmount = estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        uint256 gasRefundAmount = ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
         uint256 protocolFeeAmount = depositFeeBNB - gasRefundAmount;
         
         // Update gas reserve
@@ -1209,8 +1177,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     }
     
     function _processDepositFee(uint256 depositFeeBNB) internal {
-        uint256 estimatedGasCost = tx.gasprice * 200000;
-        uint256 gasRefundAmount = estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        uint256 gasRefundAmount = ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
         gasReserve += gasRefundAmount;
     }
     
@@ -1226,23 +1193,11 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
     }
     
     function _distributeDepositFee(uint256 depositFeeBNB) internal {
-        uint256 estimatedGasCost = tx.gasprice * 200000;
-        uint256 gasRefundAmount = estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        uint256 gasRefundAmount = ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
         uint256 protocolFeeAmount = depositFeeBNB - gasRefundAmount;
         if (protocolFeeAmount > 0) {
             IFeeDistributor(address(relayerRegistry)).distributeFee{value: protocolFeeAmount}(address(0), protocolFeeAmount);
         }
-    }
-
-    function _getTokenDecimals(address token) internal view returns (uint256) {
-        if (token == address(0)) return 18;
-        (bool ok, bytes memory data) = token.staticcall(
-            abi.encodeWithSignature("decimals()")
-        );
-        if (ok && data.length >= 32) {
-            return uint256(uint8(bytes1(data[31])));
-        }
-        return 18;
     }
 
     function _calculateSwapFee(uint256 amount) internal pure returns (uint256) {

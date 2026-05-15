@@ -8,7 +8,7 @@ pragma solidity ^0.8.20;
 interface IFeeOracle {
     /**
      * @notice Calculates the protocol fee for a transaction
-     * @dev Fee = MAX($10 USD, 0.5% of transaction value)
+     * @dev Fee = max($2 USD, 0.5% of transaction value) — see {ProtocolFeeMath}.
      * @param token Token address (for price conversion)
      * @param amount Transaction amount in token units
      * @return feeAmount Fee amount in token units

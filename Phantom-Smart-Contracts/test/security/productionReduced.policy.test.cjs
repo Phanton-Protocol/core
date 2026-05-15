@@ -5,7 +5,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
 const { allowlistAndRegisterAsset } = require("../helpers/reducedProduction.cjs");
-const { merkleProofForFirstLeaf } = require("../helpers/poolFixtures.cjs");
+const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -87,7 +87,7 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
 
   it("join-split reverts if swap output asset was not allowlisted", async function () {
     const [deployer] = await ethers.getSigners();
-    const { pool, swapAdaptor } = await deployReducedWithHandlers(deployer);
+    const { pool, feeOracle, swapAdaptor } = await deployReducedWithHandlers(deployer);
 
     const MockERC20 = await ethers.getContractFactory(
       "contracts/_full/mocks/MockERC20.sol:MockERC20"
@@ -99,6 +99,7 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
 
     const inputAmount = ethers.parseEther("10");
     const swapAmt = ethers.parseEther("4");
+    const totalPf = await totalJoinSplitFeeBnb(feeOracle, inputAmount);
     const c1 = ethers.keccak256(ethers.toUtf8Bytes("prod-unreg"));
     await pool.connect(deployer).deposit(ethers.ZeroAddress, inputAmount, c1, 0n, { value: inputAmount });
 
@@ -118,11 +119,11 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
         outputAssetIDChange: 0n,
         inputAmount,
         swapAmount: swapAmt,
-        changeAmount: inputAmount - swapAmt,
+        changeAmount: inputAmount - swapAmt - totalPf,
         outputAmountSwap: swapAmt,
         minOutputAmountSwap: swapAmt,
         gasRefund: 0n,
-        protocolFee: 0n,
+        protocolFee: totalPf,
         merklePath: path,
         merklePathIndices: indices,
       },
@@ -155,7 +156,7 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
 
   it("sets fundFlowLocked during malicious adaptor callback", async function () {
     const [deployer] = await ethers.getSigners();
-    const { pool, swapAdaptor } = await deployReducedWithHandlers(deployer);
+    const { pool, feeOracle, swapAdaptor } = await deployReducedWithHandlers(deployer);
 
     const outAddr = await allowlistAndRegisterAsset(pool, deployer, 2n, await (async () => {
       const MockERC20 = await ethers.getContractFactory(
@@ -168,6 +169,7 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
 
     const inputAmount = ethers.parseEther("10");
     const swapAmt = ethers.parseEther("4");
+    const totalPf = await totalJoinSplitFeeBnb(feeOracle, inputAmount);
     const c1 = ethers.keccak256(ethers.toUtf8Bytes("prod-lock"));
     await pool.connect(deployer).deposit(ethers.ZeroAddress, inputAmount, c1, 0n, { value: inputAmount });
 
@@ -192,11 +194,11 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
         outputAssetIDChange: 0n,
         inputAmount,
         swapAmount: swapAmt,
-        changeAmount: inputAmount - swapAmt,
+        changeAmount: inputAmount - swapAmt - totalPf,
         outputAmountSwap: swapAmt,
         minOutputAmountSwap: swapAmt,
         gasRefund: 0n,
-        protocolFee: 0n,
+        protocolFee: totalPf,
         merklePath: path,
         merklePathIndices: indices,
       },

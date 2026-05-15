@@ -6,6 +6,7 @@ const { ethers } = require("hardhat");
 const { getShieldedPoolFactory } = require("../helpers/libraryLinker.cjs");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
 const { allowlistAndRegisterAsset } = require("../helpers/reducedProduction.cjs");
+const { totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
@@ -230,7 +231,7 @@ describe("Module 2 — token accounting & upgradeable deposit", function () {
     const root = await pool.merkleRoot();
     const { merkleProofForFirstLeaf } = require("../helpers/poolFixtures.cjs");
     const { path, indices } = await merkleProofForFirstLeaf(c1);
-    const protocolFee = 0n;
+    const protocolFee = await totalJoinSplitFeeBnb(feeOracle, inputAmount);
     const changeAmt = inputAmount - swapAmt - protocolFee;
 
     const swapData = {

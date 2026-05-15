@@ -6,6 +6,7 @@ import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
 import "../interfaces/IShieldedPool.sol";
 import "./ComplianceModule.sol";
+import "../libraries/ProtocolFeeMath.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
@@ -147,9 +148,8 @@ contract DepositHandler is ReentrancyGuard {
      * @param depositFeeBNB Total deposit fee
      * @return gasRefundAmount Amount to refund to relayer
      */
-    function getGasRefundAmount(uint256 depositFeeBNB) external pure returns (uint256) {
+    function getGasRefundAmount(uint256 depositFeeBNB) external view returns (uint256) {
         // This is a simplified calculation - in production, use actual gas used
-        uint256 estimatedGasCost = 200000 * 5 gwei; // Rough estimate
-        return estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        return ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
     }
 }

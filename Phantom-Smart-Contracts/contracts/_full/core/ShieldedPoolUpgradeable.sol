@@ -18,6 +18,8 @@ import "../types/Types.sol";
 import "../libraries/MerkleTree.sol";
 import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/DexSwapFee.sol";
+import "../libraries/ProtocolFeeMath.sol";
+import "../libraries/JoinSplitFeeValidation.sol";
 import "./ComplianceModule.sol";
 import "./TransactionHistory.sol";
 import "../governance/TimelockController.sol";
@@ -679,10 +681,14 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         address inputTokenAddr = assetRegistry[inputs.inputAssetID];
         
         if (isInternalMatch) {
-            // Internal match execution
+            totalProtocolFee = JoinSplitFeeValidation.validateAndReturnJoinSplitFee(
+                feeOracle,
+                inputTokenAddr,
+                inputs.inputAmount,
+                inputs.protocolFee
+            );
             require(IMatchingHandler(matchingHandler).executeInternalMatch(matchHash), "ShieldedPool: match execution failed");
-            swapOutput = inputs.outputAmountSwap; // Matched order provides this
-            totalProtocolFee = inputs.protocolFee;
+            swapOutput = inputs.outputAmountSwap;
             emit InternalSwapExecuted(matchHash);
         } else {
             // ============ STEP 4: DELEGATE TO SWAP HANDLER ============
@@ -708,8 +714,8 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         // ============ STEP 6: MARK NULLIFIER ============
         nullifiers[inputs.nullifier] = true;
 
-        // ============ STEP 6b: PROTOCOL FEE (interactions after effects; skipped for internal match) ============
-        if (!isInternalMatch && totalProtocolFee > 0) {
+        // ============ STEP 6b: PROTOCOL FEE (interactions after effects) ============
+        if (totalProtocolFee > 0) {
             _distributeProtocolFee(inputTokenAddr, totalProtocolFee);
         }
 
@@ -1041,44 +1047,6 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         return arr;
     }
 
-    function _calculateDepositFeeOld(address token, uint256 amount) internal view returns (uint256) {
-        // CRITICAL: Minimum $2 USD fee, always deducted from principal
-        uint256 usdValue;
-        try feeOracle.getUSDValue(token, amount) returns (uint256 v) {
-            usdValue = v;
-        } catch {
-            // If oracle fails, use minimum $2 fee
-            // Assume BNB price ~$600, so $2 = ~0.0033 BNB
-            if (token == address(0)) {
-                return 3300000000000000; // 0.0033 BNB = ~$2 at $600/BNB
-            }
-            return 0; // For ERC20, need oracle
-        }
-        
-        if (usdValue == 0) {
-            // Fallback: minimum $2 fee
-            if (token == address(0)) {
-                return 3300000000000000; // 0.0033 BNB = ~$2 at $600/BNB
-            }
-            return 0;
-        }
-        
-        // Minimum $2 USD fee (2 * 1e8 = 200000000 with 8 decimals)
-        uint256 minFeeUsd = 2 * 1e8; // $2 minimum
-        
-        // Calculate fee: max(2%, $2)
-        uint256 percentFeeUsd = (usdValue * 200) / 10000; // 2% of deposit
-        uint256 feeUsd = percentFeeUsd > minFeeUsd ? percentFeeUsd : minFeeUsd;
-        
-        // Convert USD fee to token amount
-        uint256 tokenDecimals = token == address(0) ? 18 : 18;
-        uint256 fee = (feeUsd * (10 ** tokenDecimals)) / (10 ** 8);
-        
-        // Fee is always deducted from principal, but cannot exceed amount
-        if (fee > amount) return amount;
-        return fee;
-    }
-
     function _depositInternal(
         address depositor,
         address token,
@@ -1242,8 +1210,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     }
     
     function _processDepositFee(uint256 depositFeeBNB) internal {
-        uint256 estimatedGasCost = tx.gasprice * 200000;
-        uint256 gasRefundAmount = estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        uint256 gasRefundAmount = ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
         gasReserve += gasRefundAmount;
     }
     
@@ -1259,8 +1226,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     }
     
     function _distributeDepositFee(uint256 depositFeeBNB) internal {
-        uint256 estimatedGasCost = tx.gasprice * 200000;
-        uint256 gasRefundAmount = estimatedGasCost > depositFeeBNB ? depositFeeBNB : estimatedGasCost;
+        uint256 gasRefundAmount = ProtocolFeeMath.depositGasRefundSlice(depositFeeBNB, tx.gasprice);
         uint256 protocolFeeAmount = depositFeeBNB - gasRefundAmount;
         if (protocolFeeAmount > 0) {
             IFeeDistributor(address(relayerRegistry)).distributeFee{value: protocolFeeAmount}(address(0), protocolFeeAmount);

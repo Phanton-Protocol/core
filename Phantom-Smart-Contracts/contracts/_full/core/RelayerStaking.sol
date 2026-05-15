@@ -6,7 +6,14 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
+import "../libraries/StakingRewardMath.sol";
 
+/**
+ * @title RelayerStaking
+ * @notice Staking + fee distribution for relayers.
+ * @dev When `totalStaked == 0`, fees accrue in {unallocatedRewards} and roll into the next
+ *      {accRewardPerShare} update once staking resumes (no stranded rewards).
+ */
 contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -25,6 +32,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     mapping(address => bool) public isRewardToken;
     mapping(address => uint256) public accRewardPerShare;
     mapping(address => mapping(address => uint256)) public rewardDebt;
+    /// @notice Fees received while `totalStaked == 0`; merged on next distribution.
+    mapping(address => uint256) public unallocatedRewards;
 
     event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
@@ -36,6 +45,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event MinStakeUpdated(uint256 minStake);
     event Slashed(address indexed staker, uint256 amount, address indexed slasher);
+    event UnallocatedRewardsRolled(address indexed token, uint256 amount);
 
     mapping(address => bool) public isSlasher;
 
@@ -55,7 +65,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         token = _token;
         minStake = _minStake;
         feeRecipient = msg.sender;
-        claimFeeBps = 10; // 0.1%
+        claimFeeBps = 10;
     }
 
     function registerRelayer(address) external pure override {
@@ -73,9 +83,13 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     function stake(uint256 amount) external nonReentrant {
         require(amount > 0, "RelayerStaking: zero amount");
         _updateAllRewards(msg.sender);
+        bool wasZero = totalStaked == 0;
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         stakedBalance[msg.sender] += amount;
         totalStaked += amount;
+        if (wasZero) {
+            _rollAllUnallocatedRewards();
+        }
         emit Staked(msg.sender, amount);
     }
 
@@ -105,7 +119,22 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         }
 
         if (totalStaked > 0) {
-            accRewardPerShare[feeToken] += (amount * 1e12) / totalStaked;
+            uint256 toDistribute = amount;
+            uint256 rolled = unallocatedRewards[feeToken];
+            if (rolled > 0) {
+                unallocatedRewards[feeToken] = 0;
+                toDistribute += rolled;
+                emit UnallocatedRewardsRolled(feeToken, rolled);
+            }
+            (uint256 increment, uint256 dust) = StakingRewardMath.accrueIncrement(toDistribute, totalStaked);
+            if (increment > 0) {
+                accRewardPerShare[feeToken] += increment;
+            }
+            if (dust > 0) {
+                unallocatedRewards[feeToken] += dust;
+            }
+        } else {
+            unallocatedRewards[feeToken] += amount;
         }
         emit FeeDistributed(feeToken, amount);
     }
@@ -165,6 +194,23 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         return rewardTokens;
     }
 
+    function _rollAllUnallocatedRewards() internal {
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address t = rewardTokens[i];
+            uint256 rolled = unallocatedRewards[t];
+            if (rolled == 0) continue;
+            unallocatedRewards[t] = 0;
+            (uint256 increment, uint256 dust) = StakingRewardMath.accrueIncrement(rolled, totalStaked);
+            if (increment > 0) {
+                accRewardPerShare[t] += increment;
+            }
+            if (dust > 0) {
+                unallocatedRewards[t] += dust;
+            }
+            emit UnallocatedRewardsRolled(t, rolled);
+        }
+    }
+
     function _updateAllRewards(address user) internal {
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             address t = rewardTokens[i];
@@ -196,11 +242,6 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         emit RewardClaimed(user, feeToken, net);
     }
 
-    /**
-     * @notice Slash a staker's balance (callable by authorized slashers, e.g., DecentralizedVerifier)
-     * @param staker The address to slash
-     * @param amount The amount to slash
-     */
     function slash(address staker, uint256 amount) external onlySlasher nonReentrant {
         require(stakedBalance[staker] >= amount, "RelayerStaking: insufficient balance to slash");
 
@@ -213,9 +254,6 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         emit Slashed(staker, amount, msg.sender);
     }
 
-    /**
-     * @notice Add or remove a slasher (e.g., DecentralizedVerifier contract)
-     */
     function setSlasher(address slasher, bool enabled) external onlyOwner {
         isSlasher[slasher] = enabled;
     }

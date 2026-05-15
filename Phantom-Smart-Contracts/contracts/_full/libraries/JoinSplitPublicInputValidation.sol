@@ -3,6 +3,7 @@ pragma solidity ^0.8.21;
 
 import "../types/Types.sol";
 import "./MiMC7.sol";
+import "./ProtocolFeeMath.sol";
 
 /**
  * @title JoinSplitPublicInputValidation
@@ -15,6 +16,7 @@ library JoinSplitPublicInputValidation {
     uint256 private constant SNARK_SCALAR_FIELD =
         21888242871839275222246405745257275088548364400416034343698204186575808495617;
     function merklePathToBytes32(uint256[10] memory arr) internal pure returns (bytes32[10] memory result) {
+        // Safe: loop bound 10; index cannot overflow uint256.
         unchecked {
             for (uint256 i = 0; i < 10; ++i) {
                 result[i] = bytes32(arr[i]);
@@ -53,7 +55,7 @@ library JoinSplitPublicInputValidation {
             inputs.inputAmount == inputs.swapAmount + inputs.changeAmount + inputs.protocolFee + inputs.gasRefund,
             "SP:cvs"
         );
-        require(inputs.gasRefund <= inputs.inputAmount, "SP:gRf");
+        ProtocolFeeMath.requireGasRefundBounded(inputs.gasRefund, inputs.inputAmount);
     }
 
     function requireDexJoinSplitShape(JoinSplitPublicInputs memory inputs) internal pure {

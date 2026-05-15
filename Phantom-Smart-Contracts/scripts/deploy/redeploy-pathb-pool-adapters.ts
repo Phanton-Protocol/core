@@ -1,4 +1,5 @@
 import hre from "hardhat";
+import { getReducedPoolFactory } from "./joinSplitFeeValidationLink";
 
 const { ethers } = hre;
 
@@ -15,7 +16,7 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   console.log("[path-b] adapter-pool deployer:", deployer.address);
 
-  const ReducedPool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
+  const ReducedPool = await getReducedPoolFactory(deployer);
   const pool = await ReducedPool.deploy();
   await pool.waitForDeployment();
   const poolAddr = await pool.getAddress();

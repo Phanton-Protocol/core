@@ -8,6 +8,7 @@
  * blocked (prevents impl-takeover attacks).
  */
 const { ethers } = require("hardhat");
+const { getUpgradeablePoolFactory } = require("./libraryLinker.cjs");
 
 const PROXY_FQN = "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy";
 
@@ -20,7 +21,7 @@ const PROXY_FQN = "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC196
 async function deployBehindProxy(fqn, initArgs, opts = {}) {
   const initFn = opts.initFn || "initialize";
 
-  const Impl = await ethers.getContractFactory(fqn);
+  const Impl = await getUpgradeablePoolFactory(fqn);
   const impl = await Impl.deploy();
   await impl.waitForDeployment();
 

@@ -3,6 +3,7 @@ import * as path from "path";
 import hre from "hardhat";
 import { deployVerifiersAndSwapAdaptor } from "./deployInfrastructure";
 import { deployCoreGovernance } from "./deployGovernance";
+import { getReducedPoolFactory } from "./joinSplitFeeValidationLink";
 
 const { ethers, network } = hre;
 
@@ -82,7 +83,7 @@ async function main() {
     console.log("[path-b] FeeOracle BNB/USD feed set:", bnbUsdFeed);
   }
 
-  const ReducedPool = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced");
+  const ReducedPool = await getReducedPoolFactory(deployer);
   const pool = await ReducedPool.deploy();
   console.log("[path-b][tx] ShieldedPoolUpgradeableReduced.deploy:", pool.deploymentTransaction()?.hash);
   await pool.waitForDeployment();

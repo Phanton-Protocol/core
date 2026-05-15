@@ -11,7 +11,6 @@ import "../interfaces/IFeeOracle.sol";
 import "../interfaces/IRelayerRegistry.sol";
 import "../interfaces/IFeeDistributor.sol";
 import "../interfaces/IDepositHandler.sol";
-import "../interfaces/ISwapHandler.sol";
 import "../interfaces/IWithdrawHandler.sol";
 import "../types/Types.sol";
 import "../libraries/MerkleTree.sol";
@@ -20,6 +19,8 @@ import "../libraries/JoinSplitPublicInputValidation.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../libraries/TokenAccounting.sol";
+import "../libraries/ProtocolFeeMath.sol";
+import "../libraries/JoinSplitFeeValidation.sol";
 
 /**
  * @title ShieldedPoolUpgradeableReduced
@@ -58,7 +59,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Reduced from 20 to save space
-    uint256 public constant MAX_ASSETS = 256;
 
     // ============ Core State Variables ============
     IVerifier public verifier;
@@ -146,16 +146,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         bytes32 commitment,
         uint256 commitmentIndex
     );
-    event ShieldedSwap(
-        bytes32 indexed nullifier,
-        bytes32 indexed inputCommitment,
-        bytes32 indexed outputCommitment,
-        uint256 inputAssetID,
-        uint256 outputAssetID,
-        uint256 inputAmount,
-        uint256 outputAmount,
-        address relayer
-    );
     event ShieldedSwapJoinSplit(
         bytes32 indexed nullifier,
         bytes32 indexed inputCommitment,
@@ -189,13 +179,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     /// @param treeNextIndex Value of `tree.nextIndex` after the root was recorded (0 at genesis).
     event MerkleRootCheckpointed(bytes32 indexed root, uint256 treeNextIndex);
 
-    // ============ Modifiers ============
-    modifier onlyRelayer() {
-        require(relayerRegistry.isRelayer(msg.sender), "SP:R1");
-        require(!blacklistedRelayers[msg.sender], "SP:R2");
-        _;
-    }
-
     // ============ Initialization ============
     function initialize(
         address _verifier,
@@ -204,11 +187,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         address _feeOracle,
         address _relayerRegistry
     ) public initializer {
-        require(_verifier != address(0), "SP: zero verifier");
-        require(_thresholdVerifier != address(0), "SP:Z2");
-        require(_swapAdaptor != address(0), "SP: zero adaptor");
-        require(_feeOracle != address(0), "SP: zero oracle");
-        require(_relayerRegistry != address(0), "SP:Z5");
+        if (
+            _verifier == address(0) || _thresholdVerifier == address(0) || _swapAdaptor == address(0)
+                || _feeOracle == address(0) || _relayerRegistry == address(0)
+        ) {
+            revert ZeroAddr();
+        }
 
         __Ownable_init();
         __ReentrancyGuard_init();
@@ -320,27 +304,27 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     function _requireSpendableMerkleRoot(bytes32 root) internal view {
-        require(validMerkleRoots[root], "SP:M0");
+        if (!validMerkleRoots[root]) revert SP();
     }
 
     // ============ Setters ============
     function setDepositHandler(address _depositHandler) external onlyOwner {
-        require(_depositHandler != address(0), "SP: zero handler");
+        if (_depositHandler == address(0)) revert ZeroAddr();
         depositHandler = _depositHandler;
     }
 
     function setSwapHandler(address _swapHandler) external onlyOwner {
-        require(_swapHandler != address(0), "SP: zero handler");
+        if (_swapHandler == address(0)) revert ZeroAddr();
         swapHandler = _swapHandler;
     }
 
     function setWithdrawHandler(address _withdrawHandler) external onlyOwner {
-        require(_withdrawHandler != address(0), "SP: zero handler");
+        if (_withdrawHandler == address(0)) revert ZeroAddr();
         withdrawHandler = _withdrawHandler;
     }
 
     function setFeeOracle(address _feeOracle) external onlyOwner {
-        require(_feeOracle != address(0), "SP: zero oracle");
+        if (_feeOracle == address(0)) revert ZeroAddr();
         feeOracle = IFeeOracle(_feeOracle);
     }
 
@@ -373,12 +357,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         complianceModuleAddress = _complianceModule;
     }
 
-    function getComplianceModule() external view returns (address) {
-        return complianceModuleAddress;
-    }
-
     function setSwapAdaptor(address _swapAdaptor) external onlyOwner {
-        require(_swapAdaptor != address(0), "SP: zero adaptor");
+        if (_swapAdaptor == address(0)) revert ZeroAddr();
         swapAdaptor = IPancakeSwapAdaptor(_swapAdaptor);
     }
 
@@ -404,7 +384,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (address(this).balance < sweep) revert InvalidSweepAmount();
         gasReserve -= sweep;
         (bool ok,) = to.call{value: sweep}("");
-        require(ok, "SP:S3");
+        if (!ok) revert SP();
     }
 
     /// @notice Full native-balance drain — **only** reachable via a
@@ -419,7 +399,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (b == 0) revert InvalidSweepAmount();
         gasReserve = 0;
         (bool ok,) = to.call{value: b}("");
-        require(ok, "SP:N2");
+        if (!ok) revert SP();
     }
 
     /**
@@ -448,8 +428,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         bytes32 commitment,
         uint256 assetID
     ) external payable override nonReentrant fundFlowLock whenNotEmergencyPaused {
-        require(depositor != address(0), "SP: zero depositor");
-        require(token != address(0), "SP:D1");
+        if (depositor == address(0) || token == address(0)) revert ZeroAddr();
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
     }
 
@@ -458,8 +437,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         bytes32 commitment,
         uint256 assetID
     ) external payable override nonReentrant fundFlowLock whenNotEmergencyPaused {
-        require(depositor != address(0), "SP: zero depositor");
-        require(msg.value > 0, "SP: zero value");
+        if (depositor == address(0) || msg.value == 0) revert SP();
         _depositInternal(depositor, address(0), msg.value, commitment, assetID, msg.value, msg.sender);
     }
 
@@ -472,18 +450,18 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 value,
         address relayer
     ) internal {
-        require(amount > 0 && commitment != bytes32(0) && depositor != address(0), "SP:D2");
+        if (amount == 0 || commitment == bytes32(0) || depositor == address(0)) revert SP();
 
         // For BNB deposits, handle directly
         if (token == address(0)) {
-            require(value >= amount, "SP:D3");
+            if (value < amount) revert SP();
             uint256 depositFeeBNB = value - amount;
             _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB, relayer);
         } else {
             // ERC20: pull principal into pool before handler / finalize (matches non-upgradeable ShieldedPool).
             if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
             TokenAccounting.safeTransferFromExact(IERC20(token), depositor, address(this), amount);
-            require(depositHandler != address(0), "SP:D4");
+            if (depositHandler == address(0)) revert SP();
             IDepositHandler(depositHandler).processDeposit(
                 depositor,
                 token,
@@ -506,7 +484,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 depositFeeBNB,
         address relayer
     ) external override {
-        require(msg.sender == depositHandler || msg.sender == address(this), "SP:D5");
+        if (msg.sender != depositHandler && msg.sender != address(this)) revert SP();
         _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB, relayer);
     }
 
@@ -534,14 +512,13 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 feeAmount = depositFeeBNB;
         if (feeAmount > 0 && address(feeOracle) != address(0) && address(relayerRegistry) != address(0)) {
             uint256 feeUsd = feeOracle.getUSDValue(address(0), feeAmount);
-            require(feeUsd >= DEPOSIT_FEE_USD, "SP:D6");
-            uint256 executingRelayerShare = feeAmount / 4;
-            uint256 rewardPoolShare = feeAmount - executingRelayerShare;
+            if (feeUsd < DEPOSIT_FEE_USD) revert SP();
+            (uint256 executingRelayerShare, uint256 rewardPoolShare) = ProtocolFeeMath.depositFeeShares(feeAmount);
 
             if (executingRelayerShare > 0) {
                 if (relayer != address(0)) {
                     (bool ok,) = payable(relayer).call{value: executingRelayerShare}("");
-                    require(ok, "SP:D7");
+                    if (!ok) revert SP();
                 } else {
                     gasReserve += executingRelayerShare;
                 }
@@ -561,63 +538,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     // ============ Swap Functions ============
-    function shieldedSwap(ShieldedSwapData calldata swapData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
-        require(swapHandler != address(0), "SP:S0");
-        PublicInputs memory inputs = swapData.publicInputs;
-
-        require(!nullifiers[inputs.nullifier], "SP:NF");
-        _requireSpendableMerkleRoot(inputs.merkleRoot);
-        
-        require(
-            MerkleTree.verifyProof(
-                inputs.inputCommitment,
-                inputs.merkleRoot,
-                JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
-                inputs.merklePathIndices,
-                MAX_TREE_DEPTH
-            ),
-            "SP:MP"
-        );
-
-        address inputToken = assetRegistry[inputs.inputAssetID];
-        uint256 swapInputAmount = inputs.inputAmount - inputs.protocolFee - inputs.gasRefund;
-        
-        if (inputToken != address(0)) {
-            IERC20(inputToken).safeApprove(address(swapAdaptor), swapInputAmount);
-        }
-        
-        (uint256 swapOutput, uint256 totalProtocolFee) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
-        
-        require(swapOutput == inputs.outputAmount, "SP:O1");
-
-        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitment);
-        commitments[newIndex] = inputs.outputCommitment;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
-
-        nullifiers[inputs.nullifier] = true;
-
-        _distributeProtocolFee(inputToken, totalProtocolFee);
-        
-        address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
-        if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputToken == address(0)) {
-            gasReserve -= inputs.gasRefund;
-            payable(relayer).transfer(inputs.gasRefund);
-            emit GasRefunded(relayer, inputs.gasRefund);
-        }
-
-        emit ShieldedSwap(
-            inputs.nullifier,
-            inputs.inputCommitment,
-            inputs.outputCommitment,
-            inputs.inputAssetID,
-            inputs.outputAssetID,
-            inputs.inputAmount,
-            inputs.outputAmount,
-            relayer
-        );
-        emit NullifierMarked(inputs.nullifier);
-        emit CommitmentAdded(inputs.outputCommitment, newIndex);
+    /// @dev Path-B production uses `shieldedSwapJoinSplit` only; legacy single-output swap is disabled.
+    function shieldedSwap(ShieldedSwapData calldata) external pure override {
+        revert SP();
     }
 
     /**
@@ -631,30 +554,36 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
 
-        require(!nullifiers[inputs.nullifier], "SP:NF");
+        if (nullifiers[inputs.nullifier]) revert SP();
         _requireSpendableMerkleRoot(inputs.merkleRoot);
-        
-        require(
-            MerkleTree.verifyProof(
+
+        if (
+            !MerkleTree.verifyProof(
                 inputs.inputCommitment,
                 inputs.merkleRoot,
                 JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
-            ),
-            "SP:MP"
-        );
+            )
+        ) {
+            revert SP();
+        }
 
         JoinSplitPublicInputValidation.requireDexJoinSplitShape(inputs);
 
-        if (!thresholdVerifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
-        if (!verifier.verifyProof(swapData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
+        uint256[] memory pubInputs = JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs);
+        if (!thresholdVerifier.verifyProof(swapData.proof, pubInputs)) revert SP();
+        if (!verifier.verifyProof(swapData.proof, pubInputs)) revert SP();
 
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
-        require(inputToken != address(0) || inputs.inputAssetID == 0, "SP:A1");
+        if (inputToken == address(0) && inputs.inputAssetID != 0) revert SP();
 
-        uint256 totalProtocolFee = inputs.protocolFee;
-        require(inputs.gasRefund <= inputs.inputAmount, "SP:F2");
+        uint256 totalProtocolFee = JoinSplitFeeValidation.validateAndReturnJoinSplitFee(
+            feeOracle,
+            inputToken,
+            inputs.inputAmount,
+            inputs.protocolFee
+        );
 
         // Output assets must be owner-allowlisted before join-split (no auto-register).
         _requireRegisteredAsset(inputs.outputAssetIDSwap, swapData.swapParams.tokenOut);
@@ -669,8 +598,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             swapData.swapParams
         );
 
-        require(dexOut >= inputs.minOutputAmountSwap, "SP:S1");
-        require(dexOut == inputs.outputAmountSwap, "SP:S2");
+        if (dexOut < inputs.minOutputAmountSwap || dexOut != inputs.outputAmountSwap) revert SP();
 
         (uint256 swapIndex, bytes32 swapRoot) = tree.insert(inputs.outputCommitmentSwap);
         commitments[swapIndex] = inputs.outputCommitmentSwap;
@@ -719,74 +647,20 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
 
     // ============ Withdraw Functions ============
-    function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
-        require(withdrawHandler != address(0), "SP:W0");
-        
-        JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
-
-        require(!nullifiers[inputs.nullifier], "SP:NF");
-        _requireSpendableMerkleRoot(inputs.merkleRoot);
-        
-        require(
-            MerkleTree.verifyProof(
-                inputs.inputCommitment,
-                inputs.merkleRoot,
-                JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
-                inputs.merklePathIndices,
-                MAX_TREE_DEPTH
-            ),
-            "SP:MP"
-        );
-
-        JoinSplitPublicInputValidation.requireWithdrawJoinSplitShape(inputs);
-
-        if (!thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
-        if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
-
-        (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
-        address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
-        if (inputToken == address(0) && inputs.inputAssetID != 0) {
-            revert SP();
-        }
-
-        // Effects before external payout (CEI): prevents cross-function reentrancy via deposit paths.
-        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
-        commitments[newIndex] = inputs.outputCommitmentChange;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
-
-        nullifiers[inputs.nullifier] = true;
-
-        _distributeProtocolFee(inputToken, protocolFee);
-
-        // Handler validates economics/proofs; pool sends withdraw leg to recipient.
-        if (inputToken == address(0)) {
-            (bool ok,) = payable(withdrawData.recipient).call{value: withdrawAmount}("");
-            require(ok, "SP:W2");
-        } else {
-            TokenAccounting.safeTransferExact(IERC20(inputToken), withdrawData.recipient, withdrawAmount);
-        }
-
-        address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
-        if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {
-            gasReserve -= inputs.gasRefund;
-            payable(relayer).transfer(inputs.gasRefund);
-            emit GasRefunded(relayer, inputs.gasRefund);
-        }
-
-        emit ShieldedWithdraw(
-            inputs.nullifier,
-            inputs.inputCommitment,
-            inputs.outputCommitmentChange,
-            inputs.inputAssetID,
-            inputs.inputAmount,
-            withdrawAmount,
-            inputs.changeAmount,
+    function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData)
+        external
+        override
+        nonReentrant
+        fundFlowLock
+        whenNotEmergencyPaused
+    {
+        _shieldedWithdrawCore(
+            withdrawData.proof,
+            withdrawData.publicInputs,
             withdrawData.recipient,
-            relayer
+            withdrawData.relayer,
+            withdrawData.encryptedPayload
         );
-        emit NullifierMarked(inputs.nullifier);
-        emit CommitmentAdded(inputs.outputCommitmentChange, newIndex);
     }
 
     // ============ Portfolio Note (Not Supported in Reduced Pool) ============
@@ -811,42 +685,65 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     // ============ Multi-Output Withdraw (Required by Interface) ============
-    function multiOutputWithdraw(MultiOutputWithdrawData calldata withdrawData) external override nonReentrant {
-        // Simplified implementation - delegate to withdraw handler if available
-        // Otherwise, treat as single withdrawal
-        require(withdrawHandler != address(0), "SP:W0");
-        
-        JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
-        require(!nullifiers[inputs.nullifier], "SP:NF");
+    function multiOutputWithdraw(MultiOutputWithdrawData calldata withdrawData)
+        external
+        override
+        nonReentrant
+        fundFlowLock
+        whenNotEmergencyPaused
+    {
+        if (withdrawData.recipients.length != 1) revert SP();
+        _shieldedWithdrawCore(
+            withdrawData.proof,
+            withdrawData.publicInputs,
+            withdrawData.recipients[0].recipient,
+            withdrawData.relayer,
+            withdrawData.encryptedPayload
+        );
+    }
+
+    function _shieldedWithdrawCore(
+        Proof calldata proof,
+        JoinSplitPublicInputs calldata inputs,
+        address recipient,
+        address relayer,
+        bytes calldata encryptedPayload
+    ) internal {
+        if (withdrawHandler == address(0)) revert SP();
+
+        if (nullifiers[inputs.nullifier]) revert SP();
         _requireSpendableMerkleRoot(inputs.merkleRoot);
-        
-        require(
-            MerkleTree.verifyProof(
+
+        if (
+            !MerkleTree.verifyProof(
                 inputs.inputCommitment,
                 inputs.merkleRoot,
                 JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
                 inputs.merklePathIndices,
                 MAX_TREE_DEPTH
-            ),
-            "SP:MP"
-        );
+            )
+        ) {
+            revert SP();
+        }
 
         JoinSplitPublicInputValidation.requireWithdrawJoinSplitShape(inputs);
 
-        if (!thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
-        if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
+        uint256[] memory pubInputs = JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs);
+        if (!thresholdVerifier.verifyProof(proof, pubInputs)) revert SP();
+        if (!verifier.verifyProof(proof, pubInputs)) revert SP();
 
-        // Process withdrawal and transfer payout (single-recipient fallback for reduced pool)
-        (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(ShieldedWithdrawData({
-            proof: withdrawData.proof,
-            publicInputs: inputs,
-            recipient: withdrawData.recipients[0].recipient, // Use first recipient
-            relayer: withdrawData.relayer,
-            encryptedPayload: withdrawData.encryptedPayload
-        }));
+        (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(
+            ShieldedWithdrawData({
+                proof: proof,
+                publicInputs: inputs,
+                recipient: recipient,
+                relayer: relayer,
+                encryptedPayload: encryptedPayload
+            })
+        );
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
         if (inputToken == address(0) && inputs.inputAssetID != 0) {
-            revert("SP: unknown asset for withdraw");
+            revert SP();
         }
 
         (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
@@ -859,17 +756,17 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _distributeProtocolFee(inputToken, protocolFee);
 
         if (inputToken == address(0)) {
-            (bool ok,) = payable(withdrawData.recipients[0].recipient).call{value: withdrawAmount}("");
-            require(ok, "SP: native withdraw transfer failed");
+            (bool ok,) = payable(recipient).call{value: withdrawAmount}("");
+            if (!ok) revert SP();
         } else {
-            TokenAccounting.safeTransferExact(IERC20(inputToken), withdrawData.recipients[0].recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(inputToken), recipient, withdrawAmount);
         }
 
-        address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
+        address payoutRelayer = relayer != address(0) ? relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {
             gasReserve -= inputs.gasRefund;
-            payable(relayer).transfer(inputs.gasRefund);
-            emit GasRefunded(relayer, inputs.gasRefund);
+            payable(payoutRelayer).transfer(inputs.gasRefund);
+            emit GasRefunded(payoutRelayer, inputs.gasRefund);
         }
 
         emit ShieldedWithdraw(
@@ -880,8 +777,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             inputs.inputAmount,
             withdrawAmount,
             inputs.changeAmount,
-            withdrawData.recipients[0].recipient,
-            relayer
+            recipient,
+            payoutRelayer
         );
         emit NullifierMarked(inputs.nullifier);
         emit CommitmentAdded(inputs.outputCommitmentChange, newIndex);
@@ -903,27 +800,27 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     // ============ Internal Functions ============
     function _registerAsset(uint256 assetID, address token) internal {
         if (assetID == 0) {
-            require(token == address(0), "SP: assetID 0 reserved for BNB");
+            if (token != address(0)) revert SP();
             return;
         }
-        require(token != address(0), "SP: invalid token");
+        if (token == address(0)) revert SP();
         if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
         if (assetRegistry[assetID] == address(0)) {
             assetRegistry[assetID] = token;
             assetIDMap[token] = assetID;
-        } else {
-            require(assetRegistry[assetID] == token, "SP: assetID mismatch");
+        } else if (assetRegistry[assetID] != token) {
+            revert SP();
         }
     }
 
     function _requireRegisteredAsset(uint256 assetID, address token) internal view {
         if (assetID == 0) {
-            require(token == address(0), "SP: BNB asset");
+            if (token != address(0)) revert SP();
             return;
         }
-        require(token != address(0), "SP: invalid token");
+        if (token == address(0)) revert SP();
         if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
-        require(assetRegistry[assetID] == token, "SP: asset not registered");
+        if (assetRegistry[assetID] != token) revert SP();
     }
 
     function _updateUserNoteOnDeposit(address depositor, bytes32 commitment, uint256 assetID) internal {
@@ -937,7 +834,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             abi.encodeWithSignature("isSanctioned(address)", depositor)
         );
         if (success && data.length > 0) {
-            require(!abi.decode(data, (bool)), "SP: sanctioned address");
+            if (abi.decode(data, (bool))) revert SP();
         }
     }
 

@@ -1,27 +1,48 @@
 const { ethers } = require("hardhat");
 
-let cachedAddress = null;
+const JOIN_SPLIT_FEE_LIB_FQN =
+  "contracts/_full/libraries/JoinSplitFeeValidation.sol:JoinSplitFeeValidation";
+
+let cachedIntentLib = null;
+let cachedJoinSplitFeeLib = null;
 let cachedNetworkKey = null;
 
+async function networkKey() {
+  const network = await ethers.provider.getNetwork();
+  return network.chainId.toString();
+}
+
 /**
- * Phase 7: ShieldedPool now delegates EIP-712 + signature verification work
- * into InternalMatchIntentLib. Tests and deploy scripts must deploy the
- * library once and pass its address to `getContractFactory` for ShieldedPool
- * (and any contract that inherits it). This helper deploys the library on
- * first use per network and returns a `libraries` object suitable for
- * Hardhat's `getContractFactory(name, { libraries })`.
+ * Phase 7: ShieldedPool delegates EIP-712 work to InternalMatchIntentLib.
+ * Upgradeable pools link JoinSplitFeeValidation for bytecode-sized fee gates.
  */
 async function getShieldedPoolLibraries() {
-  const network = await ethers.provider.getNetwork();
-  const key = `${network.chainId.toString()}`;
-  if (!cachedAddress || cachedNetworkKey !== key) {
+  const key = await networkKey();
+  if (!cachedIntentLib || cachedNetworkKey !== key) {
     const Factory = await ethers.getContractFactory("InternalMatchIntentLib");
     const lib = await Factory.deploy();
     await lib.waitForDeployment();
-    cachedAddress = await lib.getAddress();
+    cachedIntentLib = await lib.getAddress();
+    cachedJoinSplitFeeLib = null;
     cachedNetworkKey = key;
   }
-  return { InternalMatchIntentLib: cachedAddress };
+  return { InternalMatchIntentLib: cachedIntentLib };
+}
+
+async function getJoinSplitFeeValidationLibraries() {
+  const key = await networkKey();
+  if (!cachedJoinSplitFeeLib || cachedNetworkKey !== key) {
+    const Factory = await ethers.getContractFactory(JOIN_SPLIT_FEE_LIB_FQN);
+    const lib = await Factory.deploy();
+    await lib.waitForDeployment();
+    cachedJoinSplitFeeLib = await lib.getAddress();
+    cachedNetworkKey = key;
+  }
+  return { JoinSplitFeeValidation: cachedJoinSplitFeeLib };
+}
+
+async function getUpgradeablePoolLibraries() {
+  return { ...(await getJoinSplitFeeValidationLibraries()) };
 }
 
 async function getShieldedPoolFactory(name = "ShieldedPool") {
@@ -29,4 +50,15 @@ async function getShieldedPoolFactory(name = "ShieldedPool") {
   return ethers.getContractFactory(name, { libraries });
 }
 
-module.exports = { getShieldedPoolLibraries, getShieldedPoolFactory };
+async function getUpgradeablePoolFactory(fqn) {
+  const libraries = await getUpgradeablePoolLibraries();
+  return ethers.getContractFactory(fqn, { libraries });
+}
+
+module.exports = {
+  getShieldedPoolLibraries,
+  getJoinSplitFeeValidationLibraries,
+  getUpgradeablePoolLibraries,
+  getShieldedPoolFactory,
+  getUpgradeablePoolFactory,
+};

@@ -19,6 +19,7 @@ const {
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  withdrawProtocolFee,
   commitJoinSplitMevProtection,
 } = require("./helpers/poolFixtures.cjs");
 const {
@@ -119,7 +120,7 @@ describe("M6 — E2E local gate (mock pool)", function () {
 
     const noteIn = changeAfterSwap;
     const withdrawAmount = ethers.parseEther("2");
-    const protocolFee = 3300000000000000n;
+    const protocolFee = await withdrawProtocolFee(feeOracle, ethers.ZeroAddress, noteIn);
     const gasRefundWd = 0n;
     const changeAfterWd = noteIn - withdrawAmount - protocolFee - gasRefundWd;
 

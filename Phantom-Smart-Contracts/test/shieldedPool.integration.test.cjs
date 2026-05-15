@@ -5,6 +5,7 @@ const {
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  withdrawProtocolFee,
   commitJoinSplitMevProtection,
 } = require("./helpers/poolFixtures.cjs");
 const {
@@ -15,7 +16,7 @@ const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
 describe("ShieldedPool — deposit / swap / withdraw (integration)", function () {
   describe("deposit", function () {
     it("accepts two native deposits and increments commitmentCount", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const a = ethers.parseEther("1");
       const c1 = ethers.keccak256(ethers.toUtf8Bytes("c1"));
       const c2 = ethers.keccak256(ethers.toUtf8Bytes("c2"));
@@ -28,7 +29,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
     });
 
     it("reverts deposit with zero commitment (PoolErr 27)", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const a = ethers.parseEther("1");
       await expect(
         pool.connect(deployer).deposit(ethers.ZeroAddress, a, ethers.ZeroHash, 0n, { value: a })
@@ -38,7 +39,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
     });
 
     it("owner registers MockERC20 on assetRegistry (used by swap output path)", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
       const token = await MockERC20.deploy("T", "T", 18);
       await token.waitForDeployment();
@@ -48,7 +49,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
     });
 
     it("ERC20 deposit: transferFrom pulls tokens to pool + commitment + Deposit event", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
       const token = await MockERC20.deploy("T2", "T2", 18);
       await token.waitForDeployment();
@@ -283,7 +284,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
 
   describe("shieldedWithdraw (native BNB)", function () {
     it("pays recipient, inserts change, marks nullifier", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const [, recipient] = await ethers.getSigners();
 
       const commitment = ethers.keccak256(ethers.toUtf8Bytes("note-withdraw"));
@@ -295,7 +296,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
       const { root, path, indices } = await merkleProofForFirstLeaf(commitment);
 
       const withdrawAmount = ethers.parseEther("0.5");
-      const protocolFee = 3300000000000000n;
+      const protocolFee = await withdrawProtocolFee(feeOracle, ethers.ZeroAddress, inputAmount);
       const gasRefund = 0n;
       const changeAmount = inputAmount - withdrawAmount - protocolFee - gasRefund;
 
@@ -339,7 +340,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
     });
 
     it("reverts when nullifier already used (PoolErr 4)", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const [, recipient] = await ethers.getSigners();
 
       const commitment = ethers.keccak256(ethers.toUtf8Bytes("note-dbl"));
@@ -350,7 +351,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
 
       const { root, path, indices } = await merkleProofForFirstLeaf(commitment);
       const withdrawAmount = ethers.parseEther("0.5");
-      const protocolFee = 3300000000000000n;
+      const protocolFee = await withdrawProtocolFee(feeOracle, ethers.ZeroAddress, inputAmount);
       const changeAmount = inputAmount - withdrawAmount - protocolFee;
       const nullifier = ethers.keccak256(ethers.toUtf8Bytes("same-null"));
 
@@ -388,7 +389,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
     });
 
     it("reverts when conservation breaks (PoolErr 43)", async function () {
-      const { deployer, pool } = await deployPoolFixture();
+      const { deployer, pool, feeOracle } = await deployPoolFixture();
       const [, recipient] = await ethers.getSigners();
 
       const commitment = ethers.keccak256(ethers.toUtf8Bytes("note-bad-cons"));
@@ -398,7 +399,7 @@ describe("ShieldedPool — deposit / swap / withdraw (integration)", function ()
       });
 
       const { root, path, indices } = await merkleProofForFirstLeaf(commitment);
-      const protocolFee = 3300000000000000n;
+      const protocolFee = await withdrawProtocolFee(feeOracle, ethers.ZeroAddress, inputAmount);
 
       const publicInputs = {
         nullifier: ethers.keccak256(ethers.toUtf8Bytes("nbc")),

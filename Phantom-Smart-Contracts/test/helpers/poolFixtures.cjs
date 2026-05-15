@@ -102,6 +102,11 @@ async function totalJoinSplitFeeBnb(feeOracle, inputAmount) {
   return protocolPart + swapFee;
 }
 
+/** Protocol fee for withdraw / single-leg spend (no DEX 10 bps). */
+async function withdrawProtocolFee(feeOracle, token, inputAmount) {
+  return feeOracle.calculateFee.staticCall(token, inputAmount);
+}
+
 /** Register commit-reveal state required by ShieldedPool._verifyMEVProtection before join-split swap. */
 async function commitJoinSplitMevProtection(pool, signer, tag = "mev-commit") {
   const { time } = require("@nomicfoundation/hardhat-network-helpers");
@@ -116,6 +121,7 @@ module.exports = {
   emptyProof,
   deployPoolFixture,
   totalJoinSplitFeeBnb,
+  withdrawProtocolFee,
   commitJoinSplitMevProtection,
   TREE_DEPTH,
 };

@@ -170,7 +170,10 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
       ...joinSplitSwapDataDummyAttestation(),
     };
 
-    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitStub)).to.be.revertedWith("SP:M0");
+    await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitStub)).to.be.revertedWithCustomError(
+      pool,
+      "SP"
+    );
   });
 
   it("allows join-split spend using a historical Merkle root after a later deposit", async function () {

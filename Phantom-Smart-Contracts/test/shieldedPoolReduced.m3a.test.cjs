@@ -151,7 +151,10 @@ describe("ShieldedPoolUpgradeableReduced — M3a join-split conservation + DEX b
       merklePathIndices: indices,
     };
 
-    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWith("SP:S2");
+    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWithCustomError(
+      pool,
+      "SP"
+    );
   });
 
   it("reverts shieldedWithdraw when join-split conservation breaks", async function () {

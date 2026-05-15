@@ -7,6 +7,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
+const { getUpgradeablePoolFactory } = require("../helpers/libraryLinker.cjs");
 const { getShieldedPoolFactory } = require("../helpers/libraryLinker.cjs");
 
 const TLC_FQN = "contracts/_full/governance/TimelockController.sol:TimelockController";
@@ -188,7 +189,7 @@ describe("Module 1 — ShieldedPoolUpgradeable upgrade auth (Fix #1 + #3)", func
   });
 
   it("implementation cannot be initialized directly (Fix #9)", async function () {
-    const Impl = await ethers.getContractFactory(FULL_FQN);
+    const Impl = await getUpgradeablePoolFactory(FULL_FQN);
     const impl = await Impl.deploy();
     await impl.waitForDeployment();
     await expect(

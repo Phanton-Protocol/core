@@ -6,6 +6,7 @@
  *   npx hardhat run scripts/upgrade-pool-and-drain-native.ts --network bscTestnet
  */
 import hre from "hardhat";
+import { getReducedPoolFactory } from "./deploy/joinSplitFeeValidationLink";
 
 const { ethers } = hre;
 
@@ -24,7 +25,7 @@ async function main() {
   console.log("[drain] owner", owner.address);
   console.log("[drain] recipient", to);
 
-  const Factory = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced", owner);
+  const Factory = await getReducedPoolFactory(owner);
   console.log("[drain] deploying new implementation...");
   const newImpl = await Factory.deploy();
   await newImpl.waitForDeployment();

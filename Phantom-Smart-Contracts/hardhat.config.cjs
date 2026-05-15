@@ -25,6 +25,23 @@ module.exports = {
         enabled: true,
         // Lower runs shrinks bytecode (helps EIP-170 warnings on large contracts).
         runs: useFullTree ? 1 : 200,
+        ...(useFullTree
+          ? {
+              details: {
+                peephole: true,
+                inliner: true,
+                jumpdestRemover: true,
+                orderLiterals: true,
+                deduplicate: true,
+                cse: true,
+                constantOptimizer: true,
+                yul: true,
+                yulDetails: {
+                  stackAllocation: true,
+                },
+              },
+            }
+          : {}),
       },
       // Drop the trailing CBOR metadata hash from runtime bytecode to claw back
       // ~50 bytes per contract — needed to keep ShieldedPool under EIP-170 on
