@@ -4,7 +4,11 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset, buildReducedJoinSplitTx } = require("../helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  authorizeTestFeeDistributor,
+} = require("../helpers/reducedProduction.cjs");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("../helpers/relayerSwapAttestation.cjs");
 
@@ -284,6 +288,7 @@ describe("Module 3 — fee math & precision", function () {
       const RS = await ethers.getContractFactory("RelayerStaking");
       const rs = await RS.deploy(await shdw.getAddress(), ethers.parseEther("1"));
       await rs.waitForDeployment();
+      await authorizeTestFeeDistributor(rs, a.address, a);
 
       await rs.connect(a).distributeFee(ethers.ZeroAddress, ethers.parseEther("1"), { value: ethers.parseEther("1") });
       expect(await rs.unallocatedRewards(ethers.ZeroAddress)).to.equal(ethers.parseEther("1"));
@@ -305,6 +310,7 @@ describe("Module 3 — fee math & precision", function () {
       const RS = await ethers.getContractFactory("RelayerStaking");
       const rs = await RS.deploy(await shdw.getAddress(), ethers.parseEther("1"));
       await rs.waitForDeployment();
+      await authorizeTestFeeDistributor(rs, a.address, a);
 
       await shdw.mint(b.address, ethers.parseEther("10"));
       await shdw.connect(b).approve(await rs.getAddress(), ethers.MaxUint256);

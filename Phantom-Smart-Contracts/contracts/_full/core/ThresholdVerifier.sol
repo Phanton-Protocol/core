@@ -9,8 +9,11 @@ import "../interfaces/IVerifier.sol";
  * @notice Instant proof verification via threshold signatures from staked validators
  * @dev Validators run off-chain servers that verify proofs and sign results.
  *      Contract aggregates signatures and accepts proofs if threshold is met.
+ *      **Auxiliary** — Path-B also runs primary Groth16; not a substitute for it.
  */
 contract ThresholdVerifier is IVerifier {
+    /// @notice Max signatures per {submitValidations} call (DoS guard).
+    uint256 public constant MAX_SIGNATURES_PER_SUBMISSION = 32;
     // Using storage instead of immutable to fix compiler optimization issue
     // Gas cost difference is minimal (only read once per transaction)
     address public stakingContract;
@@ -87,6 +90,10 @@ contract ThresholdVerifier is IVerifier {
         require(
             currentTime <= proofSubmissionTime[proofHash] + expiry,
             "ThresholdVerifier: proof expired"
+        );
+        require(
+            signatures.length <= MAX_SIGNATURES_PER_SUBMISSION,
+            "ThresholdVerifier: too many signatures"
         );
         
         for (uint256 i = 0; i < signatures.length; i++) {

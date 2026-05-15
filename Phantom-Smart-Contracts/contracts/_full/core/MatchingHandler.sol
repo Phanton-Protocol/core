@@ -6,10 +6,13 @@ import "../interfaces/IShieldedPool.sol";
 /**
  * @title MatchingHandler
  * @notice External contract to handle internal matching logic and reduce main contract size
- * @dev Handles FHE-based order matching for internal swaps
- * Security: Only ShieldedPool can call this contract's functions
+ * @dev **NON-PRODUCTION / EXPERIMENTAL** — not Path-B. Handles FHE-based order matching.
+ *      Security: Only ShieldedPool can call this contract's functions
  */
 contract MatchingHandler {
+    /// @notice Max open orders per asset-pair side (DoS guard on matching loops).
+    uint256 public constant MAX_ORDER_BOOK_SIZE = 256;
+
     IShieldedPool public immutable shieldedPool;
     address public fheCoprocessor;
     
@@ -151,6 +154,7 @@ contract MatchingHandler {
             order.inputAssetID,
             order.outputAssetID
         ));
+        require(buyOrders[assetPairHash].length < MAX_ORDER_BOOK_SIZE, "MatchingHandler: order book full");
         buyOrders[assetPairHash].push(orderHash);
         
         emit SwapOrderSubmitted(orderHash, order.inputAssetID, order.outputAssetID);
@@ -235,6 +239,7 @@ contract MatchingHandler {
             order.inputAssetID,
             order.outputAssetID
         ));
+        require(buyOrders[assetPairHash].length < MAX_ORDER_BOOK_SIZE, "MatchingHandler: order book full");
         buyOrders[assetPairHash].push(orderHash);
         
         emit SwapOrderSubmitted(orderHash, order.inputAssetID, order.outputAssetID);

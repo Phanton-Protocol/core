@@ -18,6 +18,8 @@ import "../libraries/TokenDecimals.sol";
 contract FeeOracle is IFeeOracle {
     error PriceUnavailable(address token);
     mapping(address => address) public priceFeeds;
+    mapping(address => uint8) private _cachedDecimals;
+    mapping(address => bool) private _hasCachedDecimals;
     address public constant BNB_USD_FEED = address(0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE);
     address public offchainOracle;
 
@@ -42,6 +44,10 @@ contract FeeOracle is IFeeOracle {
     function setPriceFeed(address token, address priceFeed) external onlyOwner {
         require(priceFeed != address(0), "FeeOracle: zero address");
         priceFeeds[token] = priceFeed;
+        if (token != address(0)) {
+            _cachedDecimals[token] = uint8(TokenDecimals.read(token));
+            _hasCachedDecimals[token] = true;
+        }
         emit PriceFeedUpdated(token, priceFeed);
     }
 
@@ -67,8 +73,7 @@ contract FeeOracle is IFeeOracle {
             (uint256 price, uint256 updatedAt) = IOffchainPriceOracle(offchainOracle).getPrice(token);
             require(price > 0, "FeeOracle: no offchain price");
             require(block.timestamp - updatedAt <= 10 minutes, "FeeOracle: stale offchain price");
-            uint256 tokenDecimals = TokenDecimals.read(token);
-            return OracleMath.usdValueFromAmountAndPrice(amount, price, tokenDecimals);
+            return OracleMath.usdValueFromAmountAndPrice(amount, price, _tokenDecimals(token));
         }
 
         address feed = priceFeeds[token];
@@ -93,11 +98,10 @@ contract FeeOracle is IFeeOracle {
                 revert("FeeOracle: stale Chainlink price feed");
             }
             uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
-            uint256 tokenDecimals = TokenDecimals.read(token);
             return OracleMath.usdValueFromChainlinkAnswer(
                 amount,
                 uint256(answer),
-                tokenDecimals,
+                _tokenDecimals(token),
                 feedDecimals
             );
         } catch {
@@ -110,10 +114,9 @@ contract FeeOracle is IFeeOracle {
         uint256 usdValue
     ) public view override returns (uint256 tokenAmount) {
         if (usdValue == 0) return 0;
-        uint256 tokenDecimals = TokenDecimals.read(token);
         (uint256 price, bool hasPrice) = _getTokenPrice(token);
         require(hasPrice && price > 0, "FeeOracle: price not available");
-        return OracleMath.tokenAmountFromUsd(usdValue, price, tokenDecimals);
+        return OracleMath.tokenAmountFromUsd(usdValue, price, _tokenDecimals(token));
     }
 
     function requireFreshPrice(address token) external view override {
@@ -132,8 +135,7 @@ contract FeeOracle is IFeeOracle {
 
         uint256 usdValue = getUSDValue(token, amount);
         uint256 feeUSD = ProtocolFeeMath.feeUsdFromNotionalUsd(usdValue);
-        uint256 tokenDecimals = TokenDecimals.read(token);
-        feeAmount = OracleMath.tokenAmountFromUsd(feeUSD, price, tokenDecimals);
+        feeAmount = OracleMath.tokenAmountFromUsd(feeUSD, price, _tokenDecimals(token));
 
         if (feeAmount > amount) {
             feeAmount = amount;
@@ -177,5 +179,15 @@ contract FeeOracle is IFeeOracle {
         } catch {
             return (0, false);
         }
+    }
+
+    function _tokenDecimals(address token) internal view returns (uint256) {
+        if (token == address(0)) {
+            return 18;
+        }
+        if (_hasCachedDecimals[token]) {
+            return _cachedDecimals[token];
+        }
+        return TokenDecimals.read(token);
     }
 }

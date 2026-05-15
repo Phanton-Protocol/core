@@ -122,8 +122,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     mapping(address => bool) public allowedERC20;
     /// @notice True during fund-flow entrypoints; pool views may be stale while locked.
     bool public fundFlowLocked;
-    /// @notice Commit-reveal MEV gate (join-split). Spot DEX remains manipulable within one tx.
-    mapping(bytes32 => bool) public swapCommitments;
+    /// @notice Commit-reveal MEV gate: commitmentHash => committer (zero = none).
+    mapping(bytes32 => address) public swapCommitmentCommitter;
     mapping(bytes32 => uint256) public swapCommitmentDeadline;
     /// @notice Future-proofing gap — reserve remaining slots for later security upgrades.
     uint256[44] private __moduleOneSecurityGap;
@@ -547,7 +547,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     /// @notice Commit to a join-split before public reveal (required for production swaps).
     function commitSwap(bytes32 commitmentHash, uint256 deadline) external nonReentrant {
-        MevCommitReveal.commit(swapCommitments, swapCommitmentDeadline, commitmentHash, deadline);
+        MevCommitReveal.commit(swapCommitmentCommitter, swapCommitmentDeadline, commitmentHash, deadline, msg.sender);
     }
 
     function setRelayerBlacklisted(address relayer, bool blocked) external onlyOwner {
@@ -576,7 +576,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         whenNotEmergencyPaused
     {
         MevCommitReveal.verifyAndConsume(
-            swapCommitments, swapCommitmentDeadline, swapData.commitment, swapData.deadline
+            swapCommitmentCommitter, swapCommitmentDeadline, swapData.commitment, swapData.deadline, msg.sender
         );
 
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
@@ -601,6 +601,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         JoinSplitPublicInputValidation.requireDexJoinSplitShape(inputs);
 
         uint256[] memory pubInputs = JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs);
+        // Dual verification: threshold quorum gate + primary Groth16 (intentional; do not remove one).
         if (!thresholdVerifier.verifyProof(swapData.proof, pubInputs)) revert SP();
         if (!verifier.verifyProof(swapData.proof, pubInputs)) revert SP();
 
@@ -761,6 +762,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         JoinSplitPublicInputValidation.requireWithdrawJoinSplitShape(inputs);
 
         uint256[] memory pubInputs = JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs);
+        // Dual verification: threshold quorum gate + primary Groth16 (intentional; do not remove one).
         if (!thresholdVerifier.verifyProof(proof, pubInputs)) revert SP();
         if (!verifier.verifyProof(proof, pubInputs)) revert SP();
 
@@ -789,6 +791,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
         _distributeProtocolFee(inputToken, protocolFee);
 
+        // Push-payment: recipient must accept native BNB (EOA or contract with payable receive).
         if (inputToken == address(0)) {
             (bool ok,) = payable(recipient).call{value: withdrawAmount}("");
             if (!ok) revert SP();
@@ -800,7 +803,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (blacklistedRelayers[payoutRelayer]) revert SP();
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {
             gasReserve -= inputs.gasRefund;
-            payable(payoutRelayer).transfer(inputs.gasRefund);
+            (bool refundOk,) = payable(payoutRelayer).call{value: inputs.gasRefund}("");
+            if (!refundOk) revert SP();
             emit GasRefunded(payoutRelayer, inputs.gasRefund);
         }
 

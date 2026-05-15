@@ -101,6 +101,10 @@ async function main() {
   await initTx.wait();
   console.log("[path-b] pool initialized");
 
+  const authFeeTx = await relayerStaking.setFeeDistributor(poolAddr, true);
+  console.log("[path-b][tx] RelayerStaking.setFeeDistributor(pool):", authFeeTx.hash);
+  await authFeeTx.wait();
+
   const transferAmount = ethers.parseUnits(transferAmountHuman, 18);
   const transferATx = await protocolToken.transfer(walletA, transferAmount);
   console.log("[path-b][tx] ProtocolToken.transfer(walletA):", transferATx.hash);

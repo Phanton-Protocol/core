@@ -15,6 +15,8 @@ import "../libraries/StakingRewardMath.sol";
  *      {accRewardPerShare} update on the first {stake} after idle (intended: no stranded fees).
  *      Late stakers must not earn rewards accrued before their stake: {stake} calls
  *      {_syncRewardDebt} after increasing balance so `rewardDebt` tracks the new stake.
+ *      **DoS:** {distributeFee} is restricted to {authorizedFeeDistributors} so callers
+ *      cannot spam new `rewardTokens` and inflate stake/unstake loop gas (cap {MAX_REWARD_TOKENS}).
  */
 contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -50,6 +52,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     event UnallocatedRewardsRolled(address indexed token, uint256 amount);
 
     mapping(address => bool) public isSlasher;
+    /// @notice Pool / timelock contracts allowed to call {distributeFee} (prevents reward-token list spam).
+    mapping(address => bool) public authorizedFeeDistributors;
 
     modifier onlyOwner() {
         require(msg.sender == owner, "RelayerStaking: not owner");
@@ -58,6 +62,11 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
 
     modifier onlySlasher() {
         require(isSlasher[msg.sender], "RelayerStaking: not slasher");
+        _;
+    }
+
+    modifier onlyAuthorizedFeeDistributor() {
+        require(authorizedFeeDistributors[msg.sender], "RelayerStaking: not fee distributor");
         _;
     }
 
@@ -107,7 +116,18 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         emit Unstaked(msg.sender, amount);
     }
 
-    function distributeFee(address feeToken, uint256 amount) external payable override nonReentrant {
+    function setFeeDistributor(address distributor, bool authorized) external onlyOwner {
+        require(distributor != address(0), "RelayerStaking: zero address");
+        authorizedFeeDistributors[distributor] = authorized;
+    }
+
+    function distributeFee(address feeToken, uint256 amount)
+        external
+        payable
+        override
+        onlyAuthorizedFeeDistributor
+        nonReentrant
+    {
         require(amount > 0, "RelayerStaking: zero amount");
         if (feeToken == address(0)) {
             require(msg.value == amount, "RelayerStaking: bad msg.value");
@@ -199,7 +219,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     }
 
     function _rollAllUnallocatedRewards() internal {
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        uint256 n = rewardTokens.length;
+        for (uint256 i = 0; i < n; i++) {
             address t = rewardTokens[i];
             uint256 rolled = unallocatedRewards[t];
             if (rolled == 0) continue;
@@ -216,7 +237,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     }
 
     function _updateAllRewards(address user) internal {
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        uint256 n = rewardTokens.length;
+        for (uint256 i = 0; i < n; i++) {
             address t = rewardTokens[i];
             uint256 pending = _pending(user, t);
             rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / StakingRewardMath.REWARD_SCALE;
@@ -228,7 +250,8 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
 
     /// @dev Set `rewardDebt` to current stake × accumulator (post balance change).
     function _syncRewardDebt(address user) internal {
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        uint256 n = rewardTokens.length;
+        for (uint256 i = 0; i < n; i++) {
             address t = rewardTokens[i];
             rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / StakingRewardMath.REWARD_SCALE;
         }

@@ -46,6 +46,9 @@ async function main() {
   await (await pool.connect(deployer).registerAsset(1, busdAddr)).wait();
   await (await pool.connect(deployer).registerAsset(2, usdtAddr)).wait();
 
+  const relayerStaking = await ethers.getContractAt("RelayerStaking", relayerRegistryAddr);
+  await (await relayerStaking.setFeeDistributor(poolAddr, true)).wait();
+
   console.log("pool:", poolAddr);
   console.log("depositHandler:", await depositHandler.getAddress());
   console.log("swapHandler:", await swapHandler.getAddress());

@@ -8,7 +8,7 @@ import "../interfaces/IRelayerRegistry.sol";
 /**
  * @title DarkPool
  * @notice Complete dark pool implementation - encrypted balance, private swaps, relayer deposits/withdrawals
- * @dev Production-ready dark pool with maximum ZK privacy
+ * @dev **NON-PRODUCTION / EXPERIMENTAL** — not Path-B. Do not deploy for mainnet liquidity.
  * 
  * Features:
  * 1. Encrypted Pool Balance (merkle root obfuscation)
@@ -54,6 +54,9 @@ contract DarkPool is ShieldedPool {
     
     /// @notice Maximum noise commitments
     uint256 public constant MAX_NOISE = 100;
+
+    /// @notice Max swaps per batch execution (DoS guard).
+    uint256 public constant MAX_BATCH_SIZE = 10;
     
     // ============ Structs ============
     
@@ -338,6 +341,11 @@ contract DarkPool is ShieldedPool {
         
         bytes32[] memory matchedIds = _collectMatchedSwaps();
         bytes32[] memory unmatchedHashes = _collectUnmatchedIntents();
+
+        require(
+            matchedIds.length <= MAX_BATCH_SIZE && unmatchedHashes.length <= MAX_BATCH_SIZE,
+            "DarkPool: batch too large"
+        );
         
         batchId = keccak256(abi.encodePacked(block.number, block.timestamp, matchedIds.length, unmatchedHashes.length));
         
@@ -364,6 +372,12 @@ contract DarkPool is ShieldedPool {
         require(block.number >= batch.batchBlock, "DarkPool: batch not ready");
         
         batch.executed = true;
+
+        require(
+            batch.matchedSwapIds.length <= MAX_BATCH_SIZE
+                && batch.unmatchedIntentHashes.length <= MAX_BATCH_SIZE,
+            "DarkPool: batch too large"
+        );
         
         uint256 executedCount = 0;
         uint256 pancakeSwapCount = 0;

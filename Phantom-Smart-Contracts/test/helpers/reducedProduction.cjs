@@ -61,9 +61,28 @@ async function initFeeOracleForTests(feeOracle, owner) {
   await wireDefaultBnbFeed(feeOracle, owner);
 }
 
+/** Authorize the pool proxy on RelayerStaking (no-op for plain RelayerRegistry). */
+async function wirePoolFeeDistributor(pool, ownerSigner) {
+  const poolAddr = await pool.getAddress();
+  const registryAddr = await pool.relayerRegistry();
+  try {
+    const rs = await ethers.getContractAt("RelayerStaking", registryAddr);
+    await (await rs.connect(ownerSigner).setFeeDistributor(poolAddr, true)).wait();
+  } catch {
+    // RelayerRegistry and other registries do not implement fee-distributor ACL.
+  }
+}
+
+/** Authorize a test account to distribute fees directly (unit tests only). */
+async function authorizeTestFeeDistributor(relayerStaking, distributor, ownerSigner) {
+  await (await relayerStaking.connect(ownerSigner).setFeeDistributor(distributor, true)).wait();
+}
+
 module.exports = {
   allowlistAndRegisterAsset,
   buildReducedJoinSplitTx,
   initFeeOracleForTests,
+  wirePoolFeeDistributor,
+  authorizeTestFeeDistributor,
   MOCK_ERC20_FQN,
 };

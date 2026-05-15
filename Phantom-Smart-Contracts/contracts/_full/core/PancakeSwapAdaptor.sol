@@ -17,6 +17,10 @@ import "../types/Types.sol";
  */
 contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    /// @notice Max hops in swap path (DoS guard on calldata-decoded paths).
+    uint256 public constant MAX_SWAP_PATH_LENGTH = 3;
+
     // PancakeSwap V2 Router addresses
     address public router;
     address public wbnb;
@@ -56,6 +60,7 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
         bool isBNBOut = swapParams.tokenOut == address(0);
 
         address[] memory path = _getPath(swapParams);
+        require(path.length >= 2 && path.length <= MAX_SWAP_PATH_LENGTH, "PancakeSwapAdaptor: invalid path length");
         uint256 deadline = block.timestamp + 300;
 
         if (isBNBIn) {
@@ -105,6 +110,7 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
         SwapParams calldata swapParams
     ) external view override returns (uint256 amountOut) {
         address[] memory path = _getPath(swapParams);
+        require(path.length >= 2 && path.length <= MAX_SWAP_PATH_LENGTH, "PancakeSwapAdaptor: invalid path length");
         uint256[] memory amounts = IPancakeRouter02(router).getAmountsOut(
             swapParams.amountIn,
             path

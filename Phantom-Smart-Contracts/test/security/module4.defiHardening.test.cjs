@@ -9,6 +9,8 @@ const {
   allowlistAndRegisterAsset,
   buildReducedJoinSplitTx,
   initFeeOracleForTests,
+  wirePoolFeeDistributor,
+  authorizeTestFeeDistributor,
 } = require("../helpers/reducedProduction.cjs");
 const { commitJoinSplitMevProtection, merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 
@@ -46,7 +48,6 @@ async function deployReducedStack() {
     await feeOracle.getAddress(),
     await relayerRegistry.getAddress(),
   ]);
-
   return {
     deployer,
     attacker,
@@ -68,6 +69,7 @@ describe("Module 4 — DeFi hardening", function () {
       const RS = await ethers.getContractFactory("RelayerStaking");
       const rs = await RS.deploy(await shdw.getAddress(), ethers.parseEther("1"));
       await rs.waitForDeployment();
+      await authorizeTestFeeDistributor(rs, a.address, a);
 
       await shdw.mint(a.address, ethers.parseEther("100"));
       await shdw.mint(b.address, ethers.parseEther("100"));

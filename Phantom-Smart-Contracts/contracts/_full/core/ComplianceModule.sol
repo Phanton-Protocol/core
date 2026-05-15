@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 /**
  * @title ComplianceModule
  * @notice Chainalysis API integration for KYB/AML compliance
- * @dev Phantom Protocol - Compliance & Security
+ * @dev Phantom Protocol - Compliance & Security. **Auxiliary** — not Path-B core.
  * 
  * Features:
  * - Sanctioned address checking
@@ -14,7 +14,9 @@ pragma solidity ^0.8.20;
  * - Transaction blocking for high-risk addresses
  */
 contract ComplianceModule {
-    
+    /// @notice Max addresses per {batchCheckAddresses} (DoS guard).
+    uint256 public constant MAX_BATCH_CHECK_SIZE = 50;
+
     // ============ State Variables ============
     
     enum RiskLevel {
@@ -229,6 +231,7 @@ contract ComplianceModule {
      */
     function batchCheckAddresses(address[] calldata addrs) external onlyAuthorizedMutator {
         uint256 len = addrs.length;
+        require(len <= MAX_BATCH_CHECK_SIZE, "ComplianceModule: batch too large");
         for (uint256 i = 0; i < len; i++) {
             this.checkAddress(addrs[i]);
         }

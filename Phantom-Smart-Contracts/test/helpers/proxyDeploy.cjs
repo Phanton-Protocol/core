@@ -31,8 +31,15 @@ async function deployBehindProxy(fqn, initArgs, opts = {}) {
   const proxy = await Proxy.deploy(await impl.getAddress(), initData);
   await proxy.waitForDeployment();
 
-  // Return a typed view of the proxy.
-  return Impl.attach(await proxy.getAddress());
+  const attached = Impl.attach(await proxy.getAddress());
+
+  if (fqn.includes("ShieldedPoolUpgradeableReduced")) {
+    const { wirePoolFeeDistributor } = require("./reducedProduction.cjs");
+    const [owner] = await ethers.getSigners();
+    await wirePoolFeeDistributor(attached, owner);
+  }
+
+  return attached;
 }
 
 module.exports = { deployBehindProxy };

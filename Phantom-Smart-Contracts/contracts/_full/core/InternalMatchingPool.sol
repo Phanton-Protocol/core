@@ -7,7 +7,8 @@ import "../types/Types.sol";
 /**
  * @title InternalMatchingPool
  * @notice Maximum privacy pool with internal buyer/seller matching
- * @dev Pool matches orders internally, only uses PancakeSwap as fallback
+ * @dev **NON-PRODUCTION / EXPERIMENTAL** — not Path-B. Do not deploy for mainnet liquidity.
+ *      Pool matches orders internally, only uses PancakeSwap as fallback
  * 
  * Privacy Features:
  * 1. Internal Matching: Buyer/seller matched inside pool (no external visibility)
@@ -48,6 +49,12 @@ contract InternalMatchingPool is ShieldedPool {
     
     /// @notice Maximum noise commitments
     uint256 public constant MAX_NOISE = 100;
+
+    /// @notice Max swaps per batch execution (DoS guard).
+    uint256 public constant MAX_BATCH_SIZE = 10;
+
+    /// @notice Max open orders per asset-pair side (DoS guard on matching loops).
+    uint256 public constant MAX_ORDER_BOOK_SIZE = 256;
     
     /// @notice Batch execution interval (blocks)
     uint256 public constant BATCH_INTERVAL = 5;
@@ -257,6 +264,12 @@ contract InternalMatchingPool is ShieldedPool {
      */
     function _addToOrderBook(bytes32 intentHash, uint256 inputAssetID, uint256 outputAssetID) internal {
         bytes32 assetPairHash = _getAssetPairHash(inputAssetID, outputAssetID);
+        bytes32 reversePairHash = _getAssetPairHash(outputAssetID, inputAssetID);
+        require(
+            buyOrders[assetPairHash].length < MAX_ORDER_BOOK_SIZE
+                && sellOrders[reversePairHash].length < MAX_ORDER_BOOK_SIZE,
+            "InternalMatchingPool: order book full"
+        );
         
         // Determine if this is a buy or sell order
         // For simplicity, we'll classify based on asset IDs
@@ -267,7 +280,6 @@ contract InternalMatchingPool is ShieldedPool {
         buyOrderIndex[intentHash] = buyOrders[assetPairHash].length - 1;
         
         // Also add to reverse pair for matching
-        bytes32 reversePairHash = _getAssetPairHash(outputAssetID, inputAssetID);
         sellOrders[reversePairHash].push(intentHash);
         sellOrderIndex[intentHash] = sellOrders[reversePairHash].length - 1;
     }
@@ -453,6 +465,11 @@ contract InternalMatchingPool is ShieldedPool {
         
         // Collect unmatched intents (will use PancakeSwap)
         bytes32[] memory unmatchedHashes = _collectUnmatchedIntents();
+
+        require(
+            matchedIds.length <= MAX_BATCH_SIZE && unmatchedHashes.length <= MAX_BATCH_SIZE,
+            "InternalMatchingPool: batch too large"
+        );
         
         // Generate batch ID
         batchId = keccak256(abi.encodePacked(block.number, block.timestamp, matchedIds.length, unmatchedHashes.length));
@@ -483,6 +500,12 @@ contract InternalMatchingPool is ShieldedPool {
         require(block.number >= batch.batchBlock, "InternalMatchingPool: batch not ready");
         
         batch.executed = true;
+
+        require(
+            batch.matchedSwapIds.length <= MAX_BATCH_SIZE
+                && batch.unmatchedIntentHashes.length <= MAX_BATCH_SIZE,
+            "InternalMatchingPool: batch too large"
+        );
         
         uint256 executedCount = 0;
         uint256 pancakeSwapCount = 0;

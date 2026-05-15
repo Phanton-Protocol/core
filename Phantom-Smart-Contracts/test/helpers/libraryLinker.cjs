@@ -43,7 +43,6 @@ async function getJoinSplitFeeValidationLibraries() {
 }
 
 let cachedMevLib = null;
-
 async function getMevCommitRevealLibraries() {
   const key = await networkKey();
   if (!cachedMevLib || cachedNetworkKey !== key) {
