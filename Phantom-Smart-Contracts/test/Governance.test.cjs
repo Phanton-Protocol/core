@@ -55,7 +55,7 @@ describe("Governance (CRIT-003 integration)", function () {
 
     await expect(
       gov.connect(carol).propose(ethers.ZeroAddress, 0, "0x")
-    ).to.be.revertedWith("Governance: insufficient tokens to propose");
+    ).to.be.revertedWith("Governance: insufficient voting power at snapshot");
   });
 
   it("vote uses getPastVotes at snapshotBlock after proposer transfers all tokens away", async function () {

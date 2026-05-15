@@ -14,7 +14,11 @@ const { computeCommitment, computeNullifier } = require(path.join(
   "noteModel.js"
 ));
 const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("./helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  initFeeOracleForTests,
+} = require("./helpers/reducedProduction.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -55,6 +59,7 @@ async function deployReducedPoolWithJoinSplitVerifier() {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -132,9 +137,10 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
     const badRoot = ethers.keccak256(ethers.toUtf8Bytes("never-checkpointed-root"));
     expect(await pool.validMerkleRoots(badRoot)).to.equal(false);
 
-    const joinSplitStub = {
-      proof: { a: "0x", b: "0x", c: "0x" },
-      publicInputs: {
+    const joinSplitStub = await buildReducedJoinSplitTx(
+      pool,
+      deployer,
+      {
         nullifier: ethers.ZeroHash,
         inputCommitment: c1,
         outputCommitmentSwap: ethers.ZeroHash,
@@ -153,22 +159,8 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
         merklePath: Array(10).fill(0n),
         merklePathIndices: Array(10).fill(0n),
       },
-      swapParams: {
-        tokenIn: ethers.ZeroAddress,
-        tokenOut: await outTok.getAddress(),
-        amountIn: 1n,
-        minAmountOut: 1n,
-        fee: 0,
-        sqrtPriceLimitX96: 0n,
-        path: "0x",
-      },
-      relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
-      encryptedPayload: "0x",
-      ...joinSplitSwapDataDummyAttestation(),
-    };
+      await outTok.getAddress()
+    );
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(joinSplitStub)).to.be.revertedWithCustomError(
       pool,
@@ -227,25 +219,8 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
 
     const { poolProof } = await proveJoinSplitPublic9FromPublicInputs(publicInputs);
 
-    const swapData = {
-      proof: poolProof,
-      publicInputs,
-      swapParams: {
-        tokenIn: ethers.ZeroAddress,
-        tokenOut: outAddr,
-        amountIn: swapAmount,
-        minAmountOut: swapAmount,
-        fee: 0,
-        sqrtPriceLimitX96: 0n,
-        path: "0x",
-      },
-      relayer: ethers.ZeroAddress,
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
-      encryptedPayload: "0x",
-      ...joinSplitSwapDataDummyAttestation(),
-    };
+    const swapData = await buildReducedJoinSplitTx(pool, deployer, publicInputs, outAddr);
+    swapData.proof = poolProof;
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(pool, "ShieldedSwapJoinSplit");
     expect(await pool.nullifiers(publicInputs.nullifier)).to.equal(true);

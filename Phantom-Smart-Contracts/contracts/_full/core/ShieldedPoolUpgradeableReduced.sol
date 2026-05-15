@@ -21,11 +21,15 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../libraries/TokenAccounting.sol";
 import "../libraries/ProtocolFeeMath.sol";
 import "../libraries/JoinSplitFeeValidation.sol";
+import "../libraries/MevCommitReveal.sol";
+import "../libraries/TokenRegistrationPolicy.sol";
 
 /**
  * @title ShieldedPoolUpgradeableReduced
  * @notice Reduced-size version with core functionality only
- * @dev Removed: TransactionHistory, TimelockController, ComplianceModule, FHE, ThresholdEncryption, MEV protection
+ * @dev Removed: TransactionHistory, FHE, ThresholdEncryption. **Production Path-B** enforces:
+ *      relayer registry + blacklist, commit-reveal MEV gate on join-split, and spot DEX swaps
+ *      with user-chosen `minOutputAmountSwap` (see {MevCommitReveal}, {PancakeSwapAdaptor}).
  * CRITICAL FIX: Uses tree.insert() for deposits (MiMC7) - matches swaps/withdraws
  *
  * **Merkle spend policy (MVP, E-paper aligned):** every root observed after a successful `tree.insert`
@@ -67,7 +71,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     IFeeOracle public feeOracle;
     IRelayerRegistry public relayerRegistry;
     address public depositHandler;
-    address public swapHandler;
     address public withdrawHandler;
     
     // Merkle Tree State
@@ -119,8 +122,11 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     mapping(address => bool) public allowedERC20;
     /// @notice True during fund-flow entrypoints; pool views may be stale while locked.
     bool public fundFlowLocked;
+    /// @notice Commit-reveal MEV gate (join-split). Spot DEX remains manipulable within one tx.
+    mapping(bytes32 => bool) public swapCommitments;
+    mapping(bytes32 => uint256) public swapCommitmentDeadline;
     /// @notice Future-proofing gap — reserve remaining slots for later security upgrades.
-    uint256[45] private __moduleOneSecurityGap;
+    uint256[44] private __moduleOneSecurityGap;
 
     event TimelockSet(address indexed previous, address indexed current);
     event EmergencyAdminSet(address indexed previous, address indexed current);
@@ -178,6 +184,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     /// @notice Emitted when a new Merkle root becomes spendable (including genesis and after each insert).
     /// @param treeNextIndex Value of `tree.nextIndex` after the root was recorded (0 at genesis).
     event MerkleRootCheckpointed(bytes32 indexed root, uint256 treeNextIndex);
+    // ============ Modifiers ============
+    /// @dev Fund-flow spends must be submitted by a staked, non-blacklisted relayer.
+    modifier onlyRelayer() {
+        if (!relayerRegistry.isRelayer(msg.sender) || blacklistedRelayers[msg.sender]) revert SP();
+        _;
+    }
 
     // ============ Initialization ============
     function initialize(
@@ -313,11 +325,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         depositHandler = _depositHandler;
     }
 
-    function setSwapHandler(address _swapHandler) external onlyOwner {
-        if (_swapHandler == address(0)) revert ZeroAddr();
-        swapHandler = _swapHandler;
-    }
-
     function setWithdrawHandler(address _withdrawHandler) external onlyOwner {
         if (_withdrawHandler == address(0)) revert ZeroAddr();
         withdrawHandler = _withdrawHandler;
@@ -344,6 +351,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     function registerAssetWithProbe(uint256 assetID, address token, uint256 probeAmount) public onlyOwner {
         if (token != address(0) && !allowedERC20[token]) {
             if (probeAmount == 0) revert ProbeAmountRequired();
+            TokenRegistrationPolicy.rejectErc777IfSupported(token);
             TokenAccounting.safeTransferFromExact(IERC20(token), msg.sender, address(this), probeAmount);
             TokenAccounting.safeTransferExact(IERC20(token), msg.sender, probeAmount);
             allowedERC20[token] = true;
@@ -537,6 +545,16 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         emit CommitmentAdded(commitment, index);
     }
 
+    /// @notice Commit to a join-split before public reveal (required for production swaps).
+    function commitSwap(bytes32 commitmentHash, uint256 deadline) external nonReentrant {
+        MevCommitReveal.commit(swapCommitments, swapCommitmentDeadline, commitmentHash, deadline);
+    }
+
+    function setRelayerBlacklisted(address relayer, bool blocked) external onlyOwner {
+        if (relayer == address(0)) revert ZeroAddr();
+        blacklistedRelayers[relayer] = blocked;
+    }
+
     // ============ Swap Functions ============
     /// @dev Path-B production uses `shieldedSwapJoinSplit` only; legacy single-output swap is disabled.
     function shieldedSwap(ShieldedSwapData calldata) external pure override {
@@ -545,14 +563,25 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     /**
      * @notice Join-split swap: spend one note, DEX leg, two output commitments.
-     * @dev **Module 2:** The adaptor `executeSwap` call precedes Merkle inserts and the
-     *      nullifier burn by protocol necessity (need `dexOut` before committing state).
-     *      `nonReentrant` on this entry blocks cross-function reentrancy into `deposit` /
-     *      `shieldedWithdraw` / `shieldedSwap` during the DEX call.
+     * @dev **Spot DEX (no TWAP):** adaptor uses instantaneous AMM price; slippage floor is
+     *      `minOutputAmountSwap` from the proof. **MEV:** requires prior {commitSwap}.
+     *      DEX call precedes Merkle/nullifier (ZK constraint); `nonReentrant` blocks re-entry.
      */
-    function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
+    function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData)
+        external
+        override
+        onlyRelayer
+        nonReentrant
+        fundFlowLock
+        whenNotEmergencyPaused
+    {
+        MevCommitReveal.verifyAndConsume(
+            swapCommitments, swapCommitmentDeadline, swapData.commitment, swapData.deadline
+        );
+
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
+        if (blacklistedRelayers[relayer]) revert SP();
 
         if (nullifiers[inputs.nullifier]) revert SP();
         _requireSpendableMerkleRoot(inputs.merkleRoot);
@@ -598,7 +627,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             swapData.swapParams
         );
 
-        if (dexOut < inputs.minOutputAmountSwap || dexOut != inputs.outputAmountSwap) revert SP();
+        if (dexOut < inputs.minOutputAmountSwap) revert SP();
+        if (inputs.minOutputAmountSwap == 0) revert SP();
 
         (uint256 swapIndex, bytes32 swapRoot) = tree.insert(inputs.outputCommitmentSwap);
         commitments[swapIndex] = inputs.outputCommitmentSwap;
@@ -650,6 +680,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData)
         external
         override
+        onlyRelayer
         nonReentrant
         fundFlowLock
         whenNotEmergencyPaused
@@ -688,6 +719,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     function multiOutputWithdraw(MultiOutputWithdrawData calldata withdrawData)
         external
         override
+        onlyRelayer
         nonReentrant
         fundFlowLock
         whenNotEmergencyPaused
@@ -732,6 +764,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (!thresholdVerifier.verifyProof(proof, pubInputs)) revert SP();
         if (!verifier.verifyProof(proof, pubInputs)) revert SP();
 
+        _checkCompliance(recipient);
+
         (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(
             ShieldedWithdrawData({
                 proof: proof,
@@ -763,6 +797,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         }
 
         address payoutRelayer = relayer != address(0) ? relayer : msg.sender;
+        if (blacklistedRelayers[payoutRelayer]) revert SP();
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund) {
             gasReserve -= inputs.gasRefund;
             payable(payoutRelayer).transfer(inputs.gasRefund);
@@ -828,14 +863,16 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         userNoteAssetID[depositor] = assetID;
     }
 
-    function _checkCompliance(address depositor) internal virtual {
+    function _checkCompliance(address account) internal view {
         if (complianceModuleAddress == address(0)) return;
         (bool success, bytes memory data) = complianceModuleAddress.staticcall(
-            abi.encodeWithSignature("isSanctioned(address)", depositor)
+            abi.encodeWithSignature("isSanctioned(address)", account)
         );
-        if (success && data.length > 0) {
-            if (abi.decode(data, (bool))) revert SP();
-        }
+        if (success && data.length > 0 && abi.decode(data, (bool))) revert SP();
+        (success, data) = complianceModuleAddress.staticcall(
+            abi.encodeWithSignature("isBlocked(address)", account)
+        );
+        if (success && data.length > 0 && abi.decode(data, (bool))) revert SP();
     }
 
     /// @dev CEI: protocol fee payout only after Merkle/nullifier effects on handler-backed paths.

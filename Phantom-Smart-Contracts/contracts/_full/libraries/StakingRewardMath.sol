@@ -7,7 +7,7 @@ pragma solidity ^0.8.21;
  * @dev `dust` is added to `unallocated` so no wei is lost to integer division.
  */
 library StakingRewardMath {
-    uint256 internal constant REWARD_SCALE = 1e12;
+    uint256 public constant REWARD_SCALE = 1e12;
 
     /// @return increment Amount to add to `accRewardPerShare`.
     /// @return dust Wei not credited to stakers (caller should add to `unallocatedRewards`).

@@ -10,9 +10,11 @@ import "../libraries/StakingRewardMath.sol";
 
 /**
  * @title RelayerStaking
- * @notice Staking + fee distribution for relayers.
+ * @notice Staking + fee distribution for relayers (MasterChef-style accounting).
  * @dev When `totalStaked == 0`, fees accrue in {unallocatedRewards} and roll into the next
- *      {accRewardPerShare} update once staking resumes (no stranded rewards).
+ *      {accRewardPerShare} update on the first {stake} after idle (intended: no stranded fees).
+ *      Late stakers must not earn rewards accrued before their stake: {stake} calls
+ *      {_syncRewardDebt} after increasing balance so `rewardDebt` tracks the new stake.
  */
 contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -87,6 +89,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         stakedBalance[msg.sender] += amount;
         totalStaked += amount;
+        _syncRewardDebt(msg.sender);
         if (wasZero) {
             _rollAllUnallocatedRewards();
         }
@@ -99,6 +102,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         _updateAllRewards(msg.sender);
         stakedBalance[msg.sender] -= amount;
         totalStaked -= amount;
+        _syncRewardDebt(msg.sender);
         IERC20(token).safeTransfer(msg.sender, amount);
         emit Unstaked(msg.sender, amount);
     }
@@ -215,10 +219,18 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             address t = rewardTokens[i];
             uint256 pending = _pending(user, t);
-            rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / 1e12;
+            rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / StakingRewardMath.REWARD_SCALE;
             if (pending > 0) {
                 _payout(user, t, pending);
             }
+        }
+    }
+
+    /// @dev Set `rewardDebt` to current stake × accumulator (post balance change).
+    function _syncRewardDebt(address user) internal {
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address t = rewardTokens[i];
+            rewardDebt[user][t] = (stakedBalance[user] * accRewardPerShare[t]) / StakingRewardMath.REWARD_SCALE;
         }
     }
 
@@ -248,6 +260,7 @@ contract RelayerStaking is IRelayerRegistry, IFeeDistributor, ReentrancyGuard {
         _updateAllRewards(staker);
         stakedBalance[staker] -= amount;
         totalStaked -= amount;
+        _syncRewardDebt(staker);
 
         IERC20(token).safeTransfer(feeRecipient, amount);
 

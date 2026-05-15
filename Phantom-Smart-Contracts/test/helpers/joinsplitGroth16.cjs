@@ -110,6 +110,8 @@ async function deployPoolWithRealJoinSplitVerifier() {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  const { wireDefaultBnbFeed } = require("./poolFixtures.cjs");
+  await wireDefaultBnbFeed(feeOracle, deployer);
   const feeOracleAddr = await feeOracle.getAddress();
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");

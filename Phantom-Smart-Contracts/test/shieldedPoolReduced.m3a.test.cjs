@@ -3,7 +3,11 @@ const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("./helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  initFeeOracleForTests,
+} = require("./helpers/reducedProduction.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -30,6 +34,7 @@ async function deployReducedForM3a(useSubtractWeiAdaptor) {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -47,26 +52,9 @@ async function deployReducedForM3a(useSubtractWeiAdaptor) {
   return { deployer, pool, feeOracle, swapAdaptor };
 }
 
-function joinSplitTx(poolSigner, publicInputs, outTokenAddr) {
-  return poolSigner.shieldedSwapJoinSplit({
-    proof: { a: "0x", b: "0x", c: "0x" },
-    publicInputs,
-    swapParams: {
-      tokenIn: ethers.ZeroAddress,
-      tokenOut: outTokenAddr,
-      amountIn: publicInputs.swapAmount,
-      minAmountOut: 0n,
-      fee: 0,
-      sqrtPriceLimitX96: 0n,
-      path: "0x",
-    },
-    relayer: ethers.ZeroAddress,
-    commitment: ethers.ZeroHash,
-    deadline: 0n,
-    nonce: 0n,
-    encryptedPayload: "0x",
-    ...joinSplitSwapDataDummyAttestation(),
-  });
+async function joinSplitTx(pool, relayerSigner, publicInputs, outTokenAddr) {
+  const tx = await buildReducedJoinSplitTx(pool, relayerSigner, publicInputs, outTokenAddr);
+  return pool.connect(relayerSigner).shieldedSwapJoinSplit(tx);
 }
 
 describe("ShieldedPoolUpgradeableReduced — M3a join-split conservation + DEX binding", function () {
@@ -108,10 +96,10 @@ describe("ShieldedPoolUpgradeableReduced — M3a join-split conservation + DEX b
       merklePathIndices: indices,
     };
 
-    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWith("SP:cvs");
+    await expect(joinSplitTx(pool, deployer, publicInputs, outAddr)).to.be.revertedWith("SP:cvs");
   });
 
-  it("reverts shieldedSwapJoinSplit when DEX output != outputAmountSwap (strict binding)", async function () {
+  it("reverts shieldedSwapJoinSplit when DEX output is below minOutputAmountSwap", async function () {
     const { deployer, pool, feeOracle } = await deployReducedForM3a(true);
 
     const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
@@ -144,17 +132,14 @@ describe("ShieldedPoolUpgradeableReduced — M3a join-split conservation + DEX b
       swapAmount: swapAmt,
       changeAmount: changeAmt,
       outputAmountSwap: swapAmt,
-      minOutputAmountSwap: 0n,
+      minOutputAmountSwap: swapAmt,
       gasRefund: 0n,
       protocolFee: totalPf,
       merklePath: path,
       merklePathIndices: indices,
     };
 
-    await expect(joinSplitTx(pool.connect(deployer), publicInputs, outAddr)).to.be.revertedWithCustomError(
-      pool,
-      "SP"
-    );
+    await expect(joinSplitTx(pool, deployer, publicInputs, outAddr)).to.be.revertedWithCustomError(pool, "SP");
   });
 
   it("reverts shieldedWithdraw when join-split conservation breaks", async function () {

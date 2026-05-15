@@ -4,7 +4,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("../helpers/reducedProduction.cjs");
+const { allowlistAndRegisterAsset, buildReducedJoinSplitTx } = require("../helpers/reducedProduction.cjs");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("../helpers/relayerSwapAttestation.cjs");
 
@@ -233,45 +233,34 @@ describe("Module 3 — fee math & precision", function () {
       const pfm = await (await ethers.getContractFactory(PFM_HARNESS_FQN)).deploy();
       await pfm.waitForDeployment();
 
-      await expect(
-        pool.connect(deployer).shieldedSwapJoinSplit({
-          proof: { a: "0x", b: "0x", c: "0x" },
-          publicInputs: {
-            nullifier: ethers.ZeroHash,
-            inputCommitment: c1,
-            outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("a")),
-            outputCommitmentChange: ethers.keccak256(ethers.toUtf8Bytes("b")),
-            merkleRoot: root,
-            inputAssetID: 0n,
-            outputAssetIDSwap: 1n,
-            outputAssetIDChange: 0n,
-            inputAmount,
-            swapAmount: swapAmt,
-            changeAmount,
-            outputAmountSwap: swapAmt,
-            minOutputAmountSwap: 0n,
-            gasRefund: 0n,
-            protocolFee: badPf,
-            merklePath: path,
-            merklePathIndices: indices,
-          },
-          swapParams: {
-            tokenIn: ethers.ZeroAddress,
-            tokenOut: outAddr,
-            amountIn: swapAmt,
-            minAmountOut: 0n,
-            fee: 0,
-            sqrtPriceLimitX96: 0n,
-            path: "0x",
-          },
-          relayer: ethers.ZeroAddress,
-          commitment: ethers.ZeroHash,
-          deadline: 0n,
-          nonce: 0n,
-          encryptedPayload: "0x",
-          ...joinSplitSwapDataDummyAttestation(),
-        })
-      ).to.be.revertedWithCustomError(pfm, "ProtocolFeeMismatch");
+      const swapTx = await buildReducedJoinSplitTx(
+        pool,
+        deployer,
+        {
+          nullifier: ethers.ZeroHash,
+          inputCommitment: c1,
+          outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("a")),
+          outputCommitmentChange: ethers.keccak256(ethers.toUtf8Bytes("b")),
+          merkleRoot: root,
+          inputAssetID: 0n,
+          outputAssetIDSwap: 1n,
+          outputAssetIDChange: 0n,
+          inputAmount,
+          swapAmount: swapAmt,
+          changeAmount,
+          outputAmountSwap: swapAmt,
+          minOutputAmountSwap: swapAmt,
+          gasRefund: 0n,
+          protocolFee: badPf,
+          merklePath: path,
+          merklePathIndices: indices,
+        },
+        outAddr
+      );
+      await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapTx)).to.be.revertedWithCustomError(
+        pfm,
+        "ProtocolFeeMismatch"
+      );
     });
 
     it("reverts when gasRefund exceeds cap", async function () {

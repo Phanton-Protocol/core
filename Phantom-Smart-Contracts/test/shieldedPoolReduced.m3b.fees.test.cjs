@@ -3,7 +3,11 @@ const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("./helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  initFeeOracleForTests,
+} = require("./helpers/reducedProduction.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -25,6 +29,7 @@ async function deployReducedM3bFixture() {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -84,7 +89,7 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
       swapAmount: swapAmt,
       changeAmount: changeForBad,
       outputAmountSwap: swapAmt,
-      minOutputAmountSwap: 0n,
+      minOutputAmountSwap: swapAmt,
       gasRefund: 0n,
       protocolFee: badPf,
       merklePath: path,
@@ -96,27 +101,11 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
     ).deploy();
     await pfm.waitForDeployment();
 
-    await expect(
-      pool.connect(deployer).shieldedSwapJoinSplit({
-        proof: { a: "0x", b: "0x", c: "0x" },
-        publicInputs,
-        swapParams: {
-          tokenIn: ethers.ZeroAddress,
-          tokenOut: outAddr,
-          amountIn: swapAmt,
-          minAmountOut: 0n,
-          fee: 0,
-          sqrtPriceLimitX96: 0n,
-          path: "0x",
-        },
-        relayer: ethers.ZeroAddress,
-        commitment: ethers.ZeroHash,
-        deadline: 0n,
-        nonce: 0n,
-        encryptedPayload: "0x",
-        ...joinSplitSwapDataDummyAttestation(),
-      })
-    ).to.be.revertedWithCustomError(pfm, "ProtocolFeeMismatch");
+    const swapTx = await buildReducedJoinSplitTx(pool, deployer, publicInputs, outAddr);
+    await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapTx)).to.be.revertedWithCustomError(
+      pfm,
+      "ProtocolFeeMismatch"
+    );
   });
 
   it("reverts deposit when BNB fee USD value is below $2 (mock oracle)", async function () {
@@ -147,6 +136,8 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
     const ad = await Ad.deploy();
     const fo = await ethers.getContractFactory("FeeOracle");
     const feeOracle = await fo.deploy();
+    await feeOracle.waitForDeployment();
+    await initFeeOracleForTests(feeOracle, deployer);
     const rr = await ethers.getContractFactory("RelayerRegistry");
     const reg = await rr.deploy();
     await reg.waitForDeployment();

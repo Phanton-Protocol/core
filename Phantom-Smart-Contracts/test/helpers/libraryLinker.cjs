@@ -2,6 +2,7 @@ const { ethers } = require("hardhat");
 
 const JOIN_SPLIT_FEE_LIB_FQN =
   "contracts/_full/libraries/JoinSplitFeeValidation.sol:JoinSplitFeeValidation";
+const MEV_COMMIT_LIB_FQN = "contracts/_full/libraries/MevCommitReveal.sol:MevCommitReveal";
 
 let cachedIntentLib = null;
 let cachedJoinSplitFeeLib = null;
@@ -41,8 +42,26 @@ async function getJoinSplitFeeValidationLibraries() {
   return { JoinSplitFeeValidation: cachedJoinSplitFeeLib };
 }
 
-async function getUpgradeablePoolLibraries() {
-  return { ...(await getJoinSplitFeeValidationLibraries()) };
+let cachedMevLib = null;
+
+async function getMevCommitRevealLibraries() {
+  const key = await networkKey();
+  if (!cachedMevLib || cachedNetworkKey !== key) {
+    const Factory = await ethers.getContractFactory(MEV_COMMIT_LIB_FQN);
+    const lib = await Factory.deploy();
+    await lib.waitForDeployment();
+    cachedMevLib = await lib.getAddress();
+    cachedNetworkKey = key;
+  }
+  return { MevCommitReveal: cachedMevLib };
+}
+
+async function getUpgradeablePoolLibraries(fqn) {
+  const libs = { ...(await getJoinSplitFeeValidationLibraries()) };
+  if (fqn.includes("ShieldedPoolUpgradeableReduced")) {
+    Object.assign(libs, await getMevCommitRevealLibraries());
+  }
+  return libs;
 }
 
 async function getShieldedPoolFactory(name = "ShieldedPool") {
@@ -51,7 +70,7 @@ async function getShieldedPoolFactory(name = "ShieldedPool") {
 }
 
 async function getUpgradeablePoolFactory(fqn) {
-  const libraries = await getUpgradeablePoolLibraries();
+  const libraries = await getUpgradeablePoolLibraries(fqn);
   return ethers.getContractFactory(fqn, { libraries });
 }
 

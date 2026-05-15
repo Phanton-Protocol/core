@@ -5,7 +5,11 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { getShieldedPoolFactory } = require("../helpers/libraryLinker.cjs");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("../helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  initFeeOracleForTests,
+} = require("../helpers/reducedProduction.cjs");
 const { totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 
 const MOCK_ERC20_FQN = "contracts/_full/mocks/MockERC20.sol:MockERC20";
@@ -26,6 +30,7 @@ async function deployNonUpgradeablePool(deployer) {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -77,6 +82,7 @@ async function deployReducedPool(deployer) {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -194,6 +200,7 @@ describe("Module 2 — token accounting & upgradeable deposit", function () {
     const FeeOracle = await ethers.getContractFactory("FeeOracle");
     const feeOracle = await FeeOracle.deploy();
     await feeOracle.waitForDeployment();
+    await initFeeOracleForTests(feeOracle, deployer);
 
     const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
     const relayerRegistry = await RelayerRegistry.deploy();
@@ -234,9 +241,10 @@ describe("Module 2 — token accounting & upgradeable deposit", function () {
     const protocolFee = await totalJoinSplitFeeBnb(feeOracle, inputAmount);
     const changeAmt = inputAmount - swapAmt - protocolFee;
 
-    const swapData = {
-      proof: { a: "0x", b: "0x", c: "0x" },
-      publicInputs: {
+    const swapData = await buildReducedJoinSplitTx(
+      pool,
+      deployer,
+      {
         nullifier: ethers.ZeroHash,
         inputCommitment: c1,
         outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("swap-out")),
@@ -255,25 +263,8 @@ describe("Module 2 — token accounting & upgradeable deposit", function () {
         merklePath: path,
         merklePathIndices: indices,
       },
-      swapParams: {
-        tokenIn: ethers.ZeroAddress,
-        tokenOut: outAddr,
-        amountIn: swapAmt,
-        minAmountOut: swapAmt,
-        fee: 0,
-        sqrtPriceLimitX96: 0n,
-        path: "0x",
-      },
-      relayer: deployer.address,
-      encryptedPayload: "0x",
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
-      relayerAttestationSig: "0x",
-      relayerAttestationDeadline: 0n,
-      relayerAttestationNonce: 0n,
-      proofContextHash: ethers.ZeroHash,
-    };
+      outAddr
+    );
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.be.revertedWith(
       "ReentrancyGuard: reentrant call"

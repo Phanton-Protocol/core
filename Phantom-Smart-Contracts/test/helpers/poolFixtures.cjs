@@ -1,7 +1,16 @@
 const { ethers } = require("hardhat");
 const { getShieldedPoolFactory } = require("./libraryLinker.cjs");
 
+const MOCK_AGG_FQN = "contracts/_full/mocks/MockChainlinkAggregator.sol:MockChainlinkAggregator";
 const TREE_DEPTH = 10n;
+
+/** Wire a local mock BNB/USD feed so FeeOracle.calculateFee does not revert PriceUnavailable. */
+async function wireDefaultBnbFeed(feeOracle, signer) {
+  const Agg = await ethers.getContractFactory(MOCK_AGG_FQN);
+  const feed = await Agg.deploy(600n * 10n ** 8n);
+  await feed.waitForDeployment();
+  await (await feeOracle.connect(signer).setPriceFeed(ethers.ZeroAddress, await feed.getAddress())).wait();
+}
 
 /**
  * Merkle path for the first leaf (index 0) in a depth-10 tree — matches IncrementalMerkleTree + ShieldedPool.
@@ -47,6 +56,7 @@ async function deployPoolFixture() {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await wireDefaultBnbFeed(feeOracle, deployer);
   const feeOracleAddr = await feeOracle.getAddress();
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
@@ -123,5 +133,6 @@ module.exports = {
   totalJoinSplitFeeBnb,
   withdrawProtocolFee,
   commitJoinSplitMevProtection,
+  wireDefaultBnbFeed,
   TREE_DEPTH,
 };

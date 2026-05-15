@@ -4,7 +4,11 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { deployBehindProxy } = require("../helpers/proxyDeploy.cjs");
-const { allowlistAndRegisterAsset } = require("../helpers/reducedProduction.cjs");
+const {
+  allowlistAndRegisterAsset,
+  buildReducedJoinSplitTx,
+  initFeeOracleForTests,
+} = require("../helpers/reducedProduction.cjs");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("../helpers/poolFixtures.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
@@ -23,6 +27,7 @@ async function deployReducedWithHandlers(deployer) {
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
   const feeOracle = await FeeOracle.deploy();
   await feeOracle.waitForDeployment();
+  await initFeeOracleForTests(feeOracle, deployer);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();
@@ -106,9 +111,10 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
     const root = await pool.merkleRoot();
     const { path, indices } = await merkleProofForFirstLeaf(c1);
 
-    const swapData = {
-      proof: { a: "0x", b: "0x", c: "0x" },
-      publicInputs: {
+    const swapData = await buildReducedJoinSplitTx(
+      pool,
+      deployer,
+      {
         nullifier: ethers.ZeroHash,
         inputCommitment: c1,
         outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("s")),
@@ -127,25 +133,8 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
         merklePath: path,
         merklePathIndices: indices,
       },
-      swapParams: {
-        tokenIn: ethers.ZeroAddress,
-        tokenOut: outAddr,
-        amountIn: swapAmt,
-        minAmountOut: swapAmt,
-        fee: 0,
-        sqrtPriceLimitX96: 0n,
-        path: "0x",
-      },
-      relayer: deployer.address,
-      encryptedPayload: "0x",
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
-      relayerAttestationSig: "0x",
-      relayerAttestationDeadline: 0n,
-      relayerAttestationNonce: 0n,
-      proofContextHash: ethers.ZeroHash,
-    };
+      outAddr
+    );
 
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.be.revertedWithCustomError(
       pool,
@@ -181,9 +170,10 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
     const root = await pool.merkleRoot();
     const { path, indices } = await merkleProofForFirstLeaf(c1);
 
-    const swapData = {
-      proof: { a: "0x", b: "0x", c: "0x" },
-      publicInputs: {
+    const swapData = await buildReducedJoinSplitTx(
+      pool,
+      deployer,
+      {
         nullifier: ethers.ZeroHash,
         inputCommitment: c1,
         outputCommitmentSwap: ethers.keccak256(ethers.toUtf8Bytes("s2")),
@@ -202,25 +192,8 @@ describe("Path-B production policy (ShieldedPoolUpgradeableReduced)", function (
         merklePath: path,
         merklePathIndices: indices,
       },
-      swapParams: {
-        tokenIn: ethers.ZeroAddress,
-        tokenOut: outAddr,
-        amountIn: swapAmt,
-        minAmountOut: swapAmt,
-        fee: 0,
-        sqrtPriceLimitX96: 0n,
-        path: "0x",
-      },
-      relayer: deployer.address,
-      encryptedPayload: "0x",
-      commitment: ethers.ZeroHash,
-      deadline: 0n,
-      nonce: 0n,
-      relayerAttestationSig: "0x",
-      relayerAttestationDeadline: 0n,
-      relayerAttestationNonce: 0n,
-      proofContextHash: ethers.ZeroHash,
-    };
+      outAddr
+    );
 
     // Callback runs isFundFlowLocked() on pool; staticcall returns true; adaptor succeeds; join-split completes.
     await expect(pool.connect(deployer).shieldedSwapJoinSplit(swapData)).to.emit(pool, "ShieldedSwapJoinSplit");

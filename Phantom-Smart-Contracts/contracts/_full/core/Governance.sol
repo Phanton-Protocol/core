@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+/**
+ * @title Governance (LEGACY — DO NOT USE IN PRODUCTION)
+ * @notice Superseded by `governance/Governance.sol` + OpenZeppelin `TimelockController`.
+ * @dev Retained for ABI compatibility with early BSC-testnet deployments only.
+ *      Does **not** use OZ timelock roles; `execute` performs a direct `target.call`.
+ *      Production Path-B upgrades must use the hardened governance stack (48h+ delay).
+ */
+
 interface IProtocolToken {
     function balanceOf(address user) external view returns (uint256);
     function getPastVotes(address user, uint256 blockNumber) external view returns (uint256);
@@ -57,7 +65,11 @@ contract Governance {
     }
 
     function propose(address target, uint256 value, bytes calldata data) external returns (uint256) {
-        require(token.balanceOf(msg.sender) >= minProposalThreshold, "Governance: insufficient tokens to propose");
+        uint256 snap = block.number == 0 ? 0 : block.number - 1;
+        require(
+            token.getPastVotes(msg.sender, snap) >= minProposalThreshold,
+            "Governance: insufficient voting power at snapshot"
+        );
         uint256 id = ++proposalCount;
         proposals[id] = Proposal({
             proposer: msg.sender,

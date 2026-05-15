@@ -156,10 +156,10 @@ contract Governance {
         bytes calldata data
     ) external returns (uint256 id) {
         if (target == address(0)) revert ZeroAddress();
-        if (protocolToken.balanceOf(msg.sender) < minProposalThreshold) revert InsufficientTokens();
 
         id = ++proposalCount;
         uint256 snap = block.number == 0 ? 0 : block.number - 1;
+        if (protocolToken.getPastVotes(msg.sender, snap) < minProposalThreshold) revert InsufficientTokens();
         Proposal storage p = _proposals[id];
         p.proposer = msg.sender;
         p.target = target;

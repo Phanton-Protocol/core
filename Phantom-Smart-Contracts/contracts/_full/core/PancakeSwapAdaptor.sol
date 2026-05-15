@@ -10,8 +10,9 @@ import "../types/Types.sol";
 
 /**
  * @title PancakeSwapAdaptor
- * @notice Adaptor for executing swaps on PancakeSwap V3
- * @dev Handles both BNB and ERC20 token swaps
+ * @notice Adaptor for executing swaps on PancakeSwap V2 (spot reserves).
+ * @dev **Spot pricing only — no TWAP.** Swaps use router `getAmountsOut` / exact-in swaps at execution time.
+ *      Production must pair with proof-bound `minAmountOut`, commit-reveal, and private relayer submission.
  * @dev **Module 2:** `nonReentrant` on value-moving entry points; SafeERC20 for token pulls/payouts.
  */
 contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {

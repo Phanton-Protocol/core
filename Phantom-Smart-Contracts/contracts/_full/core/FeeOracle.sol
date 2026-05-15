@@ -12,8 +12,11 @@ import "../libraries/TokenDecimals.sol";
  * @title FeeOracle
  * @notice Calculates dynamic protocol fees using Chainlink or off-chain price feeds.
  * @dev Fee = max($2 USD, 0.5% of transaction value) — see {ProtocolFeeMath}.
+ *      **Spot feeds only (no TWAP).** Used for protocol/deposit fees, not DEX swap pricing.
+ *      {calculateFee} reverts {PriceUnavailable} when no fresh price exists (no silent 0.5%-only fallback).
  */
 contract FeeOracle is IFeeOracle {
+    error PriceUnavailable(address token);
     mapping(address => address) public priceFeeds;
     address public constant BNB_USD_FEED = address(0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE);
     address public offchainOracle;
@@ -114,13 +117,8 @@ contract FeeOracle is IFeeOracle {
     }
 
     function requireFreshPrice(address token) external view override {
-        if (offchainOracle == address(0)) {
-            return;
-        }
-
-        (uint256 price, uint256 updatedAt) = IOffchainPriceOracle(offchainOracle).getPrice(token);
-        require(price > 0, "FeeOracle: no offchain price");
-        require(block.timestamp - updatedAt <= 10 minutes, "FeeOracle: stale offchain price");
+        (uint256 price, bool hasPrice) = _getTokenPrice(token);
+        if (!hasPrice || price == 0) revert PriceUnavailable(token);
     }
 
     function calculateFee(
@@ -129,16 +127,13 @@ contract FeeOracle is IFeeOracle {
     ) external view override returns (uint256 feeAmount) {
         if (amount == 0) return 0;
 
+        (uint256 price, bool hasPrice) = _getTokenPrice(token);
+        if (!hasPrice || price == 0) revert PriceUnavailable(token);
+
         uint256 usdValue = getUSDValue(token, amount);
         uint256 feeUSD = ProtocolFeeMath.feeUsdFromNotionalUsd(usdValue);
-
-        (uint256 price, bool hasPrice) = _getTokenPrice(token);
-        if (hasPrice && price > 0) {
-            uint256 tokenDecimals = TokenDecimals.read(token);
-            feeAmount = OracleMath.tokenAmountFromUsd(feeUSD, price, tokenDecimals);
-        } else {
-            feeAmount = ProtocolFeeMath.percentageFeeInTokenUnits(amount);
-        }
+        uint256 tokenDecimals = TokenDecimals.read(token);
+        feeAmount = OracleMath.tokenAmountFromUsd(feeUSD, price, tokenDecimals);
 
         if (feeAmount > amount) {
             feeAmount = amount;

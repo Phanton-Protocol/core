@@ -30,7 +30,7 @@ async function main() {
   await withdrawHandler.waitForDeployment();
 
   await (await pool.setDepositHandler(await depositHandler.getAddress())).wait();
-  await (await pool.setSwapHandler(await swapHandler.getAddress())).wait();
+  // Path-B Reduced pool executes join-split inline; SwapHandler is not wired on Reduced.
   await (await pool.setWithdrawHandler(await withdrawHandler.getAddress())).wait();
   await (await pool.setSwapAdaptor(swapAdaptorAddr)).wait();
 
