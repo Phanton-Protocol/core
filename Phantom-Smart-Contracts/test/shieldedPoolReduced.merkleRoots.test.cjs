@@ -14,6 +14,7 @@ const { computeCommitment, computeNullifier } = require(path.join(
   "noteModel.js"
 ));
 const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
+const { allowlistAndRegisterAsset } = require("./helpers/reducedProduction.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -126,7 +127,7 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
     const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
     const outTok = await MockERC20.deploy("Out", "O", 18);
     await outTok.waitForDeployment();
-    await pool.connect(deployer).registerAsset(1n, await outTok.getAddress());
+    await allowlistAndRegisterAsset(pool, deployer, 1n, outTok);
 
     const badRoot = ethers.keccak256(ethers.toUtf8Bytes("never-checkpointed-root"));
     expect(await pool.validMerkleRoots(badRoot)).to.equal(false);
@@ -179,7 +180,7 @@ describe("ShieldedPoolUpgradeableReduced — Merkle root spend policy", function
     const outTok = await MockERC20.deploy("OutHist", "H", 18);
     await outTok.waitForDeployment();
     const outAddr = await outTok.getAddress();
-    await pool.connect(deployer).registerAsset(1n, outAddr);
+    await allowlistAndRegisterAsset(pool, deployer, 1n, outAddr);
 
     // Amounts must leave positive change under FeeOracle $10 floor when USD value is 0 (local tests).
     const inputAmount = ethers.parseEther("25");

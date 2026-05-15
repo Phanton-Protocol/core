@@ -117,15 +117,7 @@ contract SwapHandler is ReentrancyGuard {
         
         require(swapOutput >= inputs.minOutputAmount, "SwapHandler: slippage exceeded");
         require(swapOutput == inputs.outputAmount, "SwapHandler: output mismatch");
-        
-        // Distribute fees
-        if (totalProtocolFee > 0) {
-            if (inputToken == address(0)) {
-                IFeeDistributor(address(relayerRegistry)).distributeFee{value: totalProtocolFee}(address(0), totalProtocolFee);
-            } else {
-                IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, totalProtocolFee);
-            }
-        }
+        // Fee distribution is performed by ShieldedPool **after** Merkle/nullifier effects (CEI).
     }
     
     /**
@@ -187,15 +179,7 @@ contract SwapHandler is ReentrancyGuard {
         
         require(swapOutput >= inputs.minOutputAmountSwap, "SwapHandler: slippage exceeded");
         require(swapOutput == inputs.outputAmountSwap, "SwapHandler: swap output mismatch");
-        
-        // Distribute fees
-        if (totalProtocolFee > 0) {
-            if (inputToken == address(0)) {
-                IFeeDistributor(address(relayerRegistry)).distributeFee{value: totalProtocolFee}(address(0), totalProtocolFee);
-            } else {
-                IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, totalProtocolFee);
-            }
-        }
+        // Fee distribution is performed by ShieldedPool **after** Merkle/nullifier effects (CEI).
     }
     
     function _publicInputsToArray(PublicInputs memory inputs) private pure returns (uint256[] memory) {

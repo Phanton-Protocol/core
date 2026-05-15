@@ -23,6 +23,7 @@ import "./TransactionHistory.sol";
 import "../governance/TimelockController.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../libraries/TokenAccounting.sol";
 
 /**
  * @title ShieldedPool
@@ -496,7 +497,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
             IERC20(inputToken).safeApprove(address(swapAdaptor), swapInputAmount);
         }
         
-        (uint256 swapOutput, ) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
+        (uint256 swapOutput, uint256 totalProtocolFee) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
         
         // Verify output matches proof
         require(swapOutput == inputs.outputAmount, "ShieldedPool: output mismatch");
@@ -509,6 +510,9 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
 
         // ============ STEP 5: MARK NULLIFIER ============
         nullifiers[inputs.nullifier] = true;
+
+        // ============ STEP 5b: PROTOCOL FEE (interactions after effects) ============
+        _distributeProtocolFee(inputToken, totalProtocolFee);
         
         // ============ STEP 6: GAS REFUND (from reserve) ============
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
@@ -704,6 +708,11 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         // ============ STEP 6: MARK NULLIFIER ============
         nullifiers[inputs.nullifier] = true;
 
+        // ============ STEP 6b: PROTOCOL FEE (interactions after effects; skipped for internal match) ============
+        if (!isInternalMatch && totalProtocolFee > 0) {
+            _distributeProtocolFee(inputTokenAddr, totalProtocolFee);
+        }
+
         // ============ STEP 7: GAS REFUND ============
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputTokenAddr == address(0)) {
             gasReserve -= inputs.gasRefund;
@@ -855,7 +864,7 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         address inputToken = assetRegistry[inputs.inputAssetID];
         uint256 withdrawAmount = inputs.swapAmount;
         
-        (uint256 verifiedWithdrawAmount, ) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
+        (uint256 verifiedWithdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
         require(verifiedWithdrawAmount == withdrawAmount, "ShieldedPool: withdraw amount mismatch");
         require(withdrawAmount == inputs.swapAmount, "ShieldedPool: withdraw amount mismatch");
 
@@ -867,11 +876,13 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
 
         nullifiers[inputs.nullifier] = true;
 
+        _distributeProtocolFee(inputToken, protocolFee);
+
         // ============ STEP 5: TRANSFER TO RECIPIENT ============
         if (inputToken == address(0)) {
             payable(recipient).transfer(withdrawAmount);
         } else {
-            IERC20(inputToken).safeTransfer(recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(inputToken), recipient, withdrawAmount);
         }
 
         // ============ STEP 6: GAS REFUND (from reserve) ============
@@ -1090,7 +1101,8 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
             // Call finalizeDeposit logic directly
             _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB);
         } else {
-            // For ERC20 deposits, use handler
+            // ERC20: pull principal into pool before handler / finalize (matches non-upgradeable ShieldedPool).
+            TokenAccounting.safeTransferFromExact(IERC20(token), depositor, address(this), amount);
             require(depositHandler != address(0), "ShieldedPool: deposit handler not set");
             IDepositHandler(depositHandler).processDeposit(
                 depositor,
@@ -1469,4 +1481,15 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
     
     event SwapCommitted(bytes32 indexed commitment, uint256 deadline);
     event MEVProtectionVerified(bytes32 indexed commitment, uint256 deadline, uint256 nonce);
+
+    /// @dev CEI: protocol fee payout only after Merkle/nullifier effects on handler-backed paths.
+    function _distributeProtocolFee(address token, uint256 amount) internal {
+        if (amount == 0) return;
+        if (token == address(0)) {
+            IFeeDistributor(address(relayerRegistry)).distributeFee{value: amount}(address(0), amount);
+        } else {
+            IERC20(token).safeApprove(address(relayerRegistry), amount);
+            IFeeDistributor(address(relayerRegistry)).distributeFee(token, amount);
+        }
+    }
 }

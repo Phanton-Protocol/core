@@ -119,15 +119,7 @@ contract WithdrawHandler is ReentrancyGuard {
             protocolFee = 0;
         }
         require(inputs.gasRefund <= inputs.inputAmount, "WithdrawHandler: invalid gas refund");
-        
-        // Distribute fees
-        if (protocolFee > 0) {
-            if (inputToken == address(0)) {
-                IFeeDistributor(address(relayerRegistry)).distributeFee{value: protocolFee}(address(0), protocolFee);
-            } else {
-                IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, protocolFee);
-            }
-        }
+        // Protocol fee distribution is performed by ShieldedPool **after** Merkle/nullifier effects (CEI).
     }
     
     function _joinSplitPublicInputsToArray(JoinSplitPublicInputs memory inputs) private pure returns (uint256[] memory) {

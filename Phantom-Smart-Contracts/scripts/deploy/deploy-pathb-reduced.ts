@@ -133,7 +133,7 @@ async function main() {
     chainId,
     deployer: deployer.address,
     deployedAt: new Date().toISOString(),
-    note: "Path-B reduced stack: new SHDW + RelayerStaking + pool + walletB stake",
+    note: "Path-B production: ShieldedPoolUpgradeableReduced + SHDW + RelayerStaking (ERC20 allowlist probe at registerAsset)",
     contracts: {
       protocolToken: protocolTokenAddr,
       governance: governanceAddr,

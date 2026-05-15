@@ -3,6 +3,7 @@ const { ethers } = require("hardhat");
 const { merkleProofForFirstLeaf, totalJoinSplitFeeBnb } = require("./helpers/poolFixtures.cjs");
 const { joinSplitSwapDataDummyAttestation } = require("./helpers/relayerSwapAttestation.cjs");
 const { deployBehindProxy } = require("./helpers/proxyDeploy.cjs");
+const { allowlistAndRegisterAsset } = require("./helpers/reducedProduction.cjs");
 
 const REDUCED_FQN = "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced";
 
@@ -54,8 +55,7 @@ describe("ShieldedPoolUpgradeableReduced — M3b fees (10 bps, $2 deposit, proto
     const MockERC20 = await ethers.getContractFactory(MOCK_ERC20_FQN);
     const outTok = await MockERC20.deploy("O", "O", 18);
     await outTok.waitForDeployment();
-    const outAddr = await outTok.getAddress();
-    await pool.connect(deployer).registerAsset(1n, outAddr);
+    const outAddr = await allowlistAndRegisterAsset(pool, deployer, 1n, outTok);
 
     const c1 = ethers.keccak256(ethers.toUtf8Bytes("m3b-fee-leaf"));
     const inputAmount = ethers.parseEther("25");

@@ -34,8 +34,17 @@ async function main() {
   await (await pool.setWithdrawHandler(await withdrawHandler.getAddress())).wait();
   await (await pool.setSwapAdaptor(swapAdaptorAddr)).wait();
 
-  await (await pool.registerAsset(1, busdAddr)).wait();
-  await (await pool.registerAsset(2, usdtAddr)).wait();
+  const [deployer] = await ethers.getSigners();
+  const probe = 10n ** 18n;
+  for (const tokenAddr of [busdAddr, usdtAddr]) {
+    const erc20 = await ethers.getContractAt(
+      "@openzeppelin/contracts/token/ERC20/IERC20.sol:IERC20",
+      tokenAddr
+    );
+    await (await erc20.approve(poolAddr, probe)).wait();
+  }
+  await (await pool.connect(deployer).registerAsset(1, busdAddr)).wait();
+  await (await pool.connect(deployer).registerAsset(2, usdtAddr)).wait();
 
   console.log("pool:", poolAddr);
   console.log("depositHandler:", await depositHandler.getAddress());

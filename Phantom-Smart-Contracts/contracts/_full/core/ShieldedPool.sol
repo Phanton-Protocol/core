@@ -14,6 +14,7 @@ import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/MiMC7.sol";
 import "../libraries/DexSwapFee.sol";
 import "../libraries/InternalMatchIntentLib.sol";
+import "../libraries/TokenAccounting.sol";
 import "./ComplianceModule.sol";
 import "./TransactionHistory.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -39,6 +40,8 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
 
     error PoolErr(uint8 code);
     // PoolErr(48): oracle USD value unavailable for this path and bnbFallbackPriceUSD is zero or token is non-BNB.
+    // PoolErr(49): ERC20 deposit credited amount != declared amount (fee-on-transfer / deflationary unsupported).
+    // PoolErr(50): ERC20 payout delivered amount != declared amount (fee-on-transfer / deflationary unsupported).
 
     // ============ Constants ============
     uint256 public constant MAX_TREE_DEPTH = 10; // Matches circuit/array sizes
@@ -403,7 +406,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
             if (msg.value != amount) revert PoolErr(13);
         } else {
             if (msg.value != 0) revert PoolErr(14);
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+            TokenAccounting.safeTransferFromExact(IERC20(token), msg.sender, address(this), amount);
         }
 
         _registerAsset(inputs.inputAssetID, token);
@@ -498,7 +501,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (token == address(0)) {
             payable(data.recipient).transfer(withdrawAmount);
         } else {
-            IERC20(token).safeTransfer(data.recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(token), data.recipient, withdrawAmount);
         }
     }
 
@@ -870,7 +873,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         if (inputToken == address(0)) {
             payable(recipient).transfer(withdrawAmount);
         } else {
-            IERC20(inputToken).safeTransfer(recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(inputToken), recipient, withdrawAmount);
         }
 
         // ============ STEP 9: RELAYER REFUND ============
@@ -1064,7 +1067,7 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
 
         // ERC20: pull tokens into pool before handler finalizes Merkle state (depositor must approve this contract)
         if (token != address(0)) {
-            IERC20(token).safeTransferFrom(depositor, address(this), amount);
+            TokenAccounting.safeTransferFromExact(IERC20(token), depositor, address(this), amount);
         }
         
         // Delegate all processing to handler (reduces stack depth)

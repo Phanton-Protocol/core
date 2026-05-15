@@ -19,6 +19,7 @@ import "../libraries/IncrementalMerkleTree.sol";
 import "../libraries/JoinSplitPublicInputValidation.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../libraries/TokenAccounting.sol";
 
 /**
  * @title ShieldedPoolUpgradeableReduced
@@ -31,6 +32,11 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  * `publicInputs.merkleRoot` iff `validMerkleRoots[root]` is true **and** `MerkleTree.verifyProof` succeeds for
  * that root + path. Thus notes may be spent against a **historical** root + frozen proof while the pool’s
  * `merkleRoot()` has advanced — no change to the 9 Groth16 public signals (`merkleRoot` remains `bytes32`).
+ *
+ * **Production policy (Path-B):** BNB testnet/mainnet should deploy this contract only.
+ * ERC20 assets must pass an on-chain round-trip probe at registration (standard ERC20 only;
+ * fee-on-transfer / rebasing tokens are rejected). Join-split keeps DEX before Merkle inserts
+ * (ZK/circuit requirement); cross-function safety is `nonReentrant` + {isFundFlowLocked}.
  */
 contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using IncrementalMerkleTree for IncrementalMerkleTree.Tree;
@@ -41,6 +47,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     error EmergencyPausedErr();
     error InvalidSweepAmount();
     error ZeroAddr();
+    error ERC20NotAllowlisted(address token);
+    error ProbeAmountRequired();
 
     /// @dev Module 1 audit fix — disable initializers on the implementation.
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -107,9 +115,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     /// @notice When true, deposits/swap/withdraw entry points must revert.
     ///         Toggled by `emergencyAdmin` (pause) or `owner()` (unpause).
     bool public emergencyPaused;
-    /// @notice Future-proofing gap — reserve 47 slots so subsequent security
-    ///         upgrades can append state without touching downstream layout.
-    uint256[47] private __moduleOneSecurityGap;
+    /// @notice ERC20 allowlist (Path-B production). Set via probe at registration.
+    mapping(address => bool) public allowedERC20;
+    /// @notice True during fund-flow entrypoints; pool views may be stale while locked.
+    bool public fundFlowLocked;
+    /// @notice Future-proofing gap — reserve remaining slots for later security upgrades.
+    uint256[45] private __moduleOneSecurityGap;
 
     event TimelockSet(address indexed previous, address indexed current);
     event EmergencyAdminSet(address indexed previous, address indexed current);
@@ -122,6 +133,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     /// @notice Minimum deposit fee (USD, 8 decimals). E-paper §1.8: **$2** total.
     uint256 public constant DEPOSIT_FEE_USD = 2 * 1e8;
+
+    /// @notice Default ERC20 probe size for {registerAsset} (must exceed fee-on-transfer rounding).
+    uint256 public constant DEFAULT_ERC20_PROBE_AMOUNT = 1e18;
 
     // ============ Events ============
     event Deposit(
@@ -168,6 +182,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         address relayer
     );
     event CommitmentAdded(bytes32 indexed commitment, uint256 index);
+    event ERC20Allowlisted(address indexed token, uint256 probeAmount);
     event NullifierMarked(bytes32 indexed nullifier);
     event GasRefunded(address indexed relayer, uint256 amount);
     /// @notice Emitted when a new Merkle root becomes spendable (including genesis and after each insert).
@@ -283,6 +298,18 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _;
     }
 
+    /// @dev Sets {fundFlowLocked} for integrators — do not trust `merkleRoot` / `nullifiers` while true.
+    modifier fundFlowLock() {
+        fundFlowLocked = true;
+        _;
+        fundFlowLocked = false;
+    }
+
+    /// @notice Whether a fund-flow entry is mid-execution (do not rely on `merkleRoot` / nullifiers).
+    function isFundFlowLocked() external view returns (bool) {
+        return fundFlowLocked;
+    }
+
     /// @dev Records `newRoot` as spendable and updates `merkleRoot` (canonical head).
     function _setMerkleRoot(bytes32 newRoot) internal {
         merkleRoot = newRoot;
@@ -319,9 +346,25 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     /**
      * @notice Register asset for swap/withdraw (owner only).
-     * @dev AssetID 0 is reserved for native BNB (`address(0)`).
+     * @dev AssetID 0 is reserved for native BNB (`address(0)`). ERC20 must pass a 1-wei round-trip
+     *      probe via {registerAssetWithProbe} (this entry uses `probeAmount = 1`).
      */
     function registerAsset(uint256 assetID, address token) external onlyOwner {
+        registerAssetWithProbe(assetID, token, DEFAULT_ERC20_PROBE_AMOUNT);
+    }
+
+    /**
+     * @notice Register ERC20 after exact-balance probe (owner must approve this pool for `probeAmount`).
+     * @dev Reverts on fee-on-transfer / deflationary tokens via {TokenAccounting}.
+     */
+    function registerAssetWithProbe(uint256 assetID, address token, uint256 probeAmount) public onlyOwner {
+        if (token != address(0) && !allowedERC20[token]) {
+            if (probeAmount == 0) revert ProbeAmountRequired();
+            TokenAccounting.safeTransferFromExact(IERC20(token), msg.sender, address(this), probeAmount);
+            TokenAccounting.safeTransferExact(IERC20(token), msg.sender, probeAmount);
+            allowedERC20[token] = true;
+            emit ERC20Allowlisted(token, probeAmount);
+        }
         _registerAsset(assetID, token);
     }
 
@@ -394,7 +437,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override nonReentrant {
+    ) external payable override nonReentrant fundFlowLock whenNotEmergencyPaused {
         _depositInternal(msg.sender, token, amount, commitment, assetID, msg.value, address(0));
     }
 
@@ -404,7 +447,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 amount,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override nonReentrant {
+    ) external payable override nonReentrant fundFlowLock whenNotEmergencyPaused {
         require(depositor != address(0), "SP: zero depositor");
         require(token != address(0), "SP:D1");
         _depositInternal(depositor, token, amount, commitment, assetID, msg.value, msg.sender);
@@ -414,7 +457,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         address depositor,
         bytes32 commitment,
         uint256 assetID
-    ) external payable override nonReentrant {
+    ) external payable override nonReentrant fundFlowLock whenNotEmergencyPaused {
         require(depositor != address(0), "SP: zero depositor");
         require(msg.value > 0, "SP: zero value");
         _depositInternal(depositor, address(0), msg.value, commitment, assetID, msg.value, msg.sender);
@@ -437,7 +480,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             uint256 depositFeeBNB = value - amount;
             _finalizeDepositLogic(depositor, token, amount, commitment, assetID, depositFeeBNB, relayer);
         } else {
-            // For ERC20 deposits, use handler
+            // ERC20: pull principal into pool before handler / finalize (matches non-upgradeable ShieldedPool).
+            if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
+            TokenAccounting.safeTransferFromExact(IERC20(token), depositor, address(this), amount);
             require(depositHandler != address(0), "SP:D4");
             IDepositHandler(depositHandler).processDeposit(
                 depositor,
@@ -516,7 +561,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     // ============ Swap Functions ============
-    function shieldedSwap(ShieldedSwapData calldata swapData) external override nonReentrant {
+    function shieldedSwap(ShieldedSwapData calldata swapData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
         require(swapHandler != address(0), "SP:S0");
         PublicInputs memory inputs = swapData.publicInputs;
 
@@ -541,7 +586,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             IERC20(inputToken).safeApprove(address(swapAdaptor), swapInputAmount);
         }
         
-        (uint256 swapOutput, ) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
+        (uint256 swapOutput, uint256 totalProtocolFee) = ISwapHandler(swapHandler).processSwap{value: inputToken == address(0) ? swapInputAmount : 0}(swapData);
         
         require(swapOutput == inputs.outputAmount, "SP:O1");
 
@@ -551,6 +596,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _setMerkleRoot(newRoot);
 
         nullifiers[inputs.nullifier] = true;
+
+        _distributeProtocolFee(inputToken, totalProtocolFee);
         
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputToken == address(0)) {
@@ -580,7 +627,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
      *      `nonReentrant` on this entry blocks cross-function reentrancy into `deposit` /
      *      `shieldedWithdraw` / `shieldedSwap` during the DEX call.
      */
-    function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData) external override nonReentrant {
+    function shieldedSwapJoinSplit(JoinSplitSwapData calldata swapData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
         JoinSplitPublicInputs memory inputs = swapData.publicInputs;
         address relayer = swapData.relayer != address(0) ? swapData.relayer : msg.sender;
 
@@ -609,9 +656,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 totalProtocolFee = inputs.protocolFee;
         require(inputs.gasRefund <= inputs.inputAmount, "SP:F2");
 
-        // Ensure output asset IDs are registered for later withdrawals
-        _registerAsset(inputs.outputAssetIDSwap, swapData.swapParams.tokenOut);
-        _registerAsset(inputs.outputAssetIDChange, inputToken);
+        // Output assets must be owner-allowlisted before join-split (no auto-register).
+        _requireRegisteredAsset(inputs.outputAssetIDSwap, swapData.swapParams.tokenOut);
+        _requireRegisteredAsset(inputs.outputAssetIDChange, inputToken);
         uint256 swapAmount = inputs.swapAmount;
 
         if (inputToken != address(0)) {
@@ -625,15 +672,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         require(dexOut >= inputs.minOutputAmountSwap, "SP:S1");
         require(dexOut == inputs.outputAmountSwap, "SP:S2");
 
-        if (totalProtocolFee > 0) {
-            if (inputToken == address(0)) {
-                IFeeDistributor(address(relayerRegistry)).distributeFee{value: totalProtocolFee}(address(0), totalProtocolFee);
-            } else {
-                IERC20(inputToken).safeApprove(address(relayerRegistry), totalProtocolFee);
-                IFeeDistributor(address(relayerRegistry)).distributeFee(inputToken, totalProtocolFee);
-            }
-        }
-
         (uint256 swapIndex, bytes32 swapRoot) = tree.insert(inputs.outputCommitmentSwap);
         commitments[swapIndex] = inputs.outputCommitmentSwap;
         commitmentCount = tree.nextIndex;
@@ -645,6 +683,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _setMerkleRoot(changeRoot);
 
         nullifiers[inputs.nullifier] = true;
+
+        _distributeProtocolFee(inputToken, totalProtocolFee);
 
         if (inputs.gasRefund > 0 && gasReserve >= inputs.gasRefund && inputToken == address(0)) {
             gasReserve -= inputs.gasRefund;
@@ -679,7 +719,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
 
     // ============ Withdraw Functions ============
-    function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant {
+    function shieldedWithdraw(ShieldedWithdrawData calldata withdrawData) external override nonReentrant fundFlowLock whenNotEmergencyPaused {
         require(withdrawHandler != address(0), "SP:W0");
         
         JoinSplitPublicInputs memory inputs = withdrawData.publicInputs;
@@ -703,7 +743,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (!thresholdVerifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
         if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
 
-        (uint256 withdrawAmount, ) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
+        (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(withdrawData);
         address inputToken = inputs.inputAssetID == 0 ? address(0) : assetRegistry[inputs.inputAssetID];
         if (inputToken == address(0) && inputs.inputAssetID != 0) {
             revert SP();
@@ -717,12 +757,14 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
         nullifiers[inputs.nullifier] = true;
 
+        _distributeProtocolFee(inputToken, protocolFee);
+
         // Handler validates economics/proofs; pool sends withdraw leg to recipient.
         if (inputToken == address(0)) {
             (bool ok,) = payable(withdrawData.recipient).call{value: withdrawAmount}("");
             require(ok, "SP:W2");
         } else {
-            IERC20(inputToken).safeTransfer(withdrawData.recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(inputToken), withdrawData.recipient, withdrawAmount);
         }
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
@@ -795,7 +837,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (!verifier.verifyProof(withdrawData.proof, JoinSplitPublicInputValidation.joinSplitInputsToArray(inputs))) revert SP();
 
         // Process withdrawal and transfer payout (single-recipient fallback for reduced pool)
-        (uint256 withdrawAmount, ) = IWithdrawHandler(withdrawHandler).processWithdraw(ShieldedWithdrawData({
+        (uint256 withdrawAmount, uint256 protocolFee) = IWithdrawHandler(withdrawHandler).processWithdraw(ShieldedWithdrawData({
             proof: withdrawData.proof,
             publicInputs: inputs,
             recipient: withdrawData.recipients[0].recipient, // Use first recipient
@@ -814,11 +856,13 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
         nullifiers[inputs.nullifier] = true;
 
+        _distributeProtocolFee(inputToken, protocolFee);
+
         if (inputToken == address(0)) {
             (bool ok,) = payable(withdrawData.recipients[0].recipient).call{value: withdrawAmount}("");
             require(ok, "SP: native withdraw transfer failed");
         } else {
-            IERC20(inputToken).safeTransfer(withdrawData.recipients[0].recipient, withdrawAmount);
+            TokenAccounting.safeTransferExact(IERC20(inputToken), withdrawData.recipients[0].recipient, withdrawAmount);
         }
 
         address relayer = withdrawData.relayer != address(0) ? withdrawData.relayer : msg.sender;
@@ -862,13 +906,24 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             require(token == address(0), "SP: assetID 0 reserved for BNB");
             return;
         }
+        require(token != address(0), "SP: invalid token");
+        if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
         if (assetRegistry[assetID] == address(0)) {
-            require(token != address(0), "SP: invalid token");
             assetRegistry[assetID] = token;
             assetIDMap[token] = assetID;
         } else {
             require(assetRegistry[assetID] == token, "SP: assetID mismatch");
         }
+    }
+
+    function _requireRegisteredAsset(uint256 assetID, address token) internal view {
+        if (assetID == 0) {
+            require(token == address(0), "SP: BNB asset");
+            return;
+        }
+        require(token != address(0), "SP: invalid token");
+        if (!allowedERC20[token]) revert ERC20NotAllowlisted(token);
+        require(assetRegistry[assetID] == token, "SP: asset not registered");
     }
 
     function _updateUserNoteOnDeposit(address depositor, bytes32 commitment, uint256 assetID) internal {
@@ -886,4 +941,14 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         }
     }
 
+    /// @dev CEI: protocol fee payout only after Merkle/nullifier effects on handler-backed paths.
+    function _distributeProtocolFee(address token, uint256 amount) internal {
+        if (amount == 0) return;
+        if (token == address(0)) {
+            IFeeDistributor(address(relayerRegistry)).distributeFee{value: amount}(address(0), amount);
+        } else {
+            IERC20(token).safeApprove(address(relayerRegistry), amount);
+            IFeeDistributor(address(relayerRegistry)).distributeFee(token, amount);
+        }
+    }
 }
