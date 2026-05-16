@@ -183,7 +183,108 @@ export async function assertChainalysisOracleDeployed(
   }
 }
 
-/** Wire FeeOracle + ComplianceModule timelocks after Path-B governance bootstrap. */
+/** Path-B production pool (UUPS, EIP-170 sized). Canonical deploy target. */
+export const PATH_B_CANONICAL_POOL_CONTRACT = "ShieldedPoolUpgradeableReduced" as const;
+
+/** Lab / legacy pools — not Path-B production (see docs/PATH_B_PRODUCTION_RUNBOOK.md). */
+export const PATH_B_ALTERNATE_POOL_CONTRACTS = ["ShieldedPool", "ShieldedPoolUpgradeable"] as const;
+
+export function assertPathBCanonicalPoolContract(contractName: string): void {
+  if (contractName !== PATH_B_CANONICAL_POOL_CONTRACT) {
+    throw new Error(
+      `Production Path-B pool must be ${PATH_B_CANONICAL_POOL_CONTRACT}, got ${contractName}. ` +
+        `Alternate pools (${PATH_B_ALTERNATE_POOL_CONTRACTS.join(", ")}) are lab-only.`
+    );
+  }
+}
+
+const RELAYER_STAKING_PROBE_ABI = ["function totalStaked() view returns (uint256)"];
+
+/**
+ * Path-B production: pool.initialize(..., relayerRegistry) must point at **RelayerStaking**
+ * (implements IRelayerRegistry). Bare RelayerRegistry is for local/tests only.
+ */
+export async function assertProductionRelayerRegistry(
+  registryAddress: string,
+  provider: { call: (tx: { to: string; data: string }) => Promise<string> }
+): Promise<void> {
+  assertAddress("RELAYER_REGISTRY", registryAddress);
+  const iface = new ethers.Interface(RELAYER_STAKING_PROBE_ABI);
+  const data = iface.encodeFunctionData("totalStaked", []);
+  try {
+    await provider.call({ to: registryAddress, data });
+  } catch {
+    throw new Error(
+      `Relayer registry ${registryAddress} is not RelayerStaking (totalStaked probe failed). ` +
+        `Path-B production deploys RelayerStaking at pool.relayerRegistry — see docs/PATH_B_PRODUCTION_RUNBOOK.md.`
+    );
+  }
+}
+
+export type GovernanceMigrationTargets = {
+  poolAddress: string;
+  timelockAddress: string;
+  feeOracleAddress: string;
+  complianceModuleAddress?: string;
+  relayerRegistryAddress?: string;
+  emergencyAdminAddress?: string;
+};
+
+/** Post-migration gate: pool V2, FeeOracle timelock, optional ComplianceModule timelock. */
+export async function assertGovernanceMigrationComplete(
+  targets: GovernanceMigrationTargets,
+  provider: { call: (tx: { to: string; data: string }) => Promise<string> }
+): Promise<void> {
+  const { poolAddress, timelockAddress, feeOracleAddress } = targets;
+  assertAddress("REDUCED_POOL_ADDRESS", poolAddress);
+  assertAddress("GOVERNANCE_TIMELOCK_ADDRESS", timelockAddress);
+  assertAddress("FEE_ORACLE_ADDRESS", feeOracleAddress);
+
+  const pool = await ethers.getContractAt(PATH_B_CANONICAL_POOL_CONTRACT, poolAddress);
+  const poolTimelock = await pool.timelock();
+  const poolEmergency = await pool.emergencyAdmin();
+  if (!poolTimelock || poolTimelock === ethers.ZeroAddress) {
+    throw new Error(`Pool ${poolAddress}: timelock unset — call initializeV2(timelock, emergencyAdmin).`);
+  }
+  if (ethers.getAddress(poolTimelock) !== ethers.getAddress(timelockAddress)) {
+    throw new Error(`Pool timelock ${poolTimelock} != expected ${timelockAddress}`);
+  }
+  if (targets.emergencyAdminAddress) {
+    assertAddress("EMERGENCY_ADMIN_ADDRESS", targets.emergencyAdminAddress);
+    if (ethers.getAddress(poolEmergency) !== ethers.getAddress(targets.emergencyAdminAddress)) {
+      throw new Error(`Pool emergencyAdmin ${poolEmergency} != expected ${targets.emergencyAdminAddress}`);
+    }
+  } else if (!poolEmergency || poolEmergency === ethers.ZeroAddress) {
+    throw new Error(`Pool ${poolAddress}: emergencyAdmin unset — call initializeV2(timelock, emergencyAdmin).`);
+  }
+
+  const feeOracle = await ethers.getContractAt("FeeOracle", feeOracleAddress);
+  const foTimelock = await feeOracle.timelock();
+  if (!foTimelock || foTimelock === ethers.ZeroAddress) {
+    throw new Error(`FeeOracle ${feeOracleAddress}: timelock unset — call initializeTimelock(timelock).`);
+  }
+  if (ethers.getAddress(foTimelock) !== ethers.getAddress(timelockAddress)) {
+    throw new Error(`FeeOracle timelock ${foTimelock} != expected ${timelockAddress}`);
+  }
+
+  if (targets.complianceModuleAddress) {
+    const cm = await ethers.getContractAt("ComplianceModule", targets.complianceModuleAddress);
+    const cmTimelock = await cm.timelock();
+    if (!cmTimelock || cmTimelock === ethers.ZeroAddress) {
+      throw new Error(
+        `ComplianceModule ${targets.complianceModuleAddress}: timelock unset — call initializeTimelock(timelock).`
+      );
+    }
+    if (ethers.getAddress(cmTimelock) !== ethers.getAddress(timelockAddress)) {
+      throw new Error(`ComplianceModule timelock ${cmTimelock} != expected ${timelockAddress}`);
+    }
+  }
+
+  if (targets.relayerRegistryAddress) {
+    await assertProductionRelayerRegistry(targets.relayerRegistryAddress, provider);
+  }
+}
+
 /** Research / oversized pool variants — never Path-B production deploy targets. */
 export const EXPERIMENTAL_CONTRACT_NAMES = [
   "AdvancedPrivacyPool",

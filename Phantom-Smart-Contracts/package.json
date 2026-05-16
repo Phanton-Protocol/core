@@ -18,7 +18,8 @@
     "assert:no-mock-pool": "HH_FULL=1 hardhat run scripts/assert-no-mock-pool.ts",
     "fingerprints:mock-bytecode": "node scripts/compute-mock-bytecode-hashes.cjs",
     "circuit:build:joinsplit": "bash scripts/circuits/build-joinsplit-public9.sh",
-    "size:report": "node scripts/report-bytecode-size.cjs"
+    "size:report": "node scripts/report-bytecode-size.cjs",
+    "test:coverage:notes": "node -e \"console.log(['Optional solidity-coverage workflow:','  npm i -D solidity-coverage','  npx hardhat coverage  (add require(\\\"solidity-coverage\\\") to hardhat.config.cjs)','CI merge gate: npm test (includes checkBytecodeSize.cjs).','Invariants: test/security/module7.coverageOrdered.test.cjs §8'].join('\\n'))\""
   },
   "dependencies": {
     "@openzeppelin/contracts": "^4.9.6",

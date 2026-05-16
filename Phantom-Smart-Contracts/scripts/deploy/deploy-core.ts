@@ -1,5 +1,7 @@
 /**
- * Phase 1 — Deploy core ShieldedPool (non-upgradeable) + infrastructure.
+ * Phase 1 — Deploy legacy ShieldedPool (non-upgradeable) + RelayerRegistry.
+ * **Lab / local smoke only** — Path-B production uses deploy-pathb-reduced.ts
+ * (ShieldedPoolUpgradeableReduced + RelayerStaking).
  *
  * Prerequisite: HH_FULL=1 npm run compile
  *

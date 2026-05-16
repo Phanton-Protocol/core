@@ -8,7 +8,10 @@ import {
   assertExpectedChainId,
   assertExperimentalDeployBlocked,
   assertOffchainOraclePolicy,
+  assertPathBCanonicalPoolContract,
   assertProductionNetworkBinding,
+  assertProductionRelayerRegistry,
+  PATH_B_CANONICAL_POOL_CONTRACT,
   requireBnbUsdFeedForChain,
 } from "./networkConfig";
 import { getDeployProfile } from "./deployInfrastructure";
@@ -25,6 +28,8 @@ type DeployRecord = {
 };
 
 async function main() {
+  assertPathBCanonicalPoolContract(PATH_B_CANONICAL_POOL_CONTRACT);
+
   const [deployer] = await ethers.getSigners();
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   const walletA = ethers.getAddress(String(process.env.WALLET_A_ADDRESS || "").trim());
@@ -70,6 +75,7 @@ async function main() {
     "[path-b] governance ops: after a proposal passes voting, queue(id) then wait EXECUTION_DELAY (2 days on-chain) then execute(id) — see DEPLOY.md"
   );
 
+  // Path-B relayer source of truth: RelayerStaking (IRelayerRegistry), NOT bare RelayerRegistry.
   const minStake = ethers.parseUnits("1000", 18);
   const RelayerStaking = await ethers.getContractFactory("RelayerStaking");
   const relayerStaking = await RelayerStaking.deploy(protocolTokenAddr, minStake);
@@ -77,6 +83,7 @@ async function main() {
   await relayerStaking.waitForDeployment();
   const relayerStakingAddr = await relayerStaking.getAddress();
   console.log("[path-b] RelayerStaking:", relayerStakingAddr);
+  await assertProductionRelayerRegistry(relayerStakingAddr, ethers.provider);
 
   const infra = await deployVerifiersAndSwapAdaptor();
   const FeeOracle = await ethers.getContractFactory("FeeOracle");
@@ -116,6 +123,10 @@ async function main() {
   console.log("[path-b][tx] ShieldedPool.initialize:", initTx.hash);
   await initTx.wait();
   console.log("[path-b] pool initialized");
+  const wiredRegistry = await pool.relayerRegistry();
+  if (ethers.getAddress(wiredRegistry) !== ethers.getAddress(relayerStakingAddr)) {
+    throw new Error(`pool.relayerRegistry ${wiredRegistry} != RelayerStaking ${relayerStakingAddr}`);
+  }
 
   const authFeeTx = await relayerStaking.setFeeDistributor(poolAddr, true);
   console.log("[path-b][tx] RelayerStaking.setFeeDistributor(pool):", authFeeTx.hash);

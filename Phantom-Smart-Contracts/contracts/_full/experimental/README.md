@@ -14,6 +14,8 @@ These Solidity modules are research / R&D derivatives. They are **not** deployed
 
 Path-B production target: `ShieldedPoolUpgradeableReduced` only.
 
+Alternate (not production): `ShieldedPool`, `ShieldedPoolUpgradeable` — see `docs/PATH_B_PRODUCTION_RUNBOOK.md`.
+
 Deploy scripts call `assertExperimentalDeployBlocked()` from `scripts/deploy/networkConfig.ts`
 to reject `DEPLOY_*` env flags that would opt into these contracts when
 `DEPLOY_PROFILE` is `staging`/`production`, or dev with `FORCE_MOCK_INFRASTRUCTURE=false`.

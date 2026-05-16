@@ -8,6 +8,78 @@ const BSC_TESTNET = {
 
 const BSC_MAINNET = { chainId: 56 };
 
+const PATH_B_CANONICAL_POOL_CONTRACT = "ShieldedPoolUpgradeableReduced";
+const PATH_B_ALTERNATE_POOL_CONTRACTS = ["ShieldedPool", "ShieldedPoolUpgradeable"];
+
+function assertPathBCanonicalPoolContract(contractName) {
+  if (contractName !== PATH_B_CANONICAL_POOL_CONTRACT) {
+    throw new Error(
+      `Production Path-B pool must be ${PATH_B_CANONICAL_POOL_CONTRACT}, got ${contractName}`
+    );
+  }
+}
+
+async function assertProductionRelayerRegistry(registryAddress, provider) {
+  const { ethers } = require("hardhat");
+  if (!registryAddress || !ethers.isAddress(registryAddress)) {
+    throw new Error(`Invalid RELAYER_REGISTRY: ${registryAddress || "(empty)"}`);
+  }
+  const iface = new ethers.Interface(["function totalStaked() view returns (uint256)"]);
+  const data = iface.encodeFunctionData("totalStaked", []);
+  try {
+    await provider.call({ to: registryAddress, data });
+  } catch {
+    throw new Error(
+      `Relayer registry ${registryAddress} is not RelayerStaking (totalStaked probe failed)`
+    );
+  }
+}
+
+async function assertGovernanceMigrationComplete(targets, provider) {
+  const { ethers } = require("hardhat");
+  const { poolAddress, timelockAddress, feeOracleAddress } = targets;
+  const pool = await ethers.getContractAt(PATH_B_CANONICAL_POOL_CONTRACT, poolAddress);
+  const poolTimelock = await pool.timelock();
+  const poolEmergency = await pool.emergencyAdmin();
+  if (!poolTimelock || poolTimelock === ethers.ZeroAddress) {
+    throw new Error(`Pool ${poolAddress}: timelock unset — call initializeV2(timelock, emergencyAdmin)`);
+  }
+  if (ethers.getAddress(poolTimelock) !== ethers.getAddress(timelockAddress)) {
+    throw new Error(`Pool timelock ${poolTimelock} != expected ${timelockAddress}`);
+  }
+  if (targets.emergencyAdminAddress) {
+    if (ethers.getAddress(poolEmergency) !== ethers.getAddress(targets.emergencyAdminAddress)) {
+      throw new Error(`Pool emergencyAdmin ${poolEmergency} != expected ${targets.emergencyAdminAddress}`);
+    }
+  } else if (!poolEmergency || poolEmergency === ethers.ZeroAddress) {
+    throw new Error(`Pool ${poolAddress}: emergencyAdmin unset`);
+  }
+
+  const feeOracle = await ethers.getContractAt("FeeOracle", feeOracleAddress);
+  const foTimelock = await feeOracle.timelock();
+  if (!foTimelock || foTimelock === ethers.ZeroAddress) {
+    throw new Error(`FeeOracle ${feeOracleAddress}: timelock unset`);
+  }
+  if (ethers.getAddress(foTimelock) !== ethers.getAddress(timelockAddress)) {
+    throw new Error(`FeeOracle timelock ${foTimelock} != expected ${timelockAddress}`);
+  }
+
+  if (targets.complianceModuleAddress) {
+    const cm = await ethers.getContractAt("ComplianceModule", targets.complianceModuleAddress);
+    const cmTimelock = await cm.timelock();
+    if (!cmTimelock || cmTimelock === ethers.ZeroAddress) {
+      throw new Error(`ComplianceModule ${targets.complianceModuleAddress}: timelock unset`);
+    }
+    if (ethers.getAddress(cmTimelock) !== ethers.getAddress(timelockAddress)) {
+      throw new Error(`ComplianceModule timelock ${cmTimelock} != expected ${timelockAddress}`);
+    }
+  }
+
+  if (targets.relayerRegistryAddress) {
+    await assertProductionRelayerRegistry(targets.relayerRegistryAddress, provider);
+  }
+}
+
 function assertExpectedChainId(actual, expected) {
   if (Number(actual) !== Number(expected)) {
     throw new Error(`ChainId mismatch: connected network is ${actual}, script expects ${expected}`);
@@ -71,5 +143,11 @@ module.exports = {
   assertOffchainOraclePolicy,
   assertProductionNetworkBinding,
   assertExperimentalDeployBlocked,
+  assertPathBCanonicalPoolContract,
+  assertProductionRelayerRegistry,
+  assertGovernanceMigrationComplete,
+  PATH_B_CANONICAL_POOL_CONTRACT,
+  PATH_B_ALTERNATE_POOL_CONTRACTS,
   BSC_TESTNET,
+  BSC_MAINNET,
 };
