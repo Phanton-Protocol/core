@@ -5,6 +5,13 @@ pragma solidity ^0.8.21;
  * @title MevCommitReveal
  * @notice External library — commit-reveal + deadline gate for join-split (shrinks pool bytecode).
  * @dev `committers[commitmentHash]` stores the relayer that committed (0 = none). Prevents squatting.
+ *
+ * **Residual MEV / ordering risk:** commitments are visible in the mempool before reveal;
+ * block builders can reorder or sandwich the reveal tx unless submission uses a private
+ * relay / builder network. Deadlines bound exposure but do not remove ordering games.
+ *
+ * **Ops:** prefer private transaction submission for `commitSwap` + `shieldedSwapJoinSplit`,
+ * monitor failed reveals and deadline expiry, and treat commit hashes as public intent signals.
  */
 library MevCommitReveal {
     error MevInvalid();

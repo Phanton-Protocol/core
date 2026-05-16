@@ -8,6 +8,9 @@ import "./MiMC7.sol";
  * @dev Uses MiMC7(left, right) for internal nodes
  */
 library IncrementalMerkleTree {
+    /// @notice Reverted when `nextIndex` reaches `2**depth` (e.g. 1024 leaves at depth 10).
+    error MerkleTreeFull();
+
     struct Tree {
         uint256 depth;
         uint256 nextIndex;
@@ -44,7 +47,7 @@ library IncrementalMerkleTree {
      */
     function insert(Tree storage self, bytes32 leaf) internal returns (uint256 index, bytes32 newRoot) {
         index = self.nextIndex;
-        require(index < (1 << self.depth), "IncrementalMerkleTree: tree is full");
+        if (index >= (1 << self.depth)) revert MerkleTreeFull();
 
         bytes32 currentHash = leaf;
         uint256 currentIndex = index;

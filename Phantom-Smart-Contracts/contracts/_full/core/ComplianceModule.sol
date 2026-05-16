@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "../interfaces/IChainalysisOracle.sol";
+
 /**
  * @title ComplianceModule
  * @notice Chainalysis API integration for KYB/AML compliance
@@ -50,6 +52,7 @@ contract ComplianceModule {
     ComplianceConfig public config;
 
     address public owner;
+    address public timelock;
     address public complianceOfficer;
 
     /// @notice Pools / handlers permitted to mutate compliance state via
@@ -92,6 +95,7 @@ contract ComplianceModule {
 
     event AuthorizedPoolUpdated(address indexed pool, bool authorized);
     event ProductionModeSet(bool enabled);
+    event TimelockSet(address indexed timelock);
 
     // ============ Modifiers ============
     
@@ -100,11 +104,26 @@ contract ComplianceModule {
         _;
     }
     
+    error NotTimelock();
+
     modifier onlyComplianceOfficer() {
-        require(
-            msg.sender == owner || msg.sender == complianceOfficer,
-            "ComplianceModule: not authorized"
-        );
+        if (timelock != address(0)) {
+            if (msg.sender != timelock) revert NotTimelock();
+        } else {
+            require(
+                msg.sender == owner || msg.sender == complianceOfficer,
+                "ComplianceModule: not authorized"
+            );
+        }
+        _;
+    }
+
+    modifier onlyPolicyAdmin() {
+        if (timelock != address(0)) {
+            if (msg.sender != timelock) revert NotTimelock();
+        } else if (msg.sender != owner) {
+            require(false, "ComplianceModule: not owner");
+        }
         _;
     }
 
@@ -148,6 +167,12 @@ contract ComplianceModule {
             chainalysisOracle: _chainalysisOracle
         });
     }
+
+    function initializeTimelock(address _timelock) external onlyOwner {
+        require(_timelock != address(0), "ComplianceModule: zero timelock");
+        timelock = _timelock;
+        emit TimelockSet(_timelock);
+    }
     
     // ============ Compliance Checks ============
     
@@ -164,8 +189,18 @@ contract ComplianceModule {
         uint256 riskScore,
         bool sanctioned
     ) {
+        return _checkAddress(addr);
+    }
+
+    /// @dev Core compliance check; preserves original `msg.sender` for auth when
+    ///      called from {batchCheckAddresses} (avoids `this.checkAddress` self-call).
+    function _checkAddress(address addr) internal returns (
+        RiskLevel riskLevel,
+        uint256 riskScore,
+        bool sanctioned
+    ) {
         require(config.enabled, "ComplianceModule: compliance disabled");
-        
+
         // Check if whitelisted
         if (whitelistedAddresses[addr]) {
             addressRisks[addr] = AddressRisk({
@@ -176,11 +211,11 @@ contract ComplianceModule {
                 lastCheck: block.timestamp,
                 reason: "Whitelisted"
             });
-            
+
             emit AddressChecked(addr, RiskLevel.LOW, 0, false);
             return (RiskLevel.LOW, 0, false);
         }
-        
+
         // Check if already sanctioned
         if (sanctionedAddresses[addr]) {
             addressRisks[addr] = AddressRisk({
@@ -191,14 +226,14 @@ contract ComplianceModule {
                 lastCheck: block.timestamp,
                 reason: "Sanctioned address"
             });
-            
+
             emit AddressChecked(addr, RiskLevel.SANCTIONED, 100, true);
             return (RiskLevel.SANCTIONED, 100, true);
         }
-        
+
         // Call Chainalysis oracle (mock for now, will be replaced with real API)
         (riskLevel, riskScore, sanctioned) = _queryChainalysis(addr);
-        
+
         // Update address risk
         addressRisks[addr] = AddressRisk({
             riskLevel: riskLevel,
@@ -208,7 +243,7 @@ contract ComplianceModule {
             lastCheck: block.timestamp,
             reason: _getRiskReason(riskLevel)
         });
-        
+
         // Block if high risk or sanctioned
         if (riskLevel == RiskLevel.HIGH || riskLevel == RiskLevel.SANCTIONED) {
             blockedAddresses[addr] = true;
@@ -217,9 +252,9 @@ contract ComplianceModule {
             }
             emit AddressBlocked(addr, _getRiskReason(riskLevel));
         }
-        
+
         emit AddressChecked(addr, riskLevel, riskScore, sanctioned);
-        
+
         return (riskLevel, riskScore, sanctioned);
     }
     
@@ -233,7 +268,7 @@ contract ComplianceModule {
         uint256 len = addrs.length;
         require(len <= MAX_BATCH_CHECK_SIZE, "ComplianceModule: batch too large");
         for (uint256 i = 0; i < len; i++) {
-            this.checkAddress(addrs[i]);
+            _checkAddress(addrs[i]);
         }
     }
 
@@ -241,7 +276,7 @@ contract ComplianceModule {
 
     /// @notice Authorize / revoke a pool (or other contract) to call
     ///         {checkAddress}. Owner only. Emits {AuthorizedPoolUpdated}.
-    function setAuthorizedPool(address pool, bool authorized) external onlyOwner {
+    function setAuthorizedPool(address pool, bool authorized) external onlyPolicyAdmin {
         require(pool != address(0), "ComplianceModule: zero pool");
         authorizedPools[pool] = authorized;
         emit AuthorizedPoolUpdated(pool, authorized);
@@ -250,7 +285,7 @@ contract ComplianceModule {
     /// @notice Switch into production mode. In production the contract refuses
     ///         to score addresses without a configured `chainalysisOracle`
     ///         (audit fix: removes pseudo-random path from prod logic).
-    function setProductionMode(bool enabled) external onlyOwner {
+    function setProductionMode(bool enabled) external onlyPolicyAdmin {
         if (enabled) {
             require(config.chainalysisOracle != address(0), "ComplianceModule: oracle unset");
         }
@@ -347,7 +382,7 @@ contract ComplianceModule {
     /**
      * @notice Remove sanctioned address
      */
-    function removeSanctionedAddress(address addr) external onlyOwner {
+    function removeSanctionedAddress(address addr) external onlyPolicyAdmin {
         sanctionedAddresses[addr] = false;
         blockedAddresses[addr] = false;
     }
@@ -367,7 +402,7 @@ contract ComplianceModule {
         bool _enabled,
         uint256 _riskThreshold,
         uint256 _checkInterval
-    ) external onlyOwner {
+    ) external onlyPolicyAdmin {
         config.enabled = _enabled;
         config.riskThreshold = _riskThreshold;
         config.checkInterval = _checkInterval;
@@ -378,14 +413,26 @@ contract ComplianceModule {
     /**
      * @notice Set Chainalysis oracle address
      */
-    function setChainalysisOracle(address oracle) external onlyOwner {
+    function _requireIntegrationCaller(address currentSlot) internal view {
+        if (timelock != address(0) && currentSlot != address(0)) {
+            if (msg.sender != timelock) revert NotTimelock();
+        } else if (msg.sender != owner) {
+            require(false, "ComplianceModule: not owner");
+        }
+    }
+
+    function setChainalysisOracle(address oracle) external {
+        _requireIntegrationCaller(config.chainalysisOracle);
+        if (oracle != address(0)) {
+            require(oracle.code.length > 0, "ComplianceModule: oracle not a contract");
+        }
         config.chainalysisOracle = oracle;
     }
     
     /**
      * @notice Set compliance officer
      */
-    function setComplianceOfficer(address officer) external onlyOwner {
+    function setComplianceOfficer(address officer) external onlyPolicyAdmin {
         complianceOfficer = officer;
     }
     
@@ -415,15 +462,21 @@ contract ComplianceModule {
         if (sanctionedAddresses[addr]) {
             return (RiskLevel.SANCTIONED, 100, true);
         }
-        // Placeholder for real oracle integration. We intentionally do NOT
-        // call `IChainalysisOracle(...).checkAddress(addr)` here in the audit
-        // patch to avoid silently introducing an external call; the deploy
-        // script wires a `RealChainalysisAdapter` separately.
         if (productionMode) {
-            // No oracle data available — return LOW (default-allow) rather
-            // than mutating state with a guess. The pool's own `onlyRelayer`
-            // and sanctions list remain the strict gates.
-            return (RiskLevel.LOW, 0, false);
+            address oracle = config.chainalysisOracle;
+            require(oracle != address(0), "ComplianceModule: oracle unset");
+            require(oracle.code.length > 0, "ComplianceModule: oracle not a contract");
+            (uint256 riskScore, bool oracleSanctioned,) = IChainalysisOracle(oracle).checkAddress(addr);
+            if (oracleSanctioned) {
+                return (RiskLevel.SANCTIONED, riskScore > 100 ? 100 : riskScore, true);
+            }
+            if (riskScore > config.riskThreshold) {
+                return (RiskLevel.HIGH, riskScore, false);
+            }
+            if (riskScore > config.riskThreshold / 2) {
+                return (RiskLevel.MEDIUM, riskScore, false);
+            }
+            return (RiskLevel.LOW, riskScore, false);
         }
         return (RiskLevel.LOW, 0, false);
     }

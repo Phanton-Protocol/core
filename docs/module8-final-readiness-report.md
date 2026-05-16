@@ -83,7 +83,19 @@ Final verdict: **NO-GO for production rollout until live testnet canary + ops dr
 
 - See `docs/module8-residual-risk-register.md`.
 
-## 8) What blocks launch right now
+## 8) Path-B open audit findings (contracts)
+
+| ID | Finding | Status |
+|---|---|---|
+| M-12 | `ComplianceModule.batchCheckAddresses` auth via `this.checkAddress` | **Fixed** — internal `_checkAddress` preserves `msg.sender` |
+| M-13 | `commitSwap` missing emergency pause | **Fixed** — `emergencyPaused` gate on `commitSwap` |
+| M-14 | Merkle tree capacity error / monitoring | **Fixed** — `MerkleTreeFull()` + `commitmentCount` NatSpec |
+| L-01 | EIP-170 bytecode CI check | **Fixed** — `scripts/checkBytecodeSize.cjs` wired in `npm test` |
+| L-03 | Join-split public amount privacy docs | **Fixed** — `Types.sol` / `PrivateTypes.sol` NatSpec |
+| L-05 | Oracle / AMM / commit-reveal risk docs | **Fixed** — `FeeOracle`, `PancakeSwapAdaptor`, `MevCommitReveal` NatSpec |
+| L-07 | Experimental contracts deploy isolation | **Fixed** — `assertExperimentalDeployBlocked()` + `experimental/README.md` |
+
+## 9) What blocks launch right now
 
 1. No completed **live** 2-counterparty funded testnet canary execution attached as evidence artifact.
 2. Ops drill evidence missing for alert firing + runbook mitigation + rollback toggle exercise in deployed environment.

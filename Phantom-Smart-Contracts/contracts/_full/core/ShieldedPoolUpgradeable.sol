@@ -324,16 +324,28 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         }
     }
 
+    error NotTimelock();
+    error NotAuthorized();
+
+    /// @dev Module 6: bootstrap owner may wire integrations; post-bootstrap mutations require timelock.
+    function _gateIntegration(address current) internal view {
+        if (address(timelock) != address(0) && current != address(0)) {
+            if (msg.sender != address(timelock)) revert NotTimelock();
+        } else if (msg.sender != owner()) {
+            revert NotAuthorized();
+        }
+    }
+
     /**
      * @notice Set compliance module address.
      * @dev Module 1 audit fix: removed the previous "relayer registry can
-     *      also set" branch (hidden centralized mutation path). Now strictly
-     *      `onlyOwner` — i.e. governance/timelock once ownership is
-     *      transferred to it.
+     *      also set" branch (hidden centralized mutation path). Module 6:
+     *      timelock required once a module is already configured.
      */
     event ComplianceModuleUpdated(address indexed previous, address indexed current);
-    function setComplianceModule(address _complianceModule) external virtual onlyOwner {
+    function setComplianceModule(address _complianceModule) external virtual {
         require(_complianceModule != address(0), "ShieldedPool: zero address");
+        _gateIntegration(complianceModuleAddress);
         address prev = complianceModuleAddress;
         complianceModuleAddress = _complianceModule;
         emit ComplianceModuleUpdated(prev, _complianceModule);
@@ -353,8 +365,9 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      *      sync with `owner()` after `transferOwnership`). Emits
      *      {TransactionHistorySet}.
      */
-    function setTransactionHistory(address _transactionHistory) external onlyOwner {
+    function setTransactionHistory(address _transactionHistory) external {
         require(_transactionHistory != address(0), "ShieldedPool: zero address");
+        _gateIntegration(address(transactionHistory));
         transactionHistory = TransactionHistory(_transactionHistory);
     }
 
@@ -365,35 +378,53 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
      *      with `poolOwner` by `_transferOwnership`. Allows zero to disable
      *      the handler (legacy direct path).
      */
-    function setDepositHandler(address _depositHandler) external onlyOwner {
+    function setDepositHandler(address _depositHandler) external {
+        _gateIntegration(depositHandler);
         depositHandler = _depositHandler;
         emit DepositHandlerSet(_depositHandler);
     }
 
-    function setFHECoprocessor(address _fheCoprocessor) external onlyOwner {
+    function setFHECoprocessor(address _fheCoprocessor) external {
+        _gateIntegration(fheCoprocessor);
         fheCoprocessor = _fheCoprocessor;
         if (matchingHandler != address(0)) {
             IMatchingHandler(matchingHandler).setFHECoprocessor(_fheCoprocessor);
         }
     }
 
-    function setThresholdEncryption(address _thresholdEncryption) external onlyOwner {
+    function setThresholdEncryption(address _thresholdEncryption) external {
+        _gateIntegration(thresholdEncryption);
         thresholdEncryption = _thresholdEncryption;
     }
 
-    function setSwapHandler(address _swapHandler) external onlyOwner {
+    function setSwapHandler(address _swapHandler) external {
+        _gateIntegration(swapHandler);
         swapHandler = _swapHandler;
         emit SwapHandlerSet(_swapHandler);
     }
 
-    function setWithdrawHandler(address _withdrawHandler) external onlyOwner {
+    function setWithdrawHandler(address _withdrawHandler) external {
+        _gateIntegration(withdrawHandler);
         withdrawHandler = _withdrawHandler;
         emit WithdrawHandlerSet(_withdrawHandler);
     }
     
-    function setMatchingHandler(address _matchingHandler) external onlyOwner {
+    function setMatchingHandler(address _matchingHandler) external {
+        _gateIntegration(matchingHandler);
         matchingHandler = _matchingHandler;
         emit MatchingHandlerSet(_matchingHandler);
+    }
+
+    function setFeeOracle(address _feeOracle) external {
+        require(_feeOracle != address(0), "ShieldedPool: zero oracle");
+        _gateIntegration(address(feeOracle));
+        feeOracle = IFeeOracle(_feeOracle);
+    }
+
+    function setSwapAdaptor(address _swapAdaptor) external {
+        require(_swapAdaptor != address(0), "ShieldedPool: zero adaptor");
+        _gateIntegration(address(swapAdaptor));
+        swapAdaptor = IPancakeSwapAdaptor(_swapAdaptor);
     }
 
     // ============ Public Functions ============

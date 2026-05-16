@@ -81,17 +81,20 @@ struct PublicInputs {
 }
 
 /**
- * @notice Public inputs for Join-Split transactions (1 input, 2 outputs)
- * @dev Enables partial swaps and withdrawals with change notes
- * 
- * Conservation Rule: Input_Amount = Swap_Amount + Change_Amount + Protocol_Fee + Gas_Refund
- * On withdraw flows, `swapAmount` is the transparent withdraw leg (see `withdrawValidate.js`); swap public amounts are zero.
- * 
- * Example: 10 BNB input → Swap 4 BNB to USDT + Keep 6 BNB as change
- * - inputAmount: 10 BNB
- * - swapAmount: 4 BNB (sent to PancakeSwap)
- * - changeAmount: 6 BNB (stays in pool as new note)
- * - protocolFee + gasRefund: deducted from input
+ * @notice Public inputs for Join-Split transactions (1 input, 2 outputs) — **Path-B v1 (public amounts).**
+ * @dev Enables partial swaps and withdrawals with change notes.
+ *
+ * **Privacy (v1):** `inputAmount`, `swapAmount`, `changeAmount`, `outputAmountSwap`,
+ * `minOutputAmountSwap`, `gasRefund`, `protocolFee`, and all `*AssetID` fields are
+ * plain `uint256` public signals verified on-chain. Block explorers and indexers can
+ * read them from calldata/logs. This is intentional for the current Groth16 circuit;
+ * it is **not** full amount privacy.
+ *
+ * **Roadmap:** see `PrivateTypes.sol` (`PrivateJoinSplitPublicInputs`) for the target
+ * layout where amounts/asset IDs live only inside the proof.
+ *
+ * Conservation: `inputAmount = swapAmount + changeAmount + protocolFee + gasRefund`
+ * (withdraw flows may zero swap legs — see `withdrawValidate.js`).
  */
 /// @dev Groth16 verifier receives nine `Fr`-reduced values; see `ShieldedPool._joinSplitPublicInputsToArray` and `circuits/CIRCUITS.md`.
 struct JoinSplitPublicInputs {

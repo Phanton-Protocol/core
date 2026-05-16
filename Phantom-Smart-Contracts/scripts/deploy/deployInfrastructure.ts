@@ -3,6 +3,12 @@
  */
 import { ethers } from "hardhat";
 import { deploymentTxHash } from "./deploymentRecord";
+import {
+  assertExpectedChainId,
+  assertExperimentalDeployBlocked,
+  assertProductionNetworkBinding,
+  resolveProductionOracleAndDex,
+} from "./networkConfig";
 
 export type DeployProfileName = "dev" | "staging" | "production";
 
@@ -49,6 +55,7 @@ export type InfraAddresses = {
 };
 
 export async function deployVerifiersAndSwapAdaptor(): Promise<InfraAddresses> {
+  assertExperimentalDeployBlocked();
   assertDeployProfileForbidsForcedMocks();
   if (useMockInfrastructure()) {
     const MockVerifier = await ethers.getContractFactory("MockVerifier");
@@ -88,7 +95,14 @@ export async function deployVerifiersAndSwapAdaptor(): Promise<InfraAddresses> {
   }
 
   const profile = getDeployProfile();
-  console.log("Deploy profile:", profile, "(real Groth16 + PancakeSwapAdaptor)");
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  console.log("Deploy profile:", profile, "(real Groth16 + PancakeSwapAdaptor)", "chainId:", chainId);
+
+  assertProductionNetworkBinding(chainId, profile);
+  const expectedChainId = process.env.EXPECTED_CHAIN_ID?.trim();
+  if (expectedChainId) {
+    assertExpectedChainId(chainId, Number(expectedChainId));
+  }
 
   const deploymentTxs: Record<string, string> = {};
 
@@ -116,8 +130,7 @@ export async function deployVerifiersAndSwapAdaptor(): Promise<InfraAddresses> {
   deploymentTxs.thresholdVerifier = adapterTx;
   console.log("Deployed Groth16VerifierAdapter at", adapterAddr);
 
-  const router = requireEnv("PANCAKE_ROUTER");
-  const wbnb = requireEnv("WBNB_ADDRESS");
+  const { pancakeRouter: router, wbnb } = resolveProductionOracleAndDex(chainId);
   const Pancake = await ethers.getContractFactory("PancakeSwapAdaptor");
   const swapAdaptor = await Pancake.deploy(router, wbnb);
   await swapAdaptor.waitForDeployment();

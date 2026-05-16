@@ -74,7 +74,7 @@ contract WithdrawHandler is ReentrancyGuard {
 
         address inputToken = shieldedPool.assetRegistry(inputs.inputAssetID);
         if (inputToken != address(0)) {
-            try feeOracle.requireFreshPrice(inputToken) {} catch {}
+            feeOracle.requireFreshPrice(inputToken);
         }
 
         protocolFee = feeOracle.calculateFee(inputToken, inputs.inputAmount);

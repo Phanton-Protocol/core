@@ -5,7 +5,6 @@ const { ethers } = hre;
 const JOIN_SPLIT_FEE_LIB_FQN =
   "contracts/_full/libraries/JoinSplitFeeValidation.sol:JoinSplitFeeValidation";
 const MEV_COMMIT_LIB_FQN = "contracts/_full/libraries/MevCommitReveal.sol:MevCommitReveal";
-
 /** Deploy external libraries required to link Reduced / Upgradeable pool impls. */
 export async function deployUpgradeablePoolLibraries() {
   const FeeLib = await ethers.getContractFactory(JOIN_SPLIT_FEE_LIB_FQN);
@@ -26,3 +25,12 @@ export async function getReducedPoolFactory(signer?: { address: string }) {
   const factory = await ethers.getContractFactory("ShieldedPoolUpgradeableReduced", { libraries });
   return signer ? factory.connect(signer) : factory;
 }
+
+export {
+  assertCanonicalAddress,
+  assertExpectedChainId,
+  assertOffchainOraclePolicy,
+  getNetworkAddresses,
+  requireBnbUsdFeedForChain,
+  resolveProductionOracleAndDex,
+} from "./networkConfig";

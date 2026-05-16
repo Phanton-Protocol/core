@@ -6,8 +6,9 @@
   "scripts": {
     "compile": "hardhat compile",
     "compile:full": "HH_FULL=1 hardhat compile",
-    "test": "HH_FULL=1 hardhat test",
-    "test:contracts": "HH_FULL=1 hardhat test",
+    "test": "HH_FULL=1 hardhat compile && node scripts/checkBytecodeSize.cjs && HH_FULL=1 hardhat test",
+    "test:contracts": "HH_FULL=1 hardhat compile && node scripts/checkBytecodeSize.cjs && HH_FULL=1 hardhat test",
+    "check:bytecode": "node scripts/checkBytecodeSize.cjs",
     "test:m6": "HH_FULL=1 hardhat test test/m6-e2e-local-gate.test.cjs",
     "deploy:testnet": "HH_FULL=1 hardhat run scripts/deploy/deploy-core.ts --network bscTestnet",
     "deploy:testnet:reduced": "HH_FULL=1 hardhat run scripts/deploy/deploy-pathb-reduced.ts --network bscTestnet",

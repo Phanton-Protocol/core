@@ -173,7 +173,7 @@ describe("Module 1 — ShieldedPoolUpgradeable upgrade auth (Fix #1 + #3)", func
     // and reverts from the previous owner
     await expect(
       pool.connect(deployer).setComplianceModule(await fo.getAddress())
-    ).to.be.revertedWith("Ownable: caller is not the owner");
+    ).to.be.revertedWithCustomError(pool, "NotTimelock");
   });
 
   it("setComplianceModule cannot be called by the RelayerRegistry anymore (Fix #7)", async function () {
@@ -185,7 +185,7 @@ describe("Module 1 — ShieldedPoolUpgradeable upgrade auth (Fix #1 + #3)", func
     const [, alice] = await ethers.getSigners();
     await expect(
       pool.connect(alice).setComplianceModule(registryAddr)
-    ).to.be.revertedWith("Ownable: caller is not the owner");
+    ).to.be.revertedWithCustomError(pool, "NotAuthorized");
   });
 
   it("implementation cannot be initialized directly (Fix #9)", async function () {

@@ -1,8 +1,27 @@
 import hre from "hardhat";
+import {
+  assertExpectedChainId,
+  assertChainalysisOracleDeployed,
+  assertProductionNetworkBinding,
+  requireBnbUsdFeedForChain,
+  requireGovernanceTimelockAddress,
+} from "./networkConfig";
+import { getDeployProfile } from "./deployInfrastructure";
 
-const { ethers } = hre;
+const { ethers, network } = hre;
 
 async function main() {
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  const deployProfile = getDeployProfile();
+  assertProductionNetworkBinding(chainId, deployProfile);
+  const expectedChainId = String(process.env.EXPECTED_CHAIN_ID || "").trim();
+  if (expectedChainId) {
+    assertExpectedChainId(chainId, Number(expectedChainId));
+  }
+  requireBnbUsdFeedForChain(chainId);
+  const timelockAddr = requireGovernanceTimelockAddress();
+  console.log("[configure-reduced-stack] network:", network.name, "chainId:", chainId);
+
   const poolAddr = String(process.env.REDUCED_POOL_ADDRESS || "").trim();
   const feeOracleAddr = String(process.env.REDUCED_FEE_ORACLE_ADDRESS || "").trim();
   const relayerRegistryAddr = String(process.env.REDUCED_RELAYER_REGISTRY_ADDRESS || "").trim();
@@ -16,6 +35,29 @@ async function main() {
   }
 
   const pool = await ethers.getContractAt("ShieldedPoolUpgradeableReduced", poolAddr);
+  const feeOracle = await ethers.getContractAt("FeeOracle", feeOracleAddr);
+
+  const chainalysisOracle = String(process.env.CHAINALYSIS_ORACLE_ADDRESS || "").trim();
+  if (deployProfile === "production" && chainalysisOracle) {
+    await assertChainalysisOracleDeployed(chainalysisOracle, ethers.provider);
+  }
+
+  const complianceAddr = String(process.env.COMPLIANCE_MODULE_ADDRESS || "").trim();
+  if (complianceAddr && chainalysisOracle) {
+    const cmPre = await ethers.getContractAt("ComplianceModule", complianceAddr);
+    await assertChainalysisOracleDeployed(chainalysisOracle, ethers.provider);
+    const cfg = await cmPre.config();
+    const curOracle = cfg.chainalysisOracle ?? cfg[3];
+    if (!curOracle || curOracle === ethers.ZeroAddress) {
+      await (await cmPre.setChainalysisOracle(chainalysisOracle)).wait();
+      console.log("[configure-reduced-stack] ComplianceModule oracle set (bootstrap)");
+    }
+  }
+
+  if (!(await feeOracle.timelock())) {
+    await (await feeOracle.initializeTimelock(timelockAddr)).wait();
+    console.log("[configure-reduced-stack] FeeOracle timelock:", timelockAddr);
+  }
 
   const DepositHandler = await ethers.getContractFactory("DepositHandler");
   const depositHandler = await DepositHandler.deploy(poolAddr, feeOracleAddr, relayerRegistryAddr);
@@ -32,7 +74,7 @@ async function main() {
   await (await pool.setDepositHandler(await depositHandler.getAddress())).wait();
   // Path-B Reduced pool executes join-split inline; SwapHandler is not wired on Reduced.
   await (await pool.setWithdrawHandler(await withdrawHandler.getAddress())).wait();
-  await (await pool.setSwapAdaptor(swapAdaptorAddr)).wait();
+  // swapAdaptor is set in pool.initialize(); post-bootstrap changes require UUPS upgrade via timelock.
 
   const [deployer] = await ethers.getSigners();
   const probe = 10n ** 18n;
@@ -53,6 +95,14 @@ async function main() {
   console.log("depositHandler:", await depositHandler.getAddress());
   console.log("swapHandler:", await swapHandler.getAddress());
   console.log("withdrawHandler:", await withdrawHandler.getAddress());
+
+  if (complianceAddr) {
+    const cm = await ethers.getContractAt("ComplianceModule", complianceAddr);
+    if (!(await cm.timelock())) {
+      await (await cm.initializeTimelock(timelockAddr)).wait();
+      console.log("[configure-reduced-stack] ComplianceModule timelock:", timelockAddr);
+    }
+  }
 }
 
 main().catch((err) => {

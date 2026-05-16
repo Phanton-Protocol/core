@@ -11,6 +11,11 @@
 import hre from "hardhat";
 import { deployVerifiersAndSwapAdaptor } from "./deployInfrastructure";
 import { deploymentTxHash, saveDeployment } from "./deploymentRecord";
+import {
+  assertExperimentalDeployBlocked,
+  assertOffchainOraclePolicy,
+  requireBnbUsdFeedForChain,
+} from "./networkConfig";
 
 const { ethers, network } = hre;
 
@@ -23,6 +28,7 @@ async function main() {
   console.log("DEPLOY_PROFILE:", process.env.DEPLOY_PROFILE || "dev");
 
   const profile = (process.env.DEPLOY_PROFILE || "dev").toLowerCase();
+  assertExperimentalDeployBlocked();
   const infra = await deployVerifiersAndSwapAdaptor();
   if (profile === "staging" || profile === "production") {
     if (infra.mockJoinSplit || infra.mockThreshold || infra.mockSwapAdaptor) {
@@ -40,15 +46,14 @@ async function main() {
   await feeOracle.waitForDeployment();
   const feeOracleAddr = await feeOracle.getAddress();
   const offchainOracle = String(process.env.OFFCHAIN_ORACLE_ADDRESS || "").trim();
+  assertOffchainOraclePolicy(Number(chainId), offchainOracle);
   if (offchainOracle) {
     await (await feeOracle.setOffchainOracle(offchainOracle)).wait();
     console.log("FeeOracle.offchainOracle:", offchainOracle);
   }
-  const bnbUsdFeed = String(process.env.BNB_USD_FEED || "").trim();
-  if (bnbUsdFeed) {
-    await (await feeOracle.setPriceFeed(ethers.ZeroAddress, bnbUsdFeed)).wait();
-    console.log("FeeOracle BNB/USD feed:", bnbUsdFeed);
-  }
+  const bnbUsdFeed = requireBnbUsdFeedForChain(Number(chainId));
+  await (await feeOracle.setPriceFeed(ethers.ZeroAddress, bnbUsdFeed)).wait();
+  console.log("FeeOracle BNB/USD feed:", bnbUsdFeed);
 
   const RelayerRegistry = await ethers.getContractFactory("RelayerRegistry");
   const relayerRegistry = await RelayerRegistry.deploy();

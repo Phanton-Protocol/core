@@ -3,7 +3,6 @@ const { ethers } = require("hardhat");
 const JOIN_SPLIT_FEE_LIB_FQN =
   "contracts/_full/libraries/JoinSplitFeeValidation.sol:JoinSplitFeeValidation";
 const MEV_COMMIT_LIB_FQN = "contracts/_full/libraries/MevCommitReveal.sol:MevCommitReveal";
-
 let cachedIntentLib = null;
 let cachedJoinSplitFeeLib = null;
 let cachedNetworkKey = null;

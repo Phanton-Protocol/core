@@ -12,7 +12,10 @@ import "../types/Types.sol";
  * @title PancakeSwapAdaptor
  * @notice Adaptor for executing swaps on PancakeSwap V2 (spot reserves).
  * @dev **Spot pricing only — no TWAP.** Swaps use router `getAmountsOut` / exact-in swaps at execution time.
- *      Production must pair with proof-bound `minAmountOut`, commit-reveal, and private relayer submission.
+ *      AMM reserves move block-to-block; large trades and mempool-visible txs remain sandwichable even
+ *      with `minAmountOut`. Production must pair with proof-bound `minAmountOut`, {MevCommitReveal},
+ *      and private relayer submission where possible. Monitor failed swaps and reserve drift.
+ *      Router and WBNB are **immutable** after deploy (no owner router hijack).
  * @dev **Module 2:** `nonReentrant` on value-moving entry points; SafeERC20 for token pulls/payouts.
  */
 contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
@@ -21,9 +24,8 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
     /// @notice Max hops in swap path (DoS guard on calldata-decoded paths).
     uint256 public constant MAX_SWAP_PATH_LENGTH = 3;
 
-    // PancakeSwap V2 Router addresses
-    address public router;
-    address public wbnb;
+    address public immutable router;
+    address public immutable wbnb;
 
     address public owner;
 
@@ -40,6 +42,8 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
     }
 
     constructor(address _router, address _wbnb) {
+        require(_router != address(0), "PancakeSwapAdaptor: zero router");
+        require(_wbnb != address(0), "PancakeSwapAdaptor: zero wbnb");
         owner = msg.sender;
         router = _router;
         wbnb = _wbnb;
@@ -127,13 +131,6 @@ contract PancakeSwapAdaptor is IPancakeSwapAdaptor, ReentrancyGuard {
         } else {
             IERC20(token).safeTransfer(owner, amount);
         }
-    }
-
-    function setRouter(address _router, address _wbnb) external onlyOwner {
-        require(_router != address(0), "PancakeSwapAdaptor: zero router");
-        require(_wbnb != address(0), "PancakeSwapAdaptor: zero wbnb");
-        router = _router;
-        wbnb = _wbnb;
     }
 
     function _getPath(SwapParams calldata swapParams) internal view returns (address[] memory) {

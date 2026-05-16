@@ -50,7 +50,6 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     error NotTimelock();
     error NotEmergencyAdmin();
     error EmergencyPausedErr();
-    error InvalidSweepAmount();
     error ZeroAddr();
     error ERC20NotAllowlisted(address token);
     error ProbeAmountRequired();
@@ -62,7 +61,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     // ============ Constants ============
-    uint256 public constant MAX_TREE_DEPTH = 10; // Reduced from 20 to save space
+    uint256 private constant MERKLE_DEPTH = 10;
 
     // ============ Core State Variables ============
     IVerifier public verifier;
@@ -78,6 +77,9 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     bytes32 public merkleRoot;
     /// @notice Roots ever produced by `tree.insert` (and genesis). Spends may use any checkpointed root for which a valid proof exists.
     mapping(bytes32 => bool) public validMerkleRoots;
+    /// @notice Leaf count (`tree.nextIndex`). Depth-10 tree caps at 1024 commitments; full tree
+    ///         reverts {MerkleTreeFull}. Ops should monitor this counter and schedule a UUPS
+    ///         migration (new implementation + root policy) before exhaustion.
     uint256 public commitmentCount;
     mapping(uint256 => bytes32) public commitments;
     
@@ -315,23 +317,42 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         }
     }
 
+    function _insertCommitment(bytes32 commitment) internal returns (uint256 index) {
+        bytes32 newRoot;
+        (index, newRoot) = tree.insert(commitment);
+        commitments[index] = commitment;
+        commitmentCount = tree.nextIndex;
+        _setMerkleRoot(newRoot);
+    }
+
     function _requireSpendableMerkleRoot(bytes32 root) internal view {
         if (!validMerkleRoots[root]) revert SP();
     }
 
+    function _gateIntegration(address current) internal view {
+        if (current != address(0) && timelock != address(0)) {
+            if (msg.sender != timelock) revert NotTimelock();
+        } else if (msg.sender != owner()) {
+            revert SP();
+        }
+    }
+
     // ============ Setters ============
-    function setDepositHandler(address _depositHandler) external onlyOwner {
+    function setDepositHandler(address _depositHandler) external {
         if (_depositHandler == address(0)) revert ZeroAddr();
+        _gateIntegration(depositHandler);
         depositHandler = _depositHandler;
     }
 
-    function setWithdrawHandler(address _withdrawHandler) external onlyOwner {
+    function setWithdrawHandler(address _withdrawHandler) external {
         if (_withdrawHandler == address(0)) revert ZeroAddr();
+        _gateIntegration(withdrawHandler);
         withdrawHandler = _withdrawHandler;
     }
 
-    function setFeeOracle(address _feeOracle) external onlyOwner {
+    function setFeeOracle(address _feeOracle) external {
         if (_feeOracle == address(0)) revert ZeroAddr();
+        _gateIntegration(address(feeOracle));
         feeOracle = IFeeOracle(_feeOracle);
     }
 
@@ -360,14 +381,10 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _registerAsset(assetID, token);
     }
 
-    function setComplianceModule(address _complianceModule) external onlyOwner {
+    function setComplianceModule(address _complianceModule) external {
         if (_complianceModule == address(0)) revert ZeroAddr();
+        _gateIntegration(complianceModuleAddress);
         complianceModuleAddress = _complianceModule;
-    }
-
-    function setSwapAdaptor(address _swapAdaptor) external onlyOwner {
-        if (_swapAdaptor == address(0)) revert ZeroAddr();
-        swapAdaptor = IPancakeSwapAdaptor(_swapAdaptor);
     }
 
     /**
@@ -388,8 +405,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         uint256 available = gasReserve;
         uint256 sweep = maxWei == 0 ? available : maxWei;
         if (sweep > available) sweep = available;
-        if (sweep == 0) revert InvalidSweepAmount();
-        if (address(this).balance < sweep) revert InvalidSweepAmount();
+        if (sweep == 0) revert SP();
+        if (address(this).balance < sweep) revert SP();
         gasReserve -= sweep;
         (bool ok,) = to.call{value: sweep}("");
         if (!ok) revert SP();
@@ -404,19 +421,10 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (msg.sender != timelock || timelock == address(0)) revert NotTimelock();
         if (to == address(0)) revert ZeroAddr();
         uint256 b = address(this).balance;
-        if (b == 0) revert InvalidSweepAmount();
+        if (b == 0) revert SP();
         gasReserve = 0;
         (bool ok,) = to.call{value: b}("");
         if (!ok) revert SP();
-    }
-
-    /**
-     * @notice Owner reset for wallet note pointer metadata.
-     * @dev Does not modify commitments/nullifiers; only clears convenience per-wallet pointers.
-     */
-    function resetUserNote(address user) external onlyOwner {
-        userNotes[user] = bytes32(0);
-        userNoteAssetID[user] = 0;
     }
 
     // ============ Deposit Functions ============
@@ -511,10 +519,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         _updateUserNoteOnDeposit(depositor, commitment, assetID);
 
         // CRITICAL: Use tree.insert() (MiMC7) - same as swaps/withdraws
-        (uint256 index, bytes32 newRoot) = tree.insert(commitment);
-        commitments[index] = commitment;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
+        uint256 index = _insertCommitment(commitment);
 
         // Deposit fee is always the BNB attached beyond the deposit principal (native) or `msg.value` on ERC20 relay (BNB).
         uint256 feeAmount = depositFeeBNB;
@@ -547,6 +552,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     /// @notice Commit to a join-split before public reveal (required for production swaps).
     function commitSwap(bytes32 commitmentHash, uint256 deadline) external nonReentrant {
+        if (emergencyPaused) revert EmergencyPausedErr();
         MevCommitReveal.commit(swapCommitmentCommitter, swapCommitmentDeadline, commitmentHash, deadline, msg.sender);
     }
 
@@ -592,7 +598,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merkleRoot,
                 JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
                 inputs.merklePathIndices,
-                MAX_TREE_DEPTH
+                MERKLE_DEPTH
             )
         ) {
             revert SP();
@@ -631,15 +637,8 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
         if (dexOut < inputs.minOutputAmountSwap) revert SP();
         if (inputs.minOutputAmountSwap == 0) revert SP();
 
-        (uint256 swapIndex, bytes32 swapRoot) = tree.insert(inputs.outputCommitmentSwap);
-        commitments[swapIndex] = inputs.outputCommitmentSwap;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(swapRoot);
-
-        (uint256 changeIndex, bytes32 changeRoot) = tree.insert(inputs.outputCommitmentChange);
-        commitments[changeIndex] = inputs.outputCommitmentChange;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(changeRoot);
+        uint256 swapIndex = _insertCommitment(inputs.outputCommitmentSwap);
+        uint256 changeIndex = _insertCommitment(inputs.outputCommitmentChange);
 
         nullifiers[inputs.nullifier] = true;
 
@@ -753,7 +752,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
                 inputs.merkleRoot,
                 JoinSplitPublicInputValidation.merklePathToBytes32(inputs.merklePath),
                 inputs.merklePathIndices,
-                MAX_TREE_DEPTH
+                MERKLE_DEPTH
             )
         ) {
             revert SP();
@@ -782,10 +781,7 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
             revert SP();
         }
 
-        (uint256 newIndex, bytes32 newRoot) = tree.insert(inputs.outputCommitmentChange);
-        commitments[newIndex] = inputs.outputCommitmentChange;
-        commitmentCount = tree.nextIndex;
-        _setMerkleRoot(newRoot);
+        uint256 newIndex = _insertCommitment(inputs.outputCommitmentChange);
 
         nullifiers[inputs.nullifier] = true;
 
@@ -868,15 +864,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     }
 
     function _checkCompliance(address account) internal view {
-        if (complianceModuleAddress == address(0)) return;
-        (bool success, bytes memory data) = complianceModuleAddress.staticcall(
-            abi.encodeWithSignature("isSanctioned(address)", account)
-        );
-        if (success && data.length > 0 && abi.decode(data, (bool))) revert SP();
-        (success, data) = complianceModuleAddress.staticcall(
-            abi.encodeWithSignature("isBlocked(address)", account)
-        );
-        if (success && data.length > 0 && abi.decode(data, (bool))) revert SP();
+        address mod = complianceModuleAddress;
+        if (mod == address(0)) return;
+        (bool ok, bytes memory data) = mod.staticcall(abi.encodeWithSignature("isSanctioned(address)", account));
+        if (!ok || (data.length > 0 && abi.decode(data, (bool)))) revert SP();
+        (ok, data) = mod.staticcall(abi.encodeWithSignature("isBlocked(address)", account));
+        if (!ok || (data.length > 0 && abi.decode(data, (bool)))) revert SP();
     }
 
     /// @dev CEI: protocol fee payout only after Merkle/nullifier effects on handler-backed paths.

@@ -325,6 +325,7 @@ describe("Module 5 — gas / DoS hardening", function () {
 
   describe("Merkle tree capacity", function () {
     it("exposes capacity views and reverts MerkleTreeFull when exhausted", async function () {
+      this.timeout(180000);
       const { pool, deployer } = await deployReducedStack();
       const cap = 1024;
       expect(await pool.commitmentCount()).to.equal(0n);
@@ -335,11 +336,14 @@ describe("Module 5 — gas / DoS hardening", function () {
         });
       }
       expect(await pool.commitmentCount()).to.equal(1024n);
+      const IMT = await ethers.getContractFactory(
+        "contracts/_full/libraries/IncrementalMerkleTree.sol:IncrementalMerkleTree"
+      );
       await expect(
         pool.connect(deployer).deposit(ethers.ZeroAddress, 1n, ethers.keccak256(ethers.toUtf8Bytes("overflow")), 0n, {
           value: 1n,
         })
-      ).to.be.reverted;
+      ).to.be.revertedWithCustomError(IMT, "MerkleTreeFull");
     });
   }).timeout(180000);
 

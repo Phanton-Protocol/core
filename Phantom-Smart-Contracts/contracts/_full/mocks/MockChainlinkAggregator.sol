@@ -7,21 +7,33 @@ pragma solidity ^0.8.20;
 contract MockChainlinkAggregator {
     int256 public answer;
     uint8 public constant decimals = 8;
-    uint256 public constant updatedAt = type(uint256).max;
+    uint256 public updatedAt;
+    uint80 public roundId = 1;
+    uint80 public answeredInRound = 1;
 
     constructor(int256 _answer) {
         answer = _answer;
+        updatedAt = block.timestamp;
     }
 
     function setAnswer(int256 _answer) external {
         answer = _answer;
     }
 
+    function setUpdatedAt(uint256 _updatedAt) external {
+        updatedAt = _updatedAt;
+    }
+
+    function setRoundData(uint80 _roundId, uint80 _answeredInRound) external {
+        roundId = _roundId;
+        answeredInRound = _answeredInRound;
+    }
+
     function latestRoundData()
         external
         view
-        returns (uint80 roundId, int256 ans, uint256 startedAt, uint256 upd, uint80 answeredInRound)
+        returns (uint80 rid, int256 ans, uint256 startedAt, uint256 upd, uint80 air)
     {
-        return (1, answer, 0, block.timestamp, 1);
+        return (roundId, answer, 0, updatedAt, answeredInRound);
     }
 }

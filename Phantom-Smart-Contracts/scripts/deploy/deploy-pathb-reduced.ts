@@ -4,6 +4,14 @@ import hre from "hardhat";
 import { deployVerifiersAndSwapAdaptor } from "./deployInfrastructure";
 import { deployCoreGovernance } from "./deployGovernance";
 import { getReducedPoolFactory } from "./joinSplitFeeValidationLink";
+import {
+  assertExpectedChainId,
+  assertExperimentalDeployBlocked,
+  assertOffchainOraclePolicy,
+  assertProductionNetworkBinding,
+  requireBnbUsdFeedForChain,
+} from "./networkConfig";
+import { getDeployProfile } from "./deployInfrastructure";
 
 const { ethers, network } = hre;
 
@@ -25,7 +33,14 @@ async function main() {
   const stakeAmountHuman = String(process.env.STAKE_AMOUNT_SHDW || "1000").trim();
   const transferAmountHuman = String(process.env.TRANSFER_AMOUNT_SHDW || "10000").trim();
   const existingOffchainOracle = String(process.env.EXISTING_OFFCHAIN_ORACLE || "").trim();
-  const bnbUsdFeed = String(process.env.BNB_USD_FEED || "").trim();
+  const deployProfile = getDeployProfile();
+  assertExperimentalDeployBlocked();
+  assertProductionNetworkBinding(chainId, deployProfile);
+  const expectedChainId = String(process.env.EXPECTED_CHAIN_ID || "").trim();
+  if (expectedChainId) {
+    assertExpectedChainId(chainId, Number(expectedChainId));
+  }
+  assertOffchainOraclePolicy(chainId, existingOffchainOracle);
 
   if (!walletBPrivateKey) {
     throw new Error("WALLET_B_PRIVATE_KEY is required");
@@ -77,7 +92,8 @@ async function main() {
     await tx.wait();
     console.log("[path-b] FeeOracle.offchainOracle set:", existingOffchainOracle);
   }
-  if (bnbUsdFeed) {
+  const bnbUsdFeed = requireBnbUsdFeedForChain(chainId);
+  {
     const tx = await feeOracle.setPriceFeed(ethers.ZeroAddress, bnbUsdFeed);
     await tx.wait();
     console.log("[path-b] FeeOracle BNB/USD feed set:", bnbUsdFeed);
