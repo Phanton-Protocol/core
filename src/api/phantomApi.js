@@ -195,6 +195,38 @@ export async function complianceByOrder(orderId) {
   return req(`/compliance/internal/order/${orderId}/decisions`);
 }
 
+export async function getInternalMatchEnrollment(address) {
+  return req(`/internal-match/enrollment/${address}`);
+}
+
+export async function prepareInternalMatchEnrollment(payload) {
+  return req("/internal-match/enroll-prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function syncInternalMatchEnrollment(payload) {
+  return req("/internal-match/enroll", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getInternalMatchStatus(matchHash) {
+  return req(`/internal-match/${matchHash}/status`);
+}
+
+export async function getInternalMatchPendingNotes(owner) {
+  return req(`/internal-match/pending-notes/${owner}`);
+}
+
+export async function getInternalMatchWithdrawPlan(owner) {
+  return req(`/internal-match/withdraw-plan/${owner}`);
+}
+
 export async function complianceByMatch(matchHash) {
   return req(`/compliance/internal/match/${matchHash}/decisions`);
 }

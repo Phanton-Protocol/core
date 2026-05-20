@@ -48,7 +48,16 @@ const { computeCanonicalAlignmentWarnings } = require("./configAlignment");
 const { createInternalOrderRouter } = require("./internalOrderRoutes");
 const { createInternalMatchEnrollmentRouter } = require("./internalMatchEnrollmentRoutes");
 const { createSettlementCoordinator } = require("./settlementCoordinator");
-const { getMatchLedgerStatus, getPendingNotes } = require("./pendingNoteLedger");
+const {
+  getMatchLedgerStatus,
+  getPendingNotes,
+  getWithdrawPlan,
+  getPendingNoteBookkeeping,
+  validatePendingNoteAgainstProof,
+  markPendingNotesWithdrawn,
+} = require("./pendingNoteLedger");
+const { encryptEnrollmentMetadata: encryptEnrollmentMetadataForApi } = require("./enrollmentCipher");
+const { getInternalMatchEnrollmentByUser: getInternalMatchEnrollmentByUserForApi } = require("./db");
 const { createComplianceEngine } = require("./complianceEngine");
 const {
   assertRelayerRegistered,
@@ -1437,6 +1446,21 @@ const withdrawSchema = z.object({
     encryptedPayload: z.string().optional(),
     noteHints: z.any().optional(),
     ownerAddress: z.string().optional(),
+    /**
+     * M8 — Path B internal match. When set, the relayer:
+     *   1. Pre-validates the proof's `protocolFee` matches the pending note's
+     *      `protocolFeeAccrued` and the proof's `outputAmountSwap`/`swapAmount`
+     *      matches the note's `netAmount` (off-chain ledger ↔ on-chain proof gate).
+     *   2. After tx confirms, marks the pending notes `status='withdrawn'` and
+     *      appends a hash-chained audit entry tying the off-chain ledger to
+     *      `txHash`.
+     */
+    internalMatch: z
+      .object({
+        pendingNoteIds: z.array(z.string().min(1)).min(1).optional(),
+      })
+      .partial()
+      .optional(),
   }).refine(
     (d) => (d.recipient && String(d.recipient).trim()) || (d.finalRecipient && String(d.finalRecipient).trim()),
     { message: "withdrawData.recipient or withdrawData.finalRecipient is required" }
@@ -2820,6 +2844,97 @@ app.get("/internal-match/pending-notes/:owner", requireSeeForSensitiveFlow, (req
   if (!db) return res.status(503).json({ error: "db_not_configured" });
   const notes = getPendingNotes(db, ethers.getAddress(owner));
   return res.json({ owner: ethers.getAddress(owner), pendingNotes: notes });
+});
+
+/**
+ * M8 — withdraw planner.
+ *
+ * Returns the subset of pending notes that the user is currently allowed to
+ * spend at withdraw time, with the off-chain bookkeeping (net amount, accrued
+ * protocol fee, role) the join-split proof must reproduce.
+ *
+ * V2_CIRCUIT_NEEDED: the existing join-split circuit cannot natively express
+ * the matched-output amount transformation without an internal-match settle on
+ * chain, so the actual ZK input is still the user's PRE-MATCH deposit (or
+ * change) note. This endpoint surfaces the operator-side ledger row so the
+ * client knows how much to ask the proof to release / what fee to honor.
+ */
+app.get("/internal-match/withdraw-plan/:owner", requireSeeForSensitiveFlow, (req, res) => {
+  const owner = String(req.params.owner || "").trim();
+  if (!owner || !ethers.isAddress(owner)) return res.status(400).json({ error: "owner_address_required" });
+  if (!db) return res.status(503).json({ error: "db_not_configured" });
+  const ownerAddr = ethers.getAddress(owner);
+  const plan = getWithdrawPlan(db, ownerAddr);
+  return res.json({
+    owner: ownerAddr,
+    v2CircuitNeeded: true,
+    v2CircuitNote:
+      "v1 withdraw spends user's pre-match deposit note; off-chain ledger fee/netAmount enforced by relayer pre-submit. v2 ZK circuit will natively spend pending output notes.",
+    pendingNotes: plan,
+  });
+});
+
+/**
+ * M8 — enrollment prep.
+ *
+ * The on-chain payload uses AES-256-GCM under the protocol owner's symmetric
+ * decrypt key (`PHANTOM_PROTOCOL_OWNER_DECRYPT_KEY_HEX`). We refuse to expose
+ * that key to the browser, so this endpoint accepts the user-supplied opt-in
+ * metadata and returns:
+ *  - `enrollmentId` (random 32-byte hex)
+ *  - `encryptedPayload` (hex-prefixed)
+ *  - `payloadHash` (`keccak256(encryptedPayload)`)
+ *  - `messageHash` (`keccak256(abi.encodePacked(enrollmentId, payloadHash))`)
+ *
+ * The frontend then asks the wallet to `personal_sign(messageHash)` and
+ * calls `enrollInternalMatch(enrollmentId, encryptedPayload, userSig)` on the
+ * pool. After confirmation the frontend POSTs `/internal-match/enroll` with
+ * the tx hash so the relayer DB row gates `/intent/internal`.
+ */
+app.post("/internal-match/enroll-prepare", async (req, res) => {
+  if (!db) return res.status(503).json({ error: "db_not_configured" });
+  try {
+    const body = req.body || {};
+    const userAddress = String(body.userAddress || "").trim();
+    if (!userAddress || !ethers.isAddress(userAddress)) {
+      return res.status(400).json({ error: "userAddress_required" });
+    }
+    const existing = getInternalMatchEnrollmentByUserForApi(db, ethers.getAddress(userAddress));
+    if (existing) {
+      return res.status(409).json({ error: "user_already_enrolled", enrollmentId: existing.enrollmentId });
+    }
+    const metadata = body.metadata && typeof body.metadata === "object" ? body.metadata : {};
+    const enrollmentId = "0x" + crypto.randomBytes(32).toString("hex");
+    const payloadObj = {
+      schema: "phantom.internal-match.enrollment.v1",
+      userAddress: ethers.getAddress(userAddress),
+      enrollmentId,
+      requestedAt: Date.now(),
+      metadata,
+    };
+    let encryptedBuf;
+    try {
+      encryptedBuf = encryptEnrollmentMetadataForApi(payloadObj);
+    } catch (e) {
+      return res.status(503).json({ error: "enrollment_encryption_unavailable", message: e.message });
+    }
+    const encryptedPayload = "0x" + encryptedBuf.toString("hex");
+    const payloadHash = ethers.keccak256(encryptedPayload);
+    const messageHash = ethers.solidityPackedKeccak256(
+      ["bytes32", "bytes32"],
+      [enrollmentId, payloadHash]
+    );
+    return res.json({
+      userAddress: ethers.getAddress(userAddress),
+      enrollmentId,
+      encryptedPayload,
+      payloadHash,
+      messageHash,
+      domain: { name: "PhantomInternalMatch.enrollment", version: "1" },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "enroll_prepare_failed", message: e?.message || String(e) });
+  }
 });
 
 app.get("/config", (req, res) => {
@@ -5147,6 +5262,61 @@ async function submitWithdraw(withdrawData) {
   const publicSignals = buildJoinSplitPublicSignals(pi);
   await assertRelayerLocalSnarkVerify(withdrawData.proofSnark || withdrawData.proof, publicSignals, "withdraw");
 
+  // M8 — Path B pending-note pre-flight (V2_CIRCUIT_NEEDED). Reject before any
+  // on-chain submit if the proof's fee/output amounts disagree with the
+  // off-chain ledger row for the matched pending note.
+  const pendingNoteRefs = Array.isArray(withdrawData.internalMatch?.pendingNoteIds)
+    ? withdrawData.internalMatch.pendingNoteIds.filter(Boolean)
+    : [];
+  const pendingNoteDetails = [];
+  if (pendingNoteRefs.length > 0) {
+    if (!db) {
+      const err = new Error("withdraw_pending_note_db_unavailable");
+      err.status = 503;
+      throw err;
+    }
+    let aggregateNet = 0n;
+    let aggregateFee = 0n;
+    for (const noteId of pendingNoteRefs) {
+      const detail = getPendingNoteBookkeeping(db, noteId);
+      if (!detail) {
+        const err = new Error("withdraw_pending_note_not_found");
+        err.status = 404;
+        err.details = { noteId };
+        throw err;
+      }
+      if (withdrawData.ownerAddress) {
+        const ownerLc = String(withdrawData.ownerAddress).toLowerCase();
+        if (detail.owner !== ownerLc) {
+          const err = new Error("withdraw_pending_note_owner_mismatch");
+          err.status = 403;
+          err.details = { noteId, expected: ownerLc, got: detail.owner };
+          throw err;
+        }
+      }
+      aggregateNet += BigInt(detail.bookkeeping?.netAmount || "0");
+      aggregateFee += BigInt(detail.bookkeeping?.protocolFeeAccrued || "0");
+      pendingNoteDetails.push(detail);
+    }
+    const aggregated = {
+      bookkeeping: {
+        netAmount: aggregateNet.toString(),
+        protocolFeeAccrued: aggregateFee.toString(),
+      },
+      status: "pending",
+    };
+    const validation = validatePendingNoteAgainstProof({
+      pendingNote: aggregated,
+      publicInputs: pi,
+    });
+    if (!validation.ok) {
+      const err = new Error(validation.reason || "withdraw_pending_note_validation_failed");
+      err.status = 400;
+      err.details = validation;
+      throw err;
+    }
+  }
+
   const skipValidatorQuorumWd =
     DEV_BYPASS_VALIDATORS ||
     (!RELAYER_REQUIRE_VALIDATOR_QUORUM && VALIDATOR_URLS.length === 0);
@@ -5362,6 +5532,20 @@ async function submitWithdraw(withdrawData) {
     }
   }
 
+  let pendingNotesFinalized = null;
+  let pendingNotesWarning = null;
+  if (pendingNoteRefs.length > 0 && db) {
+    try {
+      pendingNotesFinalized = markPendingNotesWithdrawn(
+        db,
+        pendingNoteRefs,
+        receipt.hash
+      );
+    } catch (e) {
+      pendingNotesWarning = e?.message || String(e);
+    }
+  }
+
   return {
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
@@ -5376,6 +5560,8 @@ async function submitWithdraw(withdrawData) {
     ...(shadowForward || {}),
     ...(module3Notes ? { module3Notes } : {}),
     ...(module3NotesWarning ? { module3NotesWarning } : {}),
+    ...(pendingNotesFinalized ? { internalMatch: pendingNotesFinalized } : {}),
+    ...(pendingNotesWarning ? { internalMatchWarning: pendingNotesWarning } : {}),
   };
 }
 

@@ -431,6 +431,19 @@ function initDbJson(dbPath) {
         const rows = loadTable("pending_notes").filter((r) => r.note_id !== noteId);
         rows.push({ note_id: noteId, owner, match_hash: matchHash, status, payload_enc: payloadEnc, input_note_id: inputNoteId, created_at: createdAt });
         saveTable("pending_notes", rows);
+      } else if (sqlLower.includes("update pending_notes set status")) {
+        const [status, withdrawTxHash, withdrawnAt, noteId] = args;
+        const rows = loadTable("pending_notes");
+        const idx = rows.findIndex((r) => r.note_id === noteId);
+        if (idx >= 0) {
+          rows[idx] = {
+            ...rows[idx],
+            status,
+            withdraw_tx_hash: withdrawTxHash ?? rows[idx].withdraw_tx_hash ?? null,
+            withdrawn_at: withdrawnAt ?? rows[idx].withdrawn_at ?? null,
+          };
+          saveTable("pending_notes", rows);
+        }
       } else if (sqlLower.includes("update matches") && sqlLower.includes("metadatajson")) {
         const [metadataJson, matchHash] = args;
         const rows = loadTable("matches");
@@ -523,6 +536,11 @@ function initDbJson(dbPath) {
       if (sqlLower.includes("from settlement_executions where executionid")) {
         const [executionId] = args;
         const row = loadTable("settlement_executions").find((r) => r.executionId === executionId);
+        return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from pending_notes where note_id")) {
+        const [noteId] = args;
+        const row = loadTable("pending_notes").find((r) => r.note_id === noteId);
         return row ? { ...row } : undefined;
       }
       return undefined;
@@ -933,11 +951,19 @@ function initDb(dbPath) {
         status TEXT NOT NULL,
         payload_enc TEXT NOT NULL,
         input_note_id TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        withdraw_tx_hash TEXT,
+        withdrawn_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_pending_notes_owner_status ON pending_notes(owner, status);
       CREATE INDEX IF NOT EXISTS idx_pending_notes_match ON pending_notes(match_hash);
     `);
+    try {
+      db.prepare("SELECT withdraw_tx_hash FROM pending_notes LIMIT 1").get();
+    } catch {
+      try { db.exec("ALTER TABLE pending_notes ADD COLUMN withdraw_tx_hash TEXT"); } catch {}
+      try { db.exec("ALTER TABLE pending_notes ADD COLUMN withdrawn_at INTEGER"); } catch {}
+    }
     return db;
   } catch (e) {
     console.warn("Using JSON file storage (better-sqlite3 unavailable on this system).");
@@ -1037,6 +1063,23 @@ function listPendingNotesByMatchHash(db, matchHash) {
   return db
     .prepare("SELECT * FROM pending_notes WHERE match_hash = ? ORDER BY created_at ASC, note_id ASC")
     .all(matchHash);
+}
+
+function getPendingNoteById(db, noteId) {
+  return db
+    .prepare("SELECT * FROM pending_notes WHERE note_id = ?")
+    .get(String(noteId)) || null;
+}
+
+function updatePendingNoteStatus(db, noteId, status, withdrawTxHash, withdrawnAt) {
+  db.prepare(
+    "UPDATE pending_notes SET status = ?, withdraw_tx_hash = ?, withdrawn_at = ? WHERE note_id = ?"
+  ).run(
+    String(status),
+    withdrawTxHash ? String(withdrawTxHash).toLowerCase() : null,
+    withdrawnAt != null ? Number(withdrawnAt) : null,
+    String(noteId)
+  );
 }
 
 function patchMatchMetadata(db, matchHash, patch) {
@@ -1712,6 +1755,8 @@ module.exports = {
   savePendingNote,
   listPendingNotesByOwner,
   listPendingNotesByMatchHash,
+  getPendingNoteById,
+  updatePendingNoteStatus,
   patchMatchMetadata,
   saveInternalOrder,
   updateInternalOrderState,

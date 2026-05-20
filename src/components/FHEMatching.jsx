@@ -1,16 +1,12 @@
-import { useState, useEffect, useMemo } from 'react';
+// M8 — refactored to consume `useInternalMatch` so the encrypted-order flow is
+// the single source of truth across `/trade` (ProtocolUserDapp internal tab)
+// and this legacy `/dapp` card. Behavior-preserving: same UI, same submit flow.
+
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ethers } from 'ethers';
-import {
-  getFhePublicKey,
-  encryptFhe,
-  createInternalIntent,
-  getRelayerConfig,
-} from '../api/phantomApi';
-import { buildInternalIntentRequest } from '../lib/internalMatchIntent.js';
+import useInternalMatch from '../hooks/useInternalMatch.js';
 
-// Fallback asset map (mirrors backend `bscTestnet.json`); replaced by
-// `/config.assets` whenever the relayer reports it.
 const FALLBACK_ASSETS = [
   { assetId: '0', symbol: 'WBNB' },
   { assetId: '1', symbol: 'BUSD' },
@@ -18,132 +14,53 @@ const FALLBACK_ASSETS = [
 ];
 
 function FHEMatching() {
-  const [fheAvailable, setFheAvailable] = useState(null);
-  const [config, setConfig] = useState(null);
-  const [configError, setConfigError] = useState(null);
+  const [signer, setSigner] = useState(null);
+  const [signerAddress, setSignerAddress] = useState(null);
   const [orderSide, setOrderSide] = useState('sell');
   const [assetIn, setAssetIn] = useState('0');
   const [assetOut, setAssetOut] = useState('1');
   const [amount, setAmount] = useState('');
   const [price, setPrice] = useState('');
-  const [status, setStatus] = useState('');
-  const [error, setError] = useState('');
-  const [orderId, setOrderId] = useState(null);
-  const [matchIntentBound, setMatchIntentBound] = useState(false);
-  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function connect() {
+      if (typeof window === 'undefined' || !window.ethereum) return;
+      try {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send('eth_requestAccounts', []);
+        const s = await provider.getSigner();
+        const addr = await s.getAddress();
+        if (cancelled) return;
+        setSigner(s);
+        setSignerAddress(addr);
+      } catch {
+        // No wallet — render fallback UI below.
+      }
+    }
+    connect();
+    return () => { cancelled = true; };
+  }, []);
+
+  const im = useInternalMatch({ signer, address: signerAddress, autoFetch: true });
+  const {
+    config,
+    configError,
+    fheAvailable,
+    isEnrolled,
+    enroll,
+    submitInternalOrder,
+    status,
+    error,
+    busy,
+    lastOrder,
+    privacyCopy,
+  } = im;
 
   const assets = useMemo(() => {
     const list = Array.isArray(config?.assets) ? config.assets : [];
     return list.length ? list : FALLBACK_ASSETS;
   }, [config?.assets]);
-
-  useEffect(() => {
-    let cancelled = false;
-    getFhePublicKey()
-      .then(() => { if (!cancelled) setFheAvailable(true); })
-      .catch(() => { if (!cancelled) setFheAvailable(false); });
-    getRelayerConfig()
-      .then((cfg) => { if (!cancelled) setConfig(cfg); })
-      .catch((e) => { if (!cancelled) setConfigError(e?.message || String(e)); });
-    return () => { cancelled = true; };
-  }, []);
-
-  async function getBrowserSigner() {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      throw new Error('No injected wallet found. Connect MetaMask (or another EIP-1193 wallet) and retry.');
-    }
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    await provider.send('eth_requestAccounts', []);
-    const signer = await provider.getSigner();
-    return signer;
-  }
-
-  function symbolForAssetId(id) {
-    const hit = assets.find((a) => String(a.assetId) === String(id));
-    return hit ? String(hit.symbol).toUpperCase() : `ASSET#${id}`;
-  }
-
-  const handleSubmitOrder = async () => {
-    setError('');
-    setOrderId(null);
-    setMatchIntentBound(false);
-    setStatus('Preparing order…');
-    const amountNum = Number(amount);
-    const priceNum = Number(price);
-    if (!amount || !Number.isFinite(amountNum) || amountNum <= 0) {
-      setError('Invalid amount');
-      setStatus('');
-      return;
-    }
-    if (!price || !Number.isFinite(priceNum) || priceNum <= 0) {
-      setError('Invalid price');
-      setStatus('');
-      return;
-    }
-    if (assetIn === assetOut) {
-      setError('Asset in and asset out must differ.');
-      setStatus('');
-      return;
-    }
-    if (!config?.chainId || !config?.addresses?.shieldedPool) {
-      setError('Relayer config missing chainId / shieldedPool. Cannot sign intent.');
-      setStatus('');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      setStatus('Encrypting amount + price via FHE service…');
-      const encResult = await encryptFhe({
-        amount: amountNum,
-        limitPrice: priceNum,
-        side: orderSide,
-        assetIn,
-        assetOut,
-        timestamp: Date.now(),
-      });
-      const ciphertext = encResult?.ciphertext ?? encResult?.encrypted ?? encResult;
-      if (!ciphertext || (typeof ciphertext === 'object' && !Object.keys(ciphertext).length)) {
-        throw new Error('FHE encryption unavailable. Order submission is blocked.');
-      }
-
-      setStatus('Awaiting wallet signature 1/2 (operator intent)…');
-      const signer = await getBrowserSigner();
-
-      setStatus('Awaiting wallet signature 2/2 (FHE match intent)…');
-      const expirySec = Math.floor(Date.now() / 1000) + 3600;
-      const operatorNonce = Date.now();
-      const matchNonce = operatorNonce + 1;
-      const body = await buildInternalIntentRequest({
-        signer,
-        chainId: config.chainId,
-        verifyingContract: config.addresses.shieldedPool,
-        side: orderSide,
-        baseAsset: symbolForAssetId(assetIn),
-        quoteAsset: symbolForAssetId(assetOut),
-        inputAssetID: assetIn,
-        outputAssetID: assetOut,
-        amount: String(BigInt(Math.round(amountNum))),
-        limitPrice: String(BigInt(Math.round(priceNum))),
-        expirySec,
-        operatorNonce,
-        matchNonce,
-        ciphertext,
-      });
-
-      setStatus('Submitting signed intent to relayer…');
-      const result = await createInternalIntent(body);
-      setOrderId(result?.orderId ?? 'submitted');
-      setMatchIntentBound(Boolean(result?.matchIntentBound));
-      setStatus('Order submitted. Waiting for FHE-matched counterparty.');
-    } catch (e) {
-      const msg = e?.message || String(e);
-      setError(msg);
-      setStatus('');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   if (fheAvailable === null) {
     return (
@@ -164,6 +81,14 @@ function FHEMatching() {
     );
   }
 
+  const handleSubmit = async () => {
+    try {
+      await submitInternalOrder({ side: orderSide, amount, price, assetIn, assetOut });
+    } catch {
+      // hook already exposes error/state
+    }
+  };
+
   return (
     <motion.div
       className="card"
@@ -173,15 +98,52 @@ function FHEMatching() {
       style={{ padding: '1.5rem 2rem' }}
     >
       <div className="section-label" style={{ marginBottom: '1rem' }}>FHE internal matching (OTC)</div>
-      <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.25rem', lineHeight: 1.5 }}>
-        Encrypt amount + price under the FHE service public key, then sign two EIP-712 intents
-        (operator + on-chain match-intent) with your wallet. The relayer matches you
-        against an opposite signed intent inside the shielded pool. No public order book.
+      <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '0.5rem', lineHeight: 1.5 }}>
+        {privacyCopy.headline}
+      </p>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginBottom: '1.25rem', lineHeight: 1.45, opacity: 0.85 }}>
+        {privacyCopy.v1Disclaimer}
       </p>
       {configError && (
         <p className="mono" style={{ color: '#fb6', fontSize: '0.75rem', marginBottom: '0.75rem' }}>
           Relayer /config error: {configError}
         </p>
+      )}
+
+      {!isEnrolled && (
+        <div
+          style={{
+            marginBottom: '1rem',
+            padding: '0.85rem 1rem',
+            border: '1px solid rgba(0,229,199,0.32)',
+            borderRadius: 6,
+            background: 'rgba(0,229,199,0.08)',
+          }}
+        >
+          <div className="mono" style={{ fontSize: '0.8rem', marginBottom: '0.6rem' }}>
+            One-time on-chain opt-in required (pays a small BNB gas fee).
+          </div>
+          <button
+            type="button"
+            disabled={!signer || busy}
+            onClick={() => enroll(signer).catch(() => {})}
+            className="mono"
+            style={{
+              fontSize: '0.78rem',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              background: busy ? 'rgba(80,80,80,0.6)' : 'var(--cyan)',
+              color: '#0a0a0a',
+              padding: '0.55rem 1.1rem',
+              border: 'none',
+              borderRadius: 4,
+              fontWeight: 600,
+              cursor: busy ? 'wait' : 'pointer',
+            }}
+          >
+            {busy ? 'Working…' : 'Enroll in internal match'}
+          </button>
+        </div>
       )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', marginBottom: '1rem' }}>
@@ -252,13 +214,13 @@ function FHEMatching() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || !isEnrolled}
           style={{
             fontFamily: 'var(--font-mono)',
             fontSize: '0.8rem',
             letterSpacing: '0.08em',
             textTransform: 'uppercase',
-            background: busy ? 'rgba(80,80,80,0.6)' : 'var(--cyan)',
+            background: busy || !isEnrolled ? 'rgba(80,80,80,0.6)' : 'var(--cyan)',
             color: '#0a0a0a',
             padding: '0.6rem 1.25rem',
             border: 'none',
@@ -267,15 +229,15 @@ function FHEMatching() {
             cursor: busy ? 'wait' : 'pointer',
             opacity: busy ? 0.7 : 1,
           }}
-          onClick={handleSubmitOrder}
+          onClick={handleSubmit}
         >
           {busy ? 'Working…' : 'Sign & place order'}
         </button>
         {status && <span className="mono t-cyan" style={{ fontSize: '0.8rem' }}>{status}</span>}
-        {orderId && (
+        {lastOrder?.orderId && (
           <span className="mono t-dim" style={{ fontSize: '0.75rem' }}>
-            Order: {orderId}
-            {matchIntentBound ? ' (FHE match intent bound)' : ''}
+            Order: {lastOrder.orderId}
+            {lastOrder.matchIntentBound ? ' (FHE match intent bound)' : ''}
           </span>
         )}
       </div>

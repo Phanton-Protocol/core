@@ -47,6 +47,16 @@ export const OPERATOR_DOMAIN_VERSION = "1";
 export const MATCH_INTENT_DOMAIN_NAME = "PhantomInternalMatchIntent";
 export const MATCH_INTENT_DOMAIN_VERSION = "1";
 
+export const INTERNAL_CANCEL_TYPES = {
+  InternalOrderCancel: [
+    { name: "orderId", type: "bytes32" },
+    { name: "owner", type: "address" },
+    { name: "reason", type: "string" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
 export function stableStringify(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -151,6 +161,49 @@ export async function signInternalMatchIntent({ signer, params, chainId, verifyi
 function deriveReplayKey(owner, nonce) {
   const seed = `${owner}:${nonce}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   return ethers.keccak256(ethers.toUtf8Bytes(seed));
+}
+
+/**
+ * Build the request body for `POST /intent/internal/cancel`.
+ * Signs an `InternalOrderCancel` EIP-712 typed-data so the backend can verify
+ * the cancel was authorized by the order owner.
+ */
+export async function signCancel({
+  signer,
+  chainId,
+  verifyingContract,
+  orderId,
+  reason = "user_cancel",
+  deadlineSec,
+}) {
+  if (!signer || typeof signer.signTypedData !== "function") {
+    throw new Error("wallet_signer_required");
+  }
+  const owner = ethers.getAddress(await signer.getAddress());
+  const deadline = Math.max(
+    Math.floor(Date.now() / 1000) + 600,
+    Number(deadlineSec) || 0
+  );
+  const nonce = Date.now();
+  const cancel = {
+    owner,
+    reason: String(reason).slice(0, 280),
+    nonce: String(nonce),
+    deadline: String(deadline),
+  };
+  const typed = {
+    orderId,
+    owner: cancel.owner,
+    reason: cancel.reason,
+    nonce: BigInt(cancel.nonce),
+    deadline: BigInt(cancel.deadline),
+  };
+  const signature = await signer.signTypedData(
+    buildOperatorDomain({ chainId, verifyingContract }),
+    INTERNAL_CANCEL_TYPES,
+    typed
+  );
+  return { orderId, cancel, signature };
 }
 
 /**

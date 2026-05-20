@@ -15,6 +15,7 @@ import {
   getInternalIntent,
   listInternalIntents,
 } from "../api/phantomApi";
+import useInternalMatch from "../hooks/useInternalMatch.js";
 import {
   addressToOwnerPublicKey,
   commitmentToBytes32,
@@ -714,6 +715,15 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
   const [internalLastSyncAt, setInternalLastSyncAt] = useState(null);
   const [selectedIntentId, setSelectedIntentId] = useState("");
   const [selectedIntentStatus, setSelectedIntentStatus] = useState(null);
+
+  // M8 — Path B internal match flow
+  const internalMatch = useInternalMatch({
+    signer: wallet?.signer || null,
+    address: wallet?.address || null,
+    autoFetch: !!wallet?.address,
+  });
+  const [internalMatchStatusByOrder, setInternalMatchStatusByOrder] = useState({});
+  const [withdrawingNoteId, setWithdrawingNoteId] = useState(null);
 
   useEffect(() => {
     const sanitized = sanitizeRelayerBaseRaw(apiBase, API_URLS.join(", "));
@@ -2209,6 +2219,20 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
     refreshInternalIntents();
   }, [uiVariant, tab, tradeNeedsUnlock]);
 
+  // M8 — Map UPPERCASE symbol the form uses to the numeric assetId used by
+  // the FHE encrypt + EIP-712 InternalMatchIntent (matches backend/config).
+  function assetIdForSymbol(symbol) {
+    const list = Array.isArray(internalMatch.config?.assets) ? internalMatch.config.assets : [];
+    const sym = String(symbol || "").trim().toUpperCase();
+    const aliases = { WBNB: ["BNB", "WBNB"], BNB: ["BNB", "WBNB"], BUSD: ["BUSD"], USDT: ["USDT"] };
+    const candidates = aliases[sym] || [sym];
+    for (const cand of candidates) {
+      const hit = list.find((a) => String(a.symbol || "").toUpperCase() === cand);
+      if (hit) return String(hit.assetId);
+    }
+    return null;
+  }
+
   async function placeInternalOrder() {
     const amountNum = Number(orderForm.amount);
     const priceNum = Number(orderForm.price);
@@ -2216,24 +2240,43 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       setActionError("Enter a valid order amount and price.");
       return;
     }
+    if (!wallet?.signer) {
+      setActionError("Connect a wallet to sign the encrypted order.");
+      return;
+    }
+    if (!internalMatch.isEnrolled) {
+      setActionError("Enroll in internal match first (one-time on-chain opt-in).");
+      return;
+    }
     setActionError(null);
     setActionSuccess(null);
     setInternalActionBusy(true);
     try {
-      const payload = {
+      const baseAssetId = assetIdForSymbol(orderForm.baseToken);
+      const quoteAssetId = assetIdForSymbol(orderForm.quoteToken);
+      if (baseAssetId == null || quoteAssetId == null) {
+        throw new Error(
+          `Unknown asset symbol(s) — relayer /config did not return an assetId for ${orderForm.baseToken}/${orderForm.quoteToken}.`
+        );
+      }
+      // sell base/quote → spend base (assetIn=base), receive quote (assetOut=quote)
+      // buy  base/quote → spend quote (assetIn=quote), receive base (assetOut=base)
+      const isSell = String(orderForm.side).toLowerCase() === "sell";
+      const assetIn = isSell ? baseAssetId : quoteAssetId;
+      const assetOut = isSell ? quoteAssetId : baseAssetId;
+      const order = await internalMatch.submitInternalOrder({
         side: orderForm.side,
-        baseToken: String(orderForm.baseToken || "").trim().toUpperCase(),
-        quoteToken: String(orderForm.quoteToken || "").trim().toUpperCase(),
-        amount: String(orderForm.amount || "").trim(),
-        price: String(orderForm.price || "").trim(),
-        ownerAddress: wallet?.address || undefined,
-      };
-      const created = await createInternalIntent(payload);
-      if (!created) throw new Error("Backend did not return a created internal intent.");
+        amount: orderForm.amount,
+        price: orderForm.price,
+        assetIn,
+        assetOut,
+      });
       setInternalApiUnavailable(false);
       setOrderForm((prev) => ({ ...prev, amount: "", price: "" }));
       await refreshInternalIntents();
-      setActionSuccess("Internal match intent created on backend.");
+      setActionSuccess(
+        `Encrypted order submitted (orderId: ${order.orderId}). Waiting for FHE-matched counterparty.`
+      );
     } catch (e) {
       const msg = stringifyErr(e?.message ?? e);
       if (looksLikeEndpointUnavailable(msg)) {
@@ -2279,13 +2322,17 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
 
   async function cancelInternalOrder(orderId) {
     if (!orderId) return;
+    if (!wallet?.signer) {
+      setActionError("Connect a wallet to sign cancel.");
+      return;
+    }
     setInternalActionBusy(true);
     setActionError(null);
     setActionSuccess(null);
     try {
-      await cancelInternalIntent({ orderId, ownerAddress: wallet?.address || undefined });
+      await internalMatch.cancelOrder(orderId, "user_cancel");
       setInternalApiUnavailable(false);
-      setActionSuccess("Internal match intent cancelled on backend.");
+      setActionSuccess("Internal match intent cancelled (EIP-712 signed).");
       await refreshInternalIntents();
     } catch (e) {
       const msg = stringifyErr(e?.message ?? e);
@@ -2297,6 +2344,63 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
       }
     } finally {
       setInternalActionBusy(false);
+    }
+  }
+
+  // M8 — poll match status for each of the user's orders. Matched orders
+  // surface their matchHash on the order row via `matchRef`.
+  useEffect(() => {
+    if (uiVariant !== "trade" || tab !== "internal" || tradeNeedsUnlock) return undefined;
+    if (!internalOrders.length) return undefined;
+    let cancelled = false;
+    async function tick() {
+      const updates = {};
+      for (const row of internalOrders) {
+        const ref = row?.raw?.matchRef || row?.raw?.match_ref || row?.matchRef;
+        if (!ref) continue;
+        try {
+          const ledger = await internalMatch.getMatchStatus(ref);
+          if (cancelled) return;
+          if (ledger) updates[row.id] = ledger;
+        } catch {
+          /* ignore polling errors */
+        }
+      }
+      if (!cancelled && Object.keys(updates).length) {
+        setInternalMatchStatusByOrder((prev) => ({ ...prev, ...updates }));
+      }
+    }
+    tick();
+    const t = setInterval(tick, 6000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [uiVariant, tab, tradeNeedsUnlock, internalOrders, internalMatch]);
+
+  async function withdrawPendingNote(noteId) {
+    setActionError(null);
+    setActionSuccess(null);
+    if (!noteId) return;
+    if (!wallet?.signer || !wallet?.address) {
+      setActionError("Connect a wallet to withdraw.");
+      return;
+    }
+    setWithdrawingNoteId(noteId);
+    try {
+      // V2_CIRCUIT_NEEDED: v1 withdraw spends the user's pre-match deposit (or
+      // change) note. The pending-note row supplies the fee/net amount the
+      // proof must reproduce; the actual ZK proof generation runs through the
+      // existing withdraw flow. We surface a clear UX prompt here so the user
+      // knows the v1 limitation explicitly.
+      await internalMatch.refreshWithdrawPlan();
+      setActionSuccess(
+        `Withdraw plan refreshed. Generate a withdraw proof in the Withdraw tab using your pre-match deposit note as input — the relayer will validate the proof's protocolFee == ledger.protocolFeeAccrued (${noteId.slice(0, 8)}…) before submitting on-chain. (v1 — full ZK matched-output spend ships in the v2 circuit upgrade.)`
+      );
+    } catch (e) {
+      setActionError(stringifyErr(e?.message ?? e));
+    } finally {
+      setWithdrawingNoteId(null);
     }
   }
 
@@ -3092,7 +3196,52 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               Internal matching backend endpoint is unavailable in this environment. Local simulation is disabled; no non-production fake match is performed.
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+
+          {/* M8 — honest privacy copy + enroll gate */}
+          <div style={{ marginBottom: 12, borderRadius: 12, border: `1px solid ${PC.border}`, background: "rgba(0,229,199,0.05)", padding: "10px 12px" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#5eead4", marginBottom: 4 }}>
+              {internalMatch.privacyCopy.headline}
+            </div>
+            <div style={{ fontSize: 11, color: PC.muted, lineHeight: 1.45 }}>
+              {internalMatch.privacyCopy.v1Disclaimer}
+            </div>
+          </div>
+
+          {wallet?.address && internalMatch.enrollmentLoaded && !internalMatch.isEnrolled && (
+            <div style={{ marginBottom: 14, borderRadius: 12, border: "1px solid rgba(0,229,199,0.45)", background: "rgba(0,229,199,0.08)", padding: 14 }}>
+              <div style={{ fontSize: 13, color: "#fff", fontWeight: 700, marginBottom: 6 }}>
+                Enroll in Internal Match
+              </div>
+              <div style={{ fontSize: 12, color: PC.muted, lineHeight: 1.45, marginBottom: 10 }}>
+                One-time on-chain opt-in (pays a small BNB gas fee). After confirmation, you can place encrypted orders that match off-chain without a public order book.
+              </div>
+              <button
+                type="button"
+                disabled={internalMatch.busy || !wallet?.signer}
+                onClick={() => internalMatch.enroll(wallet.signer).catch(() => {})}
+                style={{
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,229,199,0.45)",
+                  background: internalMatch.busy ? "rgba(51,65,85,0.45)" : "rgba(0,229,199,0.92)",
+                  color: "#0a0a0a",
+                  padding: "10px 16px",
+                  fontSize: 13,
+                  fontWeight: 800,
+                  cursor: internalMatch.busy ? "wait" : "pointer",
+                }}
+              >
+                {internalMatch.busy ? "Working…" : "Enroll in Internal Match"}
+              </button>
+              {internalMatch.status && (
+                <div style={{ marginTop: 8, fontSize: 11, color: "#5eead4" }}>{internalMatch.status}</div>
+              )}
+              {internalMatch.error && (
+                <div style={{ marginTop: 8, fontSize: 11, color: "#fca5a5" }}>{internalMatch.error}</div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, opacity: internalMatch.isEnrolled ? 1 : 0.5, pointerEvents: internalMatch.isEnrolled ? "auto" : "none" }}>
             {[
               { id: "create", label: "Create match" },
               { id: "join", label: "Join existing" },
@@ -3208,22 +3357,34 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
                   <div style={{ fontSize: 12, color: PC.muted }}>Loading intents from backend…</div>
                 ) : internalOrders.length === 0 ? (
                   <div style={{ fontSize: 12, color: PC.muted }}>No internal intents yet. Create one in the first tab.</div>
-                ) : internalOrders.map((order) => (
-                  <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr auto", gap: 8, alignItems: "center", fontSize: 12, color: "#fff" }}>
-                    <span>{order.pair}</span>
-                    <span>{order.amount}</span>
-                    <span>{order.price}</span>
-                    <span style={{ color: order.status === "OPEN" ? "rgba(226,232,240,0.92)" : PC.muted }}>{order.status}</span>
-                    <button
-                      type="button"
-                      disabled={order.status !== "OPEN" || internalActionBusy || internalApiUnavailable}
-                      onClick={() => cancelInternalOrder(order.id)}
-                      style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "pointer" : "not-allowed" }}
-                    >
-                      {internalActionBusy ? "Cancelling…" : "Cancel"}
-                    </button>
-                  </div>
-                ))}
+                ) : internalOrders.map((order) => {
+                  const matchStatusRow = internalMatchStatusByOrder[order.id];
+                  const isMatched = matchStatusRow?.status === "pending_notes_created" || matchStatusRow?.ledgerApplied;
+                  let statusLabel = order.status;
+                  let statusColor = order.status === "OPEN" ? "rgba(226,232,240,0.92)" : PC.muted;
+                  if (order.status === "OPEN") {
+                    statusLabel = "Submitted — encrypted, waiting for match";
+                  } else if (isMatched) {
+                    statusLabel = "Matched — held in private ledger (no on-chain tx)";
+                    statusColor = "#5eead4";
+                  }
+                  return (
+                    <div key={order.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1.5fr auto", gap: 8, alignItems: "center", fontSize: 12, color: "#fff" }}>
+                      <span>{order.pair}</span>
+                      <span>{order.amount}</span>
+                      <span>{order.price}</span>
+                      <span style={{ color: statusColor }}>{statusLabel}</span>
+                      <button
+                        type="button"
+                        disabled={order.status !== "OPEN" || internalActionBusy || internalApiUnavailable}
+                        onClick={() => cancelInternalOrder(order.id)}
+                        style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)", color: "#fff", padding: "6px 8px", fontSize: 11, cursor: order.status === "OPEN" && !internalActionBusy && !internalApiUnavailable ? "pointer" : "not-allowed" }}
+                      >
+                        {internalActionBusy ? "Cancelling…" : "Cancel"}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
               <button
                 type="button"
@@ -3233,6 +3394,44 @@ export default function ProtocolUserDapp({ uiVariant = "default" }) {
               >
                 {internalListLoading ? "Refreshing…" : "Refresh list"}
               </button>
+
+              {/* M8 — pending-note withdraw block */}
+              <div style={{ marginTop: 14, borderRadius: 12, border: `1px solid ${PC.border}`, background: PC.bg, padding: 12 }}>
+                <div style={{ fontSize: 12, color: PC.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+                  Matched balance ready to withdraw
+                </div>
+                {(!internalMatch.withdrawPlan || internalMatch.withdrawPlan.length === 0) ? (
+                  <div style={{ fontSize: 12, color: PC.muted }}>No matched pending notes yet.</div>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {internalMatch.withdrawPlan.map((note) => (
+                      <div key={note.noteId} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, alignItems: "center", fontSize: 12, color: "#fff" }}>
+                        <span title={note.noteId}>{note.noteId.slice(0, 8)}…</span>
+                        <span>net: {note.netAmount ?? "-"}</span>
+                        <span>fee: {note.protocolFeeAccrued ?? "-"} (bps {note.protocolFeeBps ?? "-"})</span>
+                        <button
+                          type="button"
+                          disabled={withdrawingNoteId === note.noteId || !wallet?.signer}
+                          onClick={() => withdrawPendingNote(note.noteId)}
+                          style={{ borderRadius: 8, border: `1px solid ${PC.border}`, background: "rgba(0,229,199,0.18)", color: "#fff", padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          {withdrawingNoteId === note.noteId ? "Preparing…" : "Withdraw matched balance"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => internalMatch.refreshWithdrawPlan()}
+                  style={{ marginTop: 10, borderRadius: 10, border: `1px solid ${PC.border}`, background: "rgba(255,255,255,0.08)", color: "#fff", padding: "6px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Refresh withdraw plan
+                </button>
+                <div style={{ marginTop: 8, fontSize: 10, color: PC.muted, lineHeight: 1.4 }}>
+                  v1: withdraw spends your pre-match deposit note + relayer validates fee math against the off-chain ledger before submitting on-chain. Full ZK matched-output spend ships in the v2 circuit upgrade.
+                </div>
+              </div>
             </div>
           )}
         </div>

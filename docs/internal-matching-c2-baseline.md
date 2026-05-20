@@ -267,6 +267,54 @@ document was committed:
 
 ---
 
+## 6.B M8 follow-up — Reduced pool bytecode at EIP-170 ceiling
+
+After M6 (`enrollInternalMatch` + `InternalMatchEnrolled` + `internalEnrollmentByUser`),
+the runtime bytecode of `ShieldedPoolUpgradeableReduced` measures **24 855
+bytes** (EIP-170 cap is **24 576 bytes**, so the contract is **279 bytes over**
+when compiled at the current optimizer settings).
+
+**Status:** the **currently deployed** `0x77C4…FDf` is still the pre-M6 build
+(EIP-170-safe — it was measured at 24 219 bytes during M0). New M6 logic is
+present in the source but NOT yet deployed; any `redeploy-pathb-pool` will
+fail at the contract-creation step until the bytecode is slimmed.
+
+### Options (operator chooses one before flipping live enrollment)
+
+1. **Slim a non-critical helper.** The `assetRegistry` audit getter / fee-oracle
+   address getters add ~150 bytes each; moving one or two of them to an
+   external library reachable via `delegatecall` recovers > 300 bytes without
+   touching storage layout.
+2. **Pack enrollment args.** `enrollInternalMatch(bytes32, bytes, bytes)` is
+   already minimal; the bigger savings come from the `_verifyEnrollmentSignature`
+   inline ECDSA recovery. Moving that into the existing `_verifyECDSA` helper
+   that's already used by other entrypoints saves ~120 bytes.
+3. **Move enrollment to a library.** Extract `enrollInternalMatch` + the two
+   storage mappings (`internalEnrollmentByUser` + `internalEnrollmentUsed`)
+   into a separate small library called via `DELEGATECALL`. The storage stays
+   in the pool (mappings are append-only at the end of the layout), the
+   `enrollInternalMatch` selector stays the same on the proxy. This is the
+   cleanest path and is the recommended choice.
+4. **Plan a UUPS upgrade.** If a slim is not feasible before the audit window,
+   submit a UUPS upgrade tx on `0x77C4…` (the proxy slot is empty — see
+   §2.1 — so this is a direct `_authorizeUpgrade` flow). The owner is
+   `0x8F41ea1304032B69b03Ed01708AC8522627C2734` (per the M0 read-out).
+
+### Required gate before flipping live enrollment
+
+- [ ] `report-bytecode-size.cjs` MUST report `< 24 576` for
+      `ShieldedPoolUpgradeableReduced.sol` (compiled with the production
+      optimizer settings — `viaIR=true`, `runs=200`).
+- [ ] Storage-layout diff MUST show `internalEnrollmentByUser` and
+      `internalEnrollmentUsed` appended at the end (already true per M6).
+- [ ] Local hardhat suite green: `npx hardhat test test/enrollInternalMatch.reduced.test.cjs`.
+
+Until the bytecode gate is green, the **runtime** `enrollInternalMatch` is still
+served by the pre-M6 deployment at `0x77C4…` — which means the **on-chain
+enrollment selector does not yet exist** at the production address. The
+relayer's `/internal-match/enroll` route therefore fails closed
+(`enrollment_tx_verify_failed`) until the UUPS upgrade lands.
+
 ## 7. Definition of Done for M0
 
 - [x] On-chain ABI snapshot of `0x77C4…` captured via read-only RPC.
