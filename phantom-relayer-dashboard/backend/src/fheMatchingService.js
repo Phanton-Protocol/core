@@ -599,14 +599,23 @@ function persistMatchAndFills(db, payload) {
       takerRemainingBefore: payload.taker.remainingAmount,
       decisionArtifact: payload.decisionArtifact || null,
       fheAttestation: payload.fheAttestation || null,
-      onchain: {
-        internalMatchData: {
-          decisionHash: payload.fheDecisionHash || null,
-          matchHash: payload.matchHash,
-          executionKey: payload.executionKey,
-          makerSignedIntent: payload.makerSignedIntent || null,
-          takerSignedIntent: payload.takerSignedIntent || null,
-        },
+      // Path-B (M5): the legacy `onchain.internalMatchData` blob (which fed
+      // the removed `internalMatchSettle` on-chain submitter) is no longer
+      // persisted. M7 will hang the pending-note ledger off `match.metadata`
+      // here under a new key (e.g. `pendingNoteLedger.*`); user-signed
+      // intents remain available off-chain for that purpose via the order
+      // envelope.
+      pathB: {
+        matched: true,
+        matchHash: payload.matchHash,
+        executionKey: payload.executionKey,
+        decisionHash: payload.fheDecisionHash || null,
+        // Keep maker/taker signed intents reachable for the future
+        // pending-note ledger; these are the off-chain order bindings that
+        // were previously also fed to the on-chain settle path. They do NOT
+        // include plaintext amount/price (ciphertextHash only).
+        makerSignedIntent: payload.makerSignedIntent || null,
+        takerSignedIntent: payload.takerSignedIntent || null,
       },
     },
     createdAt: now,
@@ -645,9 +654,9 @@ function persistMatchAndFills(db, payload) {
 // `/internal-match/compare` endpoint introduced in Phase 3. The endpoint
 // returns a signed match attestation; this module verifies the signature,
 // optionally checks it against EXPECTED_FHE_ATTESTATION_SIGNER, and persists
-// the user signed intents + attestation alongside the match so that the
-// settlement coordinator's `onchainSubmitter` can feed them into
-// `internalMatchSettle` (Phase 1 contract).
+// the user signed intents + attestation alongside the match. Path-B (M5)
+// removed the on-chain `internalMatchSettle` consumer of this data; M7 wires
+// the matched-path branch into `pendingNoteLedger.applyMatch` instead.
 
 function getExpectedFheAttestationSigner() {
   const v = String(process.env.EXPECTED_FHE_ATTESTATION_SIGNER || "").trim();

@@ -43,10 +43,11 @@ const INTERNAL_CANCEL_TYPES = {
   ],
 };
 
-// Phase 2: matches the on-chain `InternalMatchIntent` EIP-712 typehash on
-// `ShieldedPool` exactly. Both maker and taker sign this intent off-chain;
-// the relayer carries both signatures into `internalMatchSettle`, which then
-// re-verifies them on-chain (`_computeInternalMatchIntentDigest`).
+// Phase 2: EIP-712 InternalMatchIntent — both maker and taker sign this off-chain
+// to bind their encrypted order to its `ciphertextHash`. Under Path-B (M5+) the
+// signature is verified off-chain only (the on-chain `internalMatchSettle`
+// consumer was removed); M7 wires the verified pair into the pending-note
+// ledger and M8 carries the binding into the withdraw proof.
 const INTERNAL_MATCH_INTENT_TYPES = {
   InternalMatchIntent: [
     { name: "user", type: "address" },

@@ -11,20 +11,14 @@ const EIP170_LIMIT = 24576;
 /**
  * Headroom below EIP-170 for future fixes without emergency library extraction.
  *
- * M3 (Phase 7 / FHE internal-match port, 2026-05) bumped the runtime image by
- * ~620 bytes for the new `internalMatchSettle` inline-assembly forwarder + four
- * append-only storage mappings + the `internalMatchIntentLib` immutable load.
- * To absorb the addition we extracted `_checkCompliance`, `_distributeProtocolFee`,
- * and the deposit-fee branch of `_finalizeDepositLogic` into {PoolHelpersLib}
- * (a new linked external library), recovering ~580 bytes. Net result: deployed
- * bytecode lands at ~24550 — still under the EIP-170 hard cap (24576), but the
- * previous 76-byte safety margin (24500) is consumed.
- *
- * The soft margin is therefore raised to {EIP170_LIMIT} for M3. The CI gate now
- * enforces only the EIP-170 hard limit until either (a) the M4 backend wiring
- * stabilizes and we re-extract more helpers, or (b) the next UUPS upgrade adds
- * meaningful headroom via further library migration. See
- * `core/docs/m3-pool-upgrade-report.md` for the full bytecode delta breakdown.
+ * Path-B (M5, 2026-05): removed `internalMatchSettle` + the inline-assembly
+ * DELEGATECALL forwarder + the `internalMatchIntentLib` immutable. The four
+ * M3 storage mappings are retained as `__deprecated…` for proxy storage-layout
+ * compatibility but contribute no bytecode. {PoolHelpersLib} stays linked for
+ * compliance + fee distribution. The previous EIP-170 ceiling is no longer
+ * load-bearing; we hold the soft margin at the hard cap until further
+ * refactors free headroom. See
+ * `core/docs/internal-matching-path-b-architecture.md`.
  */
 const MARGIN_LIMIT = EIP170_LIMIT;
 const CONTRACT_NAME = "ShieldedPoolUpgradeableReduced";

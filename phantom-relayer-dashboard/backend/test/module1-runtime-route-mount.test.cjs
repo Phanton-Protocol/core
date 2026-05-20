@@ -19,18 +19,19 @@ async function withServer(t) {
   return `http://127.0.0.1:${port}`;
 }
 
-test("runtime app mounts internal intent and settlement routes", async (t) => {
+test("runtime app mounts internal intent + Path-B status route (no on-chain settle)", async (t) => {
   const baseUrl = await withServer(t);
 
   const healthRes = await fetch(`${baseUrl}/health`);
   assert.equal(healthRes.status, 200);
   const health = await healthRes.json();
   assert.equal(health?.internalRoutes?.intentInternal, true);
-  assert.equal(health?.internalRoutes?.settlementInternal, true);
+  // Path-B (M5): match-time on-chain settlement route is removed.
+  assert.equal(health?.internalRoutes?.settlementInternal, false);
   assert.ok(Array.isArray(health?.internalRoutes?.endpoints));
 
   const internalHealthRes = await fetch(`${baseUrl}/internal-matching/health`);
-  assert.equal(internalHealthRes.status, 200);
+  assert.ok(internalHealthRes.status === 200 || internalHealthRes.status === 503);
   const internalHealth = await internalHealthRes.json();
   assert.ok(internalHealth?.status === "ok" || internalHealth?.status === "degraded");
   assert.ok(Array.isArray(internalHealth?.routeCoverage));
@@ -46,10 +47,15 @@ test("runtime app mounts internal intent and settlement routes", async (t) => {
   const missingOrderBody = await missingOrderRes.json();
   assert.equal(missingOrderBody.error, "internal_order_not_found");
 
+  // Path-B `/internal-match/:matchHash/status` returns 404 for unknown match.
   const matchHash = `0x${"cd".repeat(32)}`;
-  const settlementStatusRes = await fetch(`${baseUrl}/settlement/internal/${matchHash}/status`);
-  assert.equal(settlementStatusRes.status, 404);
-  const settlementStatusBody = await settlementStatusRes.json();
-  assert.equal(settlementStatusBody.error, "settlement_execution_not_found");
+  const statusRes = await fetch(`${baseUrl}/internal-match/${matchHash}/status`);
+  assert.equal(statusRes.status, 404);
+  const statusBody = await statusRes.json();
+  assert.equal(statusBody.error, "internal_match_status_not_found");
+
+  // Legacy `/settlement/internal/:matchHash/{start,retry,status}` routes are gone.
+  const legacyStart = await fetch(`${baseUrl}/settlement/internal/${matchHash}/start`, { method: "POST" });
+  assert.equal(legacyStart.status, 404);
 });
 

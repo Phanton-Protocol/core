@@ -72,16 +72,12 @@ async function getUpgradeablePoolLibraries(fqn) {
   const libs = { ...(await getJoinSplitFeeValidationLibraries()) };
   if (fqn.includes("ShieldedPoolUpgradeableReduced")) {
     Object.assign(libs, await getMevCommitRevealLibraries());
-    // M3: Reduced pool calls InternalMatchIntentLib via an inline-assembly
-    // DELEGATECALL forwarder, NOT via the Solidity library linker — so the
-    // library address is held in storage as `internalMatchIntentLib` and is
-    // passed via the impl constructor; no `libraries` link is required at
-    // contract-factory time for InternalMatchIntentLib.
-    //
-    // M3 also moved `_checkCompliance`, `_distributeProtocolFee`, and the
-    // deposit-fee branch of `_finalizeDepositLogic` into the new
-    // {PoolHelpersLib} (linked normally via the Solidity library linker) so
-    // the Reduced impl stays under the EIP-170 24,576-byte runtime cap.
+    // Path-B: Reduced pool no longer carries the `internalMatchSettle`
+    // forwarder, so InternalMatchIntentLib is no longer needed at impl
+    // construction. {PoolHelpersLib} is still linked because
+    // `_checkCompliance`, `_distributeProtocolFee`, and the deposit-fee
+    // branch of `_finalizeDepositLogic` live there to keep the Reduced
+    // impl under the EIP-170 24,576-byte runtime cap.
     Object.assign(libs, await getPoolHelpersLibraries());
   }
   return libs;

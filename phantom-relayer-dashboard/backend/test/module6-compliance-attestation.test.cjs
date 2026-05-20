@@ -244,7 +244,7 @@ test("module6 execution drift intake-allow then execution-block is auditable", a
     submitter: async () => ({ txHash: "0x" + "ab".repeat(32), receipt: { blockNumber: 1, status: 1, gasUsed: "1" } }),
   });
   phase = "execution";
-  const out = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
+  const out = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
   assert.equal(out.decisionReasonCode, "COMPLIANCE_BLOCKED");
   assert.equal(out.txHash, null);
   const decisions = listComplianceDecisionsByMatch(db, matchHash, 20);
@@ -349,7 +349,7 @@ test("module6 attestation gate: missing/invalid/quorum/valid cases", async (t) =
 
   verdictByMatch.set(matchHash, { valid: false, reasonCode: "ATTESTATION_MISSING" });
   const missing = await coordinator.start(matchHash, {
-    policy: { submissionMode: "live_internal_match", requireAttestation: true, compliancePolicyVersion: "v1" },
+    policy: { submissionMode: "dry_run", requireAttestation: true, compliancePolicyVersion: "v1" },
   });
   assert.equal(missing.decisionReasonCode, "ATTESTATION_MISSING");
 
@@ -365,7 +365,7 @@ test("module6 attestation gate: missing/invalid/quorum/valid cases", async (t) =
   });
   verdictByMatch.set(withInvalidAtt.matchHash, { valid: false, reasonCode: "ATTESTATION_INVALID" });
   const invalid = await coordinator.start(withInvalidAtt.matchHash, {
-    policy: { submissionMode: "live_internal_match", requireAttestation: true, compliancePolicyVersion: "v1" },
+    policy: { submissionMode: "dry_run", requireAttestation: true, compliancePolicyVersion: "v1" },
   });
   assert.equal(invalid.decisionReasonCode, "ATTESTATION_INVALID");
 
@@ -381,7 +381,7 @@ test("module6 attestation gate: missing/invalid/quorum/valid cases", async (t) =
   });
   verdictByMatch.set(withLowQuorum.matchHash, { valid: false, reasonCode: "ATTESTATION_QUORUM_INSUFFICIENT", signerCount: 1 });
   const insufficient = await coordinator.start(withLowQuorum.matchHash, {
-    policy: { submissionMode: "live_internal_match", requireAttestation: true, compliancePolicyVersion: "v1", attestationQuorumBps: 6600 },
+    policy: { submissionMode: "dry_run", requireAttestation: true, compliancePolicyVersion: "v1", attestationQuorumBps: 6600 },
   });
   assert.equal(insufficient.decisionReasonCode, "ATTESTATION_QUORUM_INSUFFICIENT");
 
@@ -397,7 +397,7 @@ test("module6 attestation gate: missing/invalid/quorum/valid cases", async (t) =
   });
   verdictByMatch.set(withGoodQuorum.matchHash, { valid: true, reasonCode: null, signerCount: 2 });
   const allowed = await coordinator.start(withGoodQuorum.matchHash, {
-    policy: { submissionMode: "live_internal_match", requireAttestation: true, compliancePolicyVersion: "v1", attestationQuorumBps: 6600 },
+    policy: { submissionMode: "dry_run", requireAttestation: true, compliancePolicyVersion: "v1", attestationQuorumBps: 6600 },
   });
   assert.equal(allowed.settlementStatus, "submitted");
   const attRows = listAttestationDecisionsByMatch(db, withGoodQuorum.matchHash, 20);
@@ -417,13 +417,14 @@ test("module6 SEE middleware protects internal sensitive routes", async () => {
   app.use(express.json());
   app.post("/intent/internal/mock", requireSeeForSensitiveFlow, (_req, res) => res.json({ ok: true }));
   app.post("/fhe/internal/mock", requireSeeForSensitiveFlow, (_req, res) => res.json({ ok: true }));
-  app.post("/settlement/internal/0x" + "11".repeat(32) + "/start", requireSeeForSensitiveFlow, (_req, res) => res.json({ ok: true }));
+  // Path-B: SEE guard still protects internal-match status reads.
+  app.get("/internal-match/0x" + "11".repeat(32) + "/status", requireSeeForSensitiveFlow, (_req, res) => res.json({ ok: true }));
   const server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const a = await fetch(`${base}/intent/internal/mock`, { method: "POST" });
   const b = await fetch(`${base}/fhe/internal/mock`, { method: "POST" });
-  const c = await fetch(`${base}/settlement/internal/0x${"11".repeat(32)}/start`, { method: "POST" });
+  const c = await fetch(`${base}/internal-match/0x${"11".repeat(32)}/status`);
   assert.equal(a.status, 401);
   assert.equal(b.status, 401);
   assert.equal(c.status, 401);

@@ -542,17 +542,14 @@ contract ShieldedPool is IShieldedPool, ReentrancyGuard {
         _executeShieldedSwapJoinSplit(swapData);
     }
 
+    /// @dev Path-B: legacy `internalMatchSettle` is permanently disabled. Kept
+    ///      as a `revert PoolErr(70)` stub for interface compatibility on
+    ///      legacy deployments; not used by Path-B production.
+    ///      `PoolErr(70)`: internal-match settle deprecated under Path-B.
     function internalMatchSettle(
-        InternalMatchSettlementData calldata settlementData
-    ) external override nonReentrant onlyRelayer {
-        InternalMatchIntentLib.processInternalMatchSettle(
-            settlementData,
-            msg.sender,
-            usedInternalMatchHashes,
-            usedInternalDecisionHashes,
-            internalMatchAttestationNonceUsed,
-            internalMatchIntentNonceUsed
-        );
+        InternalMatchSettlementData calldata
+    ) external pure {
+        revert PoolErr(70);
     }
 
     /**

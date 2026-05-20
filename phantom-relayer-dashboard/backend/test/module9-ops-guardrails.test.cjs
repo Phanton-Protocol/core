@@ -46,13 +46,34 @@ test("module9 blocks production startup with mock/insecure flags", () => {
   assert.ok(out.errors.some((e) => e.includes("mock/insecure flags")));
 });
 
-test("module9 blocks missing verifier/attestation config in production live mode", () => {
+test("module9 rejects Path-B forbidden SETTLEMENT_SUBMISSION_MODE=live_internal_match", () => {
   const out = evaluateInternalMatchingGuardrails(
     {
       NODE_ENV: "production",
       PHANTOM_DEPLOYMENT_TIER: "production",
       FHE_MODE: "remote",
       SETTLEMENT_SUBMISSION_MODE: "live_internal_match",
+      COMPLIANCE_POLICY_MODE: "enforced",
+      ATTESTATION_REQUIRED: "true",
+      ATTESTATION_REQUIRED_QUORUM_BPS: "6600",
+      VALIDATOR_URLS: "http://v1,http://v2",
+    },
+    {
+      seeConfig: { mode: "disabled" },
+      deriveFheSecurityPolicy: deriveStubFhePolicy,
+    }
+  );
+  assert.equal(out.ok, false);
+  assert.ok(out.errors.some((e) => e.includes("live_internal_match is not supported under Path-B")));
+});
+
+test("module9 blocks missing verifier/attestation config in production (Path-B safeguards)", () => {
+  const out = evaluateInternalMatchingGuardrails(
+    {
+      NODE_ENV: "production",
+      PHANTOM_DEPLOYMENT_TIER: "production",
+      FHE_MODE: "remote",
+      SETTLEMENT_SUBMISSION_MODE: "dry_run",
       COMPLIANCE_POLICY_MODE: "disabled",
       ATTESTATION_REQUIRED: "false",
       ATTESTATION_REQUIRED_QUORUM_BPS: "",

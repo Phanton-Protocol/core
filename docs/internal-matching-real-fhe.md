@@ -1,10 +1,10 @@
-# Internal Matching — Real FHE Pipeline
+# Internal Matching — Real FHE Pipeline (Path B)
 
-This doc describes the end-to-end flow built across Phases 1–6 for
-**real FHE-backed internal matching** with user-signed intents.
-It replaces the earlier "mock FHE + stubbed match" path.
+> **Path B is the canonical flow.** Enroll on-chain (encrypted, owner-readable, M6) → trade off-chain with FHE → pending note updates in the operator ledger (M7) → chain only when withdrawing (M8). See [`internal-matching-path-b-architecture.md`](./internal-matching-path-b-architecture.md) for the trust model and removal log.
+>
+> Last updated: 2026-05-20 (M5 — Path B removal of `internalMatchSettle`).
 
-> Last updated: 2026-05-09
+This doc describes the end-to-end flow for **real FHE-backed internal matching** with user-signed intents under Path B. It supersedes the earlier "match → on-chain `internalMatchSettle`" flow described in M3.
 
 ---
 
@@ -29,8 +29,9 @@ It replaces the earlier "mock FHE + stubbed match" path.
 │   • verify operator EIP-712 signature                                    │
 │   • verify user InternalMatchIntent EIP-712 signature                    │
 │   • recompute & enforce ciphertextHash                                   │
+│   • (M6) reject if msg.sender (owner) is NOT enrolled on-chain           │
 │   • persist {intent, matchIntent, matchSignature, ciphertext}            │
-│     (ciphertext is encrypted at rest with NOTES_ENCRYPTION_KEY_HEX)      │
+│     (ciphertext encrypted at rest with NOTES_ENCRYPTION_KEY_HEX)         │
 └──────┬───────────────────────────────────────────────────────────────────┘
        │  matchable order pair
        ▼
@@ -41,146 +42,100 @@ It replaces the earlier "mock FHE + stubbed match" path.
 │       (sends both signed intents + both ciphertexts)                     │
 │                                                                          │
 │   ┌──────────────────────┐                                               │
-│   │  FHE service         │ → real CKKS decrypt (TenSEAL)                 │
+│   │  FHE service         │ → homomorphic compare (TenSEAL / TFHE)        │
 │   │  /internal-match/    │ → execAmount = min(maker, taker)              │
 │   │      compare         │ → execPrice  = (sell_p + buy_p) / 2           │
-│   │                      │ → ECDSA sign(decisionHash) with service key   │
+│   │                      │ → ECDSA sign(decisionHash) — v2 canonical:    │
+│   │                      │   `execAmountCiphertextHash` /                │
+│   │                      │   `execPriceCiphertextHash` only              │
 │   └──────────────────────┘                                               │
 │                                                                          │
-│   • verify attestation (recover signer, optional allow-list check)       │
+│   • verify attestation (recover signer, EXPECTED_FHE_ATTESTATION_SIGNER) │
 │   • persist match with:                                                  │
 │       metadataJson.fheAttestation                                        │
-│       metadataJson.onchain.internalMatchData.makerSignedIntent           │
-│       metadataJson.onchain.internalMatchData.takerSignedIntent           │
+│       metadataJson.pathB.makerSignedIntent (off-chain binding only)      │
+│       metadataJson.pathB.takerSignedIntent                               │
+│                                                                          │
+│   ── M7 (next milestone) ──                                              │
+│   • call pendingNoteLedger.applyMatch({ matchHash, decisionHash,         │
+│     attestation, makerOrder, takerOrder, inputNoteIds })                 │
+│   • append hash-chained audit row in internal_match_audit_log            │
+│                                                                          │
+│   ── NO on-chain transaction at match time. ──                           │
 └──────┬───────────────────────────────────────────────────────────────────┘
-       │
+       │  (later, user clicks withdraw)
        ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  Backend: settlementCoordinator.js                                       │
-│   • prechecks: decision artifact hash, proof-context binding             │
-│   • onchainSubmitter encodes the InternalMatchSettlementData tuple       │
-│     including BOTH SignedInternalMatchIntent structs                     │
+│  Backend: index.js / zkProofs.js  (M8)                                   │
+│   • consume the user's pending notes from the ledger                     │
+│   • generate join-split proof spending pre-match nullifiers, minting     │
+│     post-match commitments, applying the 0.2 % internal-match fee        │
+│   • POST shieldedWithdraw (existing Reduced-pool entrypoint)             │
 │                                                                          │
-│   ──── on-chain ─────────────────────────────────────────────────        │
-│   ShieldedPool.internalMatchSettle:                                      │
-│     • re-verifies maker & taker EIP-712 InternalMatchIntent              │
-│     • enforces asset / amount / price / side / nonce / deadline          │
-│     • verifies operator quorum attestation                               │
-│     • marks intent nonces and matchHash used (replay protection)         │
-│     • emits InternalMatchSettled                                         │
+│   ── on-chain (only here) ────────────────────────────────────           │
+│   ShieldedPoolUpgradeableReduced.shieldedWithdraw:                       │
+│     • verifies Groth16 (join-split conservation + fee public input)      │
+│     • marks nullifier used, inserts change commitment                    │
+│     • pays out withdraw amount to recipient                              │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Required environment variables
+## 2. What changed in M5 (Path B removal log)
+
+| Removed                                                | Replacement                                  |
+|--------------------------------------------------------|----------------------------------------------|
+| `ShieldedPoolUpgradeableReduced.internalMatchSettle`   | (M6) `enrollInternalMatch` only              |
+| `InternalMatchIntentLib.processInternalMatchSettle`    | dead code; lib kept for `verifyRelayerSwapAttestation` on legacy `ShieldedPool` |
+| `createOnchainInternalMatchSubmitter` (backend)        | (M7) `pendingNoteLedger.applyMatch`          |
+| `SETTLEMENT_SUBMISSION_MODE=live_internal_match`       | `dry_run` (default); guardrail rejects legacy value |
+| `metadataJson.onchain.internalMatchData.{makerSignedIntent,takerSignedIntent,…}` on match rows | `metadataJson.pathB.{makerSignedIntent,takerSignedIntent}` |
+| `POST /settlement/internal/:matchHash/{start,retry}`   | (removed — no chain submit at match time)   |
+| `GET /settlement/internal/:matchHash/status`           | `GET /internal-match/:matchHash/status` (off-chain) |
+| `scripts/upgrade-reduced-internal-match.cjs`           | (deleted; UUPS upgrade for M3 was never submitted) |
+| `test/internalMatchSettle.{reduced,integration}.test.cjs`, fixtures | (deleted)                          |
+| `test/module5-settlement-onchain-bridge.test.cjs`      | moved to `test/deprecated/`; M7 will replace |
+
+---
+
+## 3. Required environment variables
 
 **Backend (`phantom-relayer-dashboard/backend/.env`)**
 
 | Variable | Required | Purpose |
-| --- | --- | --- |
-| `FHE_MODE` | yes | `remote` for real FHE; `mock` only allowed in dev |
-| `FHE_SERVICE_URL` | yes (when `FHE_MODE=remote`) | Base URL of the TenSEAL or stand-in service |
-| `FHE_SERVICE_TIMEOUT_MS` | optional | Default `30000` |
-| `EXPECTED_FHE_ATTESTATION_SIGNER` | recommended | Allow-listed signer address for attestation; backend rejects mismatches |
-| `MATCHING_FHE_POLICY_MODE` | yes for prod | `strict` in production; `degraded` only in dev |
-| `MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE` | yes for prod | Must be `false` in production |
-| `MATCHING_REQUIRE_USER_INTENT` | optional | Force the new bound flow; auto-true in production |
-| `NOTES_ENCRYPTION_KEY_HEX` | yes | 32-byte hex; encrypts ciphertexts at rest |
-| `CHAIN_ID` / `PHANTOM_CHAIN_ID` | yes | Used in EIP-712 domain |
-| `SHIELDED_POOL_ADDRESS` | yes | EIP-712 verifyingContract (must match deployed contract) |
-
-**FHE service (`fhe-dev/tenseal-service` or `fhe-dev/standin-server.js`)**
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `MATCHING_SERVICE_PRIVATE_KEY` | yes | secp256k1 key the service uses to sign attestations. **Default `0x11..11` is dev-only — never use in production.** |
-| `PORT` (TenSEAL) / `FHE_STANDIN_PORT` | optional | Listen port |
+|----------|----------|---------|
+| `FHE_MODE=remote` | yes (prod) | Force remote FHE service (mock forbidden in prod) |
+| `FHE_SERVICE_URL` | yes | TFHE matching service endpoint |
+| `EXPECTED_FHE_ATTESTATION_SIGNER` | yes (strict) | Pin the FHE service ECDSA signer |
+| `MATCHING_FHE_POLICY_MODE=strict` | yes (prod) | Degraded fallback forbidden |
+| `SETTLEMENT_SUBMISSION_MODE` | optional | `dry_run` (default) or `disabled`; `live_internal_match` is **rejected** by guardrails |
+| `NOTES_ENCRYPTION_KEY_HEX` | yes | Encrypt orders / pending notes at rest |
+| `VALIDATOR_URLS` + `ATTESTATION_REQUIRED=true` + `ATTESTATION_REQUIRED_QUORUM_BPS` | yes (prod) | Quorum gate for off-chain decisions; enforced at withdraw |
+| `PHANTOM_INTERNAL_MATCH_FEE_BPS=20` | optional | 0.20 % match fee, accrued in pending ledger, enforced at withdraw |
 
 ---
 
-## 3. Running the local end-to-end stack
+## 4. Test surface (Path B canonical)
 
-### Option A — Stand-in (no Docker, fastest)
+| Layer | Command |
+|-------|---------|
+| Backend — intent binding | `node --test test/phase2-match-intent-binding.test.cjs` |
+| Backend — real FHE compare | `node --test test/phase4-real-fhe-matching.test.cjs` |
+| Backend — privacy (no plaintext in v2) | `node --test test/phase4b-no-plaintext-in-compare.test.cjs` |
+| Backend — E2E with TFHE service | `node --test test/phase6-real-fhe-e2e.test.cjs` |
+| Backend — module 8 lifecycle | `node --test test/module8-internal-matching-e2e.test.cjs` |
+| Contracts — full Hardhat suite | `cd Phantom-Smart-Contracts && HH_FULL=1 npx hardhat test` |
 
-```bash
-# Terminal 1: FHE stand-in (Node, plaintext compare, identical signing contract)
-cd core
-FHE_STANDIN_PORT=9100 \
-MATCHING_SERVICE_PRIVATE_KEY=0x1111111111111111111111111111111111111111111111111111111111111111 \
-node fhe-dev/standin-server.js
-
-# Terminal 2: relayer backend
-cd core/phantom-relayer-dashboard/backend
-FHE_MODE=remote \
-FHE_SERVICE_URL=http://127.0.0.1:9100 \
-EXPECTED_FHE_ATTESTATION_SIGNER=0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A \
-MATCHING_FHE_POLICY_MODE=degraded \
-MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE=true \
-NOTES_ENCRYPTION_KEY_HEX=$(openssl rand -hex 32) \
-CHAIN_ID=97 \
-SHIELDED_POOL_ADDRESS=0x... \
-node src/index.js
-```
-
-### Option B — Real TenSEAL (CKKS, Docker)
-
-```bash
-docker compose -f core/fhe-dev/docker-compose.yml up --build
-# service listens on http://127.0.0.1:9101
-# Then point the relayer at it:
-FHE_SERVICE_URL=http://127.0.0.1:9101
-```
+The legacy `internalMatchSettle` revert-matrix test has been deleted.
 
 ---
 
-## 4. Test commands
+## 5. Privacy claims (honest v1 under Path B)
 
-| Layer | Command | Purpose |
-| --- | --- | --- |
-| Contract — Phase 1 verify intents | `cd core/Phantom-Smart-Contracts && HH_FULL=1 npx hardhat test test/internalMatchSettle.integration.test.cjs` | maker/taker EIP-712 verification + replay |
-| Backend — Phase 2 intent binding | `cd core/phantom-relayer-dashboard/backend && node --test test/phase2-match-intent-binding.test.cjs` | InternalMatchIntent + ciphertextHash schema |
-| FHE service — Phase 3 attestation | `node --test test/phase3-fhe-attestation.test.cjs` | signed match attestation roundtrip |
-| Backend — Phase 4 wiring | `node --test test/phase4-real-fhe-matching.test.cjs` | matching service uses /internal-match/compare + persists user sigs |
-| Frontend — Phase 5 signing | `node --test test/phase5-frontend-intent-signing.test.mjs` | helper module produces backend-accepted payloads |
-| **End-to-end — Phase 6** | `node --test test/phase6-real-fhe-e2e.test.cjs` | spawns stand-in, signs both intents, real /internal-match/compare, persisted match has both signed intents + valid attestation |
-| Settlement — existing | `node --test test/module4-settlement-coordinator.test.cjs test/module5-settlement-onchain-bridge.test.cjs test/module8-internal-matching-e2e.test.cjs` | settlement prechecks + onchain submitter |
-
----
-
-## 5. What is *real* and what is *demo*
-
-| Component | Today | Production hardening still needed |
-| --- | --- | --- |
-| EIP-712 user intents (Phase 1) | **Real**, on-chain re-verified | – |
-| FHE ciphertext binding (Phase 2) | **Real**, keccak-bound at signing | – |
-| TenSEAL CKKS decrypt (Phase 3) | **Real**, server holds secret context | Move secret to HSM / KMS / TEE |
-| Service attestation key (Phase 3/4) | **Real ECDSA secp256k1**; default `0x11..11` is dev-only | Generate & rotate via KMS; multi-sig quorum |
-| FHE service authentication | open HTTP | mTLS / signed requests / VPC-only |
-| `EXPECTED_FHE_ATTESTATION_SIGNER` | optional allow-list, single key | quorum (m-of-n attestation) on the contract side |
-| Frontend signing (Phase 5) | **Real**, browser wallet, two prompts | UX polish: combined signing, explainer cards |
-
----
-
-## 6. Failure-mode mapping
-
-| Symptom | Where caught | Reason code |
-| --- | --- | --- |
-| Frontend ciphertext mutated after signing | Backend intake (Phase 2) | `CIPHERTEXT_HASH_MISMATCH` |
-| Match-intent expired | Backend intake / on-chain | `MATCH_INTENT_EXPIRED` / `PoolErr(63)` |
-| Wrong wallet signed match-intent | Backend intake / on-chain | `SIGNER_MISMATCH` / `PoolErr(59|60)` |
-| FHE service down | Matching engine (strict) | `FHE_UNAVAILABLE` |
-| FHE returns tampered attestation | Matching engine (Phase 4) | `attestation_invalid:decision_hash_canonical_mismatch` |
-| FHE attestation signed by wrong key | Matching engine (Phase 4) | `attestation_invalid:unexpected_signer` |
-| Replayed match-intent nonce | On-chain | `PoolErr(62)` |
-| Replayed matchHash | On-chain | `PoolErr(57)` |
-| Asset / side / price terms in intent disagree with execution | On-chain | `PoolErr(61)` |
-
----
-
-## 7. Operator runbook (ties to `internal-matching-ops-runbook.md`)
-
-- Check `GET /fhe/health` → `fheMode`, `fheServiceConfigured`, `fheServiceReachable`
-- Check `GET /internal-matching/health` → `guardrails`, `traceId`
-- Rotate `MATCHING_SERVICE_PRIVATE_KEY` and update `EXPECTED_FHE_ATTESTATION_SIGNER` together
-- To temporarily disable: set `MATCHING_FHE_POLICY_MODE=strict` and stop the FHE service — the backend will fail-closed without affecting the existing swap/withdraw paths
+| Claim | Valid? |
+|-------|--------|
+| Encrypted off-chain order book; matcher does not see amount/price | Yes (v1 one-bit `matched` leak documented) |
+| No on-chain activity when matched | Yes |
+| Plaintext exec amount/price never appears in matcher HTTP body or DB match rows | Yes — verified by `phase4b-no-plaintext-in-compare.test.cjs` |
+| Amounts hidden on-chain forever | **No** — withdraw tx reveals payout/conservation (G8); v2 needs circuit change |

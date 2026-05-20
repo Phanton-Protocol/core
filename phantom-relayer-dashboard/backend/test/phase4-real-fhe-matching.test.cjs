@@ -207,8 +207,12 @@ test("phase4 matching service uses /internal-match/compare and persists user sig
   assert.ok(persisted, "match must be persisted");
   const meta = persisted.metadataJson || {};
   assert.ok(meta.fheAttestation, "fheAttestation must be persisted");
-  assert.ok(meta.onchain?.internalMatchData?.makerSignedIntent, "makerSignedIntent must be persisted");
-  assert.ok(meta.onchain?.internalMatchData?.takerSignedIntent, "takerSignedIntent must be persisted");
+  // Path-B (M5): user signed intents now live under `pathB.*` instead of
+  // `onchain.internalMatchData.*`; the on-chain settle blob has been removed.
+  assert.ok(meta.pathB?.makerSignedIntent, "makerSignedIntent must be persisted (pathB)");
+  assert.ok(meta.pathB?.takerSignedIntent, "takerSignedIntent must be persisted (pathB)");
+  // The removed on-chain blob must NOT appear in match metadata.
+  assert.equal(meta.onchain?.internalMatchData, undefined, "legacy onchain.internalMatchData must not be persisted under Path-B");
   const verification = verifyFheAttestation({
     decisionHash: meta.fheAttestation.decisionHash,
     signature: meta.fheAttestation.signature,
@@ -241,8 +245,11 @@ test("phase4 fallback to legacy compatibility path when matchIntent missing", as
   assert.equal(matchOut.matched, true);
   const persisted = getMatchByHash(db, matchOut.matchHash);
   const meta = persisted.metadataJson || {};
-  assert.equal(meta.onchain?.internalMatchData?.makerSignedIntent, null);
-  assert.equal(meta.onchain?.internalMatchData?.takerSignedIntent, null);
+  // Path-B: legacy `onchain.internalMatchData` is no longer written; the
+  // fallback (no signed intents) leaves `pathB.makerSignedIntent` null.
+  assert.equal(meta.onchain?.internalMatchData, undefined);
+  assert.equal(meta.pathB?.makerSignedIntent ?? null, null);
+  assert.equal(meta.pathB?.takerSignedIntent ?? null, null);
   assert.equal(meta.fheAttestation, null);
 });
 

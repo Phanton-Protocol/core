@@ -22,16 +22,7 @@ async function deployBehindProxy(fqn, initArgs, opts = {}) {
   const initFn = opts.initFn || "initialize";
 
   const Impl = await getUpgradeablePoolFactory(fqn);
-  // M3: ShieldedPoolUpgradeableReduced now takes the InternalMatchIntentLib
-  // address as a constructor parameter (immutable in impl bytecode). Other
-  // upgradeable contracts still use a parameterless constructor.
-  let impl;
-  if (fqn.includes("ShieldedPoolUpgradeableReduced")) {
-    const { InternalMatchIntentLib: imlAddr } = await getShieldedPoolLibraries();
-    impl = await Impl.deploy(imlAddr);
-  } else {
-    impl = await Impl.deploy();
-  }
+  const impl = await Impl.deploy();
   await impl.waitForDeployment();
 
   const initData = impl.interface.encodeFunctionData(initFn, initArgs);

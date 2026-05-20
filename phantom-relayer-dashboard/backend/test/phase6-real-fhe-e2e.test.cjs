@@ -171,8 +171,11 @@ test("phase6 end-to-end: real /internal-match/compare drives signed match attest
   assert.ok(persisted, "match must be persisted");
   const meta = persisted.metadataJson || {};
   assert.ok(meta.fheAttestation?.signature, "fheAttestation.signature must be persisted");
-  assert.ok(meta.onchain?.internalMatchData?.makerSignedIntent?.signature, "makerSignedIntent must be persisted");
-  assert.ok(meta.onchain?.internalMatchData?.takerSignedIntent?.signature, "takerSignedIntent must be persisted");
+  // Path-B (M5): user-signed intents live under `pathB.*`; legacy
+  // `onchain.internalMatchData.*` is no longer populated.
+  assert.ok(meta.pathB?.makerSignedIntent?.signature, "makerSignedIntent must be persisted (pathB)");
+  assert.ok(meta.pathB?.takerSignedIntent?.signature, "takerSignedIntent must be persisted (pathB)");
+  assert.equal(meta.onchain?.internalMatchData, undefined, "legacy onchain.internalMatchData must not be persisted under Path-B");
 
   const verification = verifyFheAttestation({
     decisionHash: meta.fheAttestation.decisionHash,
@@ -200,18 +203,18 @@ test("phase6 end-to-end: real /internal-match/compare drives signed match attest
         ],
       },
       {
-        user: meta.onchain.internalMatchData.makerSignedIntent.intent.user,
-        side: Number(meta.onchain.internalMatchData.makerSignedIntent.intent.side),
-        inputAssetID: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.inputAssetID),
-        outputAssetID: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.outputAssetID),
-        amount: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.amount),
-        limitPrice: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.limitPrice),
-        nonce: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.nonce),
-        deadline: BigInt(meta.onchain.internalMatchData.makerSignedIntent.intent.deadline),
-        ciphertextHash: meta.onchain.internalMatchData.makerSignedIntent.intent.ciphertextHash,
+        user: meta.pathB.makerSignedIntent.intent.user,
+        side: Number(meta.pathB.makerSignedIntent.intent.side),
+        inputAssetID: BigInt(meta.pathB.makerSignedIntent.intent.inputAssetID),
+        outputAssetID: BigInt(meta.pathB.makerSignedIntent.intent.outputAssetID),
+        amount: BigInt(meta.pathB.makerSignedIntent.intent.amount),
+        limitPrice: BigInt(meta.pathB.makerSignedIntent.intent.limitPrice),
+        nonce: BigInt(meta.pathB.makerSignedIntent.intent.nonce),
+        deadline: BigInt(meta.pathB.makerSignedIntent.intent.deadline),
+        ciphertextHash: meta.pathB.makerSignedIntent.intent.ciphertextHash,
       }
     ),
-    meta.onchain.internalMatchData.makerSignedIntent.signature
+    meta.pathB.makerSignedIntent.signature
   );
   assert.equal(
     makerIntentSigner.toLowerCase(),

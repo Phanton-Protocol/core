@@ -89,12 +89,6 @@ interface IShieldedPool {
         JoinSplitSwapData calldata swapData
     ) external;
 
-    /**
-     * @notice Executes atomic internal settlement (maker+taker legs) with decision attestation.
-     */
-    function internalMatchSettle(
-        InternalMatchSettlementData calldata settlementData
-    ) external;
 
     /**
      * @notice Executes a shielded withdrawal from the pool

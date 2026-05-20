@@ -780,9 +780,11 @@ contract ShieldedPoolUpgradeable is IShieldedPool, UUPSUpgradeable, OwnableUpgra
         }
     }
 
+    /// @dev Path-B (M5): `internalMatchSettle` was removed from {IShieldedPool}.
+    ///      Stub kept here for legacy callers; not used by Path-B production.
     function internalMatchSettle(
         InternalMatchSettlementData calldata
-    ) external pure override {
+    ) external pure {
         revert("internalMatchSettle unsupported on upgradeable path");
     }
 

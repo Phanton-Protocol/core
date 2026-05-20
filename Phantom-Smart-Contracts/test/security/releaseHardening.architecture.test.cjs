@@ -25,12 +25,10 @@ describe("Release hardening — Path-B architecture", function () {
   });
 
   it("canonical reduced pool implementation deploys with linked libraries", async function () {
-    const { getUpgradeablePoolFactory, getShieldedPoolLibraries } = require("../helpers/libraryLinker.cjs");
+    const { getUpgradeablePoolFactory } = require("../helpers/libraryLinker.cjs");
     const factory = await getUpgradeablePoolFactory(REDUCED_FQN);
-    // M3: Reduced impl takes the InternalMatchIntentLib address as a
-    // constructor argument (immutable in impl bytecode).
-    const { InternalMatchIntentLib: imlAddr } = await getShieldedPoolLibraries();
-    const impl = await factory.deploy(imlAddr);
+    // Path-B: parameterless constructor (M3 `internalMatchSettle` removed).
+    const impl = await factory.deploy();
     await impl.waitForDeployment();
     expect(await impl.getAddress()).to.properAddress;
     expect(REDUCED_FQN).to.include("ShieldedPoolUpgradeableReduced");

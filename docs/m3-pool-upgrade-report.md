@@ -1,4 +1,12 @@
-# M3 — Pool C2 Port + UUPS Upgrade Report
+> **⚠️ SUPERSEDED BY PATH B (M5, 2026-05).** This document is retained for
+> historical audit only. The `internalMatchSettle` UUPS upgrade described below
+> was **never** submitted to the production proxy
+> (`0x77C4BadA4306e4b258980f0f0D79Aec814509FDf`) and has now been removed from
+> the codebase. Path-B (off-chain internal match → withdraw-time on-chain
+> touch) is the canonical flow; see
+> [`internal-matching-path-b-architecture.md`](./internal-matching-path-b-architecture.md).
+
+# M3 — Pool C2 Port + UUPS Upgrade Report (SUPERSEDED)
 
 **Milestone:** M3 (Phase 7 / FHE internal-match port to Reduced pool)
 **Plan:** `plans/fhe_internal_matching_milestones_520fa333.plan.md`

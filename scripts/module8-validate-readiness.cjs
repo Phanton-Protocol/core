@@ -98,7 +98,10 @@ const steps = [
     id: "backend_adversarial_concurrency",
     layer: "adversarial",
     gate: "backend_gate",
-    command: "node --test test/module2-sqlite-concurrency.test.cjs test/module5-settlement-onchain-bridge.test.cjs test/module6-compliance-attestation.test.cjs",
+    // Path-B (M5): `module5-settlement-onchain-bridge.test.cjs` was retired
+    // alongside `internalMatchSettle`. M7 will re-add an off-chain
+    // pending-note ledger suite here.
+    command: "node --test test/module2-sqlite-concurrency.test.cjs test/module6-compliance-attestation.test.cjs",
     cwd: "phantom-relayer-dashboard/backend",
     required: true,
   },
@@ -106,7 +109,11 @@ const steps = [
     id: "contracts_internal_match_revert_matrix",
     layer: "contracts",
     gate: "contract_gate",
-    command: "HH_FULL=1 npx hardhat test test/internalMatchSettle.integration.test.cjs",
+    // Path-B (M5): legacy `internalMatchSettle.integration.test.cjs` deleted.
+    // M6 will add an enroll-on-chain suite for the new entrypoint; until then
+    // the full hardhat suite (run by `contracts_legacy_regression`) is the
+    // gate.
+    command: "HH_FULL=1 npx hardhat test test/shieldedPoolReduced.m3a.test.cjs",
     cwd: "Phantom-Smart-Contracts",
     required: true,
   },

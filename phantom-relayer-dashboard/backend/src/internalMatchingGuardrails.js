@@ -27,15 +27,30 @@ function evaluateInternalMatchingGuardrails(env = process.env, opts = {}) {
   if (mockFlagsEnabled.length) {
     errors.push(`mock/insecure flags are enabled (${mockFlagsEnabled.join(", ")})`);
   }
+  // Path-B guardrail: match-time on-chain settlement is permanently disabled.
+  // SETTLEMENT_SUBMISSION_MODE must be `dry_run` or `disabled` in production;
+  // the legacy `live_internal_match` value is rejected.
   if (settlementMode === "live_internal_match") {
-    if (!validatorUrls.length) errors.push("VALIDATOR_URLS is required for live internal settlement");
-    if (!attestationRequired) errors.push("ATTESTATION_REQUIRED must be true for live internal settlement");
-    if (!Number.isFinite(attestationQuorum) || attestationQuorum <= 0) {
-      errors.push("ATTESTATION_REQUIRED_QUORUM_BPS must be configured (> 0)");
-    }
-    if (complianceMode === "disabled") {
-      errors.push("COMPLIANCE_POLICY_MODE cannot be disabled for live internal settlement");
-    }
+    errors.push(
+      "SETTLEMENT_SUBMISSION_MODE=live_internal_match is not supported under Path-B. " +
+        "Use SETTLEMENT_SUBMISSION_MODE=dry_run (no chain submit at match time)."
+    );
+  }
+  if (settlementMode && settlementMode !== "dry_run" && settlementMode !== "disabled") {
+    errors.push(
+      `SETTLEMENT_SUBMISSION_MODE=${settlementMode} is not supported under Path-B (only dry_run|disabled).`
+    );
+  }
+  // Path-B production posture still requires validator quorum + attestation +
+  // strict compliance, even though we never submit match txs — these
+  // safeguards now gate withdraw-side enforcement.
+  if (!validatorUrls.length) errors.push("VALIDATOR_URLS is required in production");
+  if (!attestationRequired) errors.push("ATTESTATION_REQUIRED must be true in production");
+  if (!Number.isFinite(attestationQuorum) || attestationQuorum <= 0) {
+    errors.push("ATTESTATION_REQUIRED_QUORUM_BPS must be configured (> 0)");
+  }
+  if (complianceMode === "disabled") {
+    errors.push("COMPLIANCE_POLICY_MODE cannot be disabled in production");
   }
   if (typeof opts.deriveFheSecurityPolicy === "function") {
     const fhePolicy = opts.deriveFheSecurityPolicy(env);

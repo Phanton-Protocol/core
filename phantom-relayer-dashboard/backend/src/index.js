@@ -45,7 +45,7 @@ const { assertNoMockRuntimeGate } = require("./noMockRuntimeGate");
 const { pushTransaction, getSnapshot } = require("./relayerActivityBuffer");
 const { computeCanonicalAlignmentWarnings } = require("./configAlignment");
 const { createInternalOrderRouter } = require("./internalOrderRoutes");
-const { createSettlementCoordinator, createOnchainInternalMatchSubmitter } = require("./settlementCoordinator");
+const { createSettlementCoordinator } = require("./settlementCoordinator");
 const { createComplianceEngine } = require("./complianceEngine");
 const {
   assertRelayerRegistered,
@@ -402,21 +402,18 @@ const RELAYER_REQUIRE_VALIDATOR_QUORUM = process.env.RELAYER_REQUIRE_VALIDATOR_Q
 
 const validatorNetwork = new ValidatorNetwork(VALIDATOR_URLS, 6600); 
 const complianceEngine = createComplianceEngine({ db });
-let settlementSubmitter;
+// Path-B (M5): on-chain `internalMatchSettle` submitter removed. Match-time
+// chain submission is forbidden; the coordinator runs in `dry_run`/off-chain
+// status mode and the only chain touch is at withdraw (see M8).
 if (String(process.env.SETTLEMENT_SUBMISSION_MODE || "").toLowerCase() === "live_internal_match") {
-  try {
-    settlementSubmitter = createOnchainInternalMatchSubmitter({
-      rpcUrl: process.env.RPC_URL,
-      privateKey: process.env.RELAYER_PRIVATE_KEY,
-      shieldedPoolAddress: process.env.SHIELDED_POOL_ADDRESS,
-    });
-  } catch (e) {
-    console.warn("[settlement] live internal-match submitter unavailable; falling back to coordinator default:", e.message || e);
-  }
+  console.warn(
+    "[settlement] SETTLEMENT_SUBMISSION_MODE=live_internal_match is no longer supported under Path-B. " +
+      "Coercing to dry_run. Update your env to SETTLEMENT_SUBMISSION_MODE=dry_run (or unset)."
+  );
+  process.env.SETTLEMENT_SUBMISSION_MODE = "dry_run";
 }
 const settlementCoordinator = createSettlementCoordinator({
   db,
-  submitter: settlementSubmitter,
   complianceEngine,
   validatorNetwork,
 });
@@ -2734,15 +2731,13 @@ app.get("/health", (req, res) => {
     },
     internalRoutes: {
       intentInternal: true,
-      settlementInternal: true,
+      settlementInternal: false,
       seeMode: seeCfg.mode,
       endpoints: [
         "/intent/internal",
         "/intent/internal/cancel",
         "/intent/internal/:id",
-        "/settlement/internal/:matchHash/start",
-        "/settlement/internal/:matchHash/retry",
-        "/settlement/internal/:matchHash/status",
+        "/internal-match/:matchHash/status",
       ],
     },
   });
@@ -2778,9 +2773,7 @@ app.get("/internal-matching/health", (req, res) => {
       "/intent/internal",
       "/intent/internal/cancel",
       "/intent/internal/:id",
-      "/settlement/internal/:matchHash/start",
-      "/settlement/internal/:matchHash/retry",
-      "/settlement/internal/:matchHash/status",
+      "/internal-match/:matchHash/status",
     ],
   };
   return res.status(guardrails.ok ? 200 : 503).json(payload);
@@ -2788,56 +2781,29 @@ app.get("/internal-matching/health", (req, res) => {
 
 app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
 
-app.post("/settlement/internal/:matchHash/start", requireSeeForSensitiveFlow, async (req, res) => {
-  const matchHash = String(req.params.matchHash || "").trim();
-  if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
-  try {
-    const out = await settlementCoordinator.start(matchHash, req.body || {});
-    return res.json({
-      ...out,
-      trace: {
-        traceId: out.traceId || null,
-        matchHash: out.matchHash || matchHash,
-        decisionHash: out.decisionHash || null,
-        txHash: out.txHash || null,
-        orderId: out.takerOrderId || out.makerOrderId || null,
-        takerOrderId: out.takerOrderId || null,
-        makerOrderId: out.makerOrderId || null,
-      },
-    });
-  } catch (e) {
-    return res.status(500).json({ error: "settlement_start_failed", message: e.message || String(e) });
-  }
-});
-
-app.post("/settlement/internal/:matchHash/retry", requireSeeForSensitiveFlow, async (req, res) => {
-  const matchHash = String(req.params.matchHash || "").trim();
-  if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
-  try {
-    const out = await settlementCoordinator.retry(matchHash, req.body || {});
-    return res.json({
-      ...out,
-      trace: {
-        traceId: out.traceId || null,
-        matchHash: out.matchHash || matchHash,
-        decisionHash: out.decisionHash || null,
-        txHash: out.txHash || null,
-        orderId: out.takerOrderId || out.makerOrderId || null,
-        takerOrderId: out.takerOrderId || null,
-        makerOrderId: out.makerOrderId || null,
-      },
-    });
-  } catch (e) {
-    return res.status(500).json({ error: "settlement_retry_failed", message: e.message || String(e) });
-  }
-});
-
-app.get("/settlement/internal/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
+// Path-B (M5): the on-chain `/settlement/internal/:matchHash/{start,retry}`
+// endpoints were removed because match-time on-chain settlement is no longer
+// supported. The off-chain ledger (M7) will surface match status here.
+app.get("/internal-match/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
   const matchHash = String(req.params.matchHash || "").trim();
   if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
   const snapshot = settlementCoordinator.getStatus(matchHash);
-  if (!snapshot) return res.status(404).json({ error: "settlement_execution_not_found", matchHash });
-  return res.json(snapshot);
+  if (!snapshot) return res.status(404).json({ error: "internal_match_status_not_found", matchHash });
+  // Path-B: do not surface any `onchain.internalMatchData` payload — match has
+  // no on-chain leg until withdraw.
+  return res.json({
+    matchHash,
+    execution: {
+      status: snapshot.execution?.status || null,
+      attemptCount: snapshot.execution?.attemptCount || 0,
+      txHash: null,
+      mode: "off_chain",
+    },
+    events: snapshot.events,
+    latestGateOutcome: snapshot.latestGateOutcome,
+    complianceDecisions: snapshot.complianceDecisions,
+    attestationDecisions: snapshot.attestationDecisions,
+  });
 });
 
 app.get("/config", (req, res) => {

@@ -24,7 +24,6 @@ const { initDb, getMatchByHash, saveMatch, saveFill, saveInternalOrder } = requi
 const { configureMatchingEngine, runDeterministicMatchForOrder, REASON_CODES } = require("../src/fheMatchingService");
 const {
   createSettlementCoordinator,
-  createOnchainInternalMatchSubmitter,
   PRECHECK_REASON,
   SETTLEMENT_STATUS,
 } = require("../src/settlementCoordinator");
@@ -383,7 +382,7 @@ test("module8 failure: FHE unavailable in prod/strict mode blocks matching", asy
   assert.equal(out.reasonCode, REASON_CODES.NO_COMPATIBLE_COUNTERPARTY);
 });
 
-test("module8 failure: invalid attestation/proof classified as fatal submission error", async () => {
+test("module8 failure: submitter throw classified as fatal submission error (off-chain dry-run)", async () => {
   const db = initDb(dbPath);
   const { matchHash } = seedOnchainMatch(db);
   const coordinator = createSettlementCoordinator({
@@ -392,12 +391,12 @@ test("module8 failure: invalid attestation/proof classified as fatal submission 
       throw new Error("execution reverted: invalid attestation/proof");
     },
   });
-  const out = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
+  const out = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
   assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
   assert.equal(out.decisionReasonCode, PRECHECK_REASON.SUBMIT_FATAL_ERROR);
 });
 
-test("module8 failure: duplicate/replay settlement is idempotent and not re-submitted", async () => {
+test("module8 failure: duplicate/replay settlement is idempotent and not re-submitted (off-chain dry-run)", async () => {
   const db = initDb(dbPath);
   const { matchHash } = seedOnchainMatch(db);
   let calls = 0;
@@ -408,14 +407,14 @@ test("module8 failure: duplicate/replay settlement is idempotent and not re-subm
       return { txHash: "0x" + "ab".repeat(32), receipt: { blockNumber: 1, status: 1, gasUsed: "1" } };
     },
   });
-  const first = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
-  const second = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
+  const first = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
+  const second = await coordinator.start(matchHash, { policy: { submissionMode: "dry_run" } });
   assert.equal(first.settlementStatus, SETTLEMENT_STATUS.SUBMITTED);
   assert.equal(second.idempotent, true);
   assert.equal(calls, 1);
 });
 
-test("module8 failure: route not wired returns 404", async (t) => {
+test("module8 Path-B: legacy `/settlement/internal/.../start` route is removed (404)", async (t) => {
   const badApp = express();
   badApp.use(express.json());
   const baseUrl = await withServer(t, badApp);
@@ -423,19 +422,7 @@ test("module8 failure: route not wired returns 404", async (t) => {
   assert.equal(res.status, 404);
 });
 
-test("module8 failure: ABI mismatch surfaces as fatal submission failure", async () => {
-  const db = initDb(dbPath);
-  const { matchHash } = seedOnchainMatch(db);
-  const submitter = createOnchainInternalMatchSubmitter({
-    rpcUrl: "http://localhost:8545",
-    privateKey: "0x" + "11".repeat(32),
-    shieldedPoolAddress: "0x" + "22".repeat(20),
-    providerFactory: () => ({}),
-    signerFactory: () => ({ address: "0x" + "33".repeat(20) }),
-    contractFactory: () => ({}),
-  });
-  const coordinator = createSettlementCoordinator({ db, submitter });
-  const out = await coordinator.start(matchHash, { policy: { submissionMode: "live_internal_match" } });
-  assert.equal(out.settlementStatus, SETTLEMENT_STATUS.FAILED);
-  assert.equal(out.decisionReasonCode, PRECHECK_REASON.SUBMIT_FATAL_ERROR);
-});
+// Path-B (M5): the ABI mismatch test for `internalMatchSettle` submitter was
+// removed alongside `createOnchainInternalMatchSubmitter`. The on-chain leg
+// has moved to withdraw; M8 will add an equivalent regression covering
+// `shieldedWithdraw` + pending-note consumption.

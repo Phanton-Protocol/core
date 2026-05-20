@@ -15,11 +15,10 @@ export async function deployUpgradeablePoolLibraries() {
   const MevLib = await ethers.getContractFactory(MEV_COMMIT_LIB_FQN);
   const mevLib = await MevLib.deploy();
   await mevLib.waitForDeployment();
-  // M3 (Phase 7 / FHE internal-match port): the Reduced pool now links a small
-  // helper library that holds `_checkCompliance`, `_distributeProtocolFee`, and
-  // the deposit-fee branch of `_finalizeDepositLogic`. Required to keep the
-  // implementation under EIP-170 after the `internalMatchSettle` inline-asm
-  // forwarder.
+  // Path-B: the Reduced pool links a small helper library
+  // ({PoolHelpersLib}) that holds `_checkCompliance`, `_distributeProtocolFee`,
+  // and the deposit-fee branch of `_finalizeDepositLogic` to keep the impl
+  // under EIP-170.
   const Helpers = await ethers.getContractFactory(POOL_HELPERS_LIB_FQN);
   const helpers = await Helpers.deploy();
   await helpers.waitForDeployment();
