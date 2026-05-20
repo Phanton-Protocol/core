@@ -24,6 +24,7 @@ import "../libraries/JoinSplitFeeValidation.sol";
 import "../libraries/MevCommitReveal.sol";
 import "../libraries/TokenRegistrationPolicy.sol";
 import "../libraries/PoolHelpersLib.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 /**
  * @title ShieldedPoolUpgradeableReduced
  * @notice Reduced-size version with core functionality only
@@ -141,6 +142,12 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     mapping(address => mapping(uint256 => bool)) internal __deprecatedInternalMatchAttestationNonceUsed;
     mapping(address => mapping(uint256 => bool)) internal __deprecatedInternalMatchIntentNonceUsed;
 
+    // ============ M6 Path-B internal-match enrollment (append after M3 slots) ============
+    /// @notice Global replay guard: each `enrollmentId` may be consumed once.
+    mapping(bytes32 => bool) public internalEnrollmentUsed;
+    /// @notice One enrollment per address; zero means not enrolled. Re-enroll is rejected.
+    mapping(address => bytes32) public internalEnrollmentByUser;
+
     event TimelockSet(address indexed previous, address indexed current);
     event EmergencyAdminSet(address indexed previous, address indexed current);
     event EmergencyPaused(address indexed by);
@@ -197,6 +204,13 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
     /// @notice Emitted when a new Merkle root becomes spendable (including genesis and after each insert).
     /// @param treeNextIndex Value of `tree.nextIndex` after the root was recorded (0 at genesis).
     event MerkleRootCheckpointed(bytes32 indexed root, uint256 treeNextIndex);
+    /// @notice Path-B opt-in: user publishes encrypted enrollment metadata (owner audits off-chain).
+    event InternalMatchEnrolled(
+        address indexed user,
+        bytes32 enrollmentId,
+        bytes32 payloadHash,
+        bytes encryptedPayload
+    );
     // ============ Modifiers ============
     /// @dev Fund-flow spends must be submitted by a staked, non-blacklisted relayer.
     modifier onlyRelayer() {
@@ -820,6 +834,42 @@ contract ShieldedPoolUpgradeableReduced is IShieldedPool, UUPSUpgradeable, Ownab
 
     function getCommitmentCount() external view override returns (uint256) {
         return commitmentCount;
+    }
+
+    /// @notice True when `user` has completed Path-B internal-match enrollment.
+    function isInternalMatchEnrolled(address user) external view returns (bool) {
+        return internalEnrollmentByUser[user] != bytes32(0);
+    }
+
+    /**
+     * @notice Opt in to Path-B internal matching with an encrypted enrollment blob.
+     * @dev Signature: EIP-191 personal sign over `keccak256(abi.encodePacked(enrollmentId, payloadHash))`
+     *      where `payloadHash = keccak256(encryptedPayload)`. Signer must be `msg.sender`.
+     *      Replay policy: reject duplicate `enrollmentId` and reject any address that already enrolled
+     *      (one enrollment per user; no re-enroll).
+     */
+    function enrollInternalMatch(
+        bytes32 enrollmentId,
+        bytes calldata encryptedPayload,
+        bytes calldata userSig
+    ) external {
+        if (enrollmentId == bytes32(0)) revert SP();
+        if (encryptedPayload.length == 0) revert SP();
+        if (internalEnrollmentUsed[enrollmentId]) revert SP();
+        if (internalEnrollmentByUser[msg.sender] != bytes32(0)) revert SP();
+
+        bytes32 payloadHash = keccak256(encryptedPayload);
+        bytes32 messageHash = keccak256(abi.encodePacked(enrollmentId, payloadHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+        address signer = ECDSA.recover(digest, userSig);
+        if (signer != msg.sender) revert SP();
+
+        internalEnrollmentUsed[enrollmentId] = true;
+        internalEnrollmentByUser[msg.sender] = enrollmentId;
+
+        emit InternalMatchEnrolled(msg.sender, enrollmentId, payloadHash, encryptedPayload);
     }
 
     // ============ Internal Functions ============

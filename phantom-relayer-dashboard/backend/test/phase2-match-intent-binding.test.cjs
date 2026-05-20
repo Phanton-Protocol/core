@@ -9,7 +9,7 @@ const { ethers } = require("ethers");
 process.env.SEE_MODE = process.env.SEE_MODE || "disabled";
 process.env.NOTES_ENCRYPTION_KEY_HEX = process.env.NOTES_ENCRYPTION_KEY_HEX || "11".repeat(32);
 
-const { initDb } = require("../src/db");
+const { initDb, saveInternalMatchEnrollment } = require("../src/db");
 const {
   createInternalOrderRouter,
   INTERNAL_ORDER_TYPES,
@@ -44,6 +44,18 @@ function withApp(t) {
       const port = server.address().port;
       resolve({ baseUrl: `http://127.0.0.1:${port}`, db });
     });
+  });
+}
+
+function seedEnrollment(db, ownerAddress) {
+  saveInternalMatchEnrollment(db, {
+    userAddress: ownerAddress.toLowerCase(),
+    enrollmentId: ethers.keccak256(ethers.toUtf8Bytes(`phase2-enroll-${ownerAddress}`)),
+    payloadHash: ethers.ZeroHash,
+    encryptedPayload: null,
+    txHash: "0x" + "dd".repeat(32),
+    blockNumber: 1,
+    createdAt: Date.now(),
   });
 }
 
@@ -142,8 +154,9 @@ async function postIntent(baseUrl, body) {
 
 test("phase2 accepts intent with valid match intent + ciphertext binding", async (t) => {
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const wallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, wallet.address);
   const body = await buildSignedRequest({ wallet });
   const out = await postIntent(baseUrl, body);
   assert.equal(out.status, 201);
@@ -152,8 +165,9 @@ test("phase2 accepts intent with valid match intent + ciphertext binding", async
 
 test("phase2 rejects intent with mismatched ciphertext hash", async (t) => {
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const wallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, wallet.address);
   const body = await buildSignedRequest({ wallet });
   body.ciphertext = { secret: "amount", v: "y-different" };
   const out = await postIntent(baseUrl, body);
@@ -163,8 +177,9 @@ test("phase2 rejects intent with mismatched ciphertext hash", async (t) => {
 
 test("phase2 rejects intent signed by a different wallet", async (t) => {
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const owner = ethers.Wallet.createRandom();
+  seedEnrollment(db, owner.address);
   const body = await buildSignedRequest({ wallet: owner });
   const attacker = ethers.Wallet.createRandom();
   const matchDomain = {
@@ -192,8 +207,9 @@ test("phase2 rejects intent signed by a different wallet", async (t) => {
 
 test("phase2 rejects expired match intent deadline", async (t) => {
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const wallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, wallet.address);
   const body = await buildSignedRequest({ wallet });
   body.matchIntent.deadline = "1";
   const out = await postIntent(baseUrl, body);
@@ -203,8 +219,9 @@ test("phase2 rejects expired match intent deadline", async (t) => {
 
 test("phase2 rejects mismatched user (intent.owner != matchIntent.user)", async (t) => {
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const owner = ethers.Wallet.createRandom();
+  seedEnrollment(db, owner.address);
   const body = await buildSignedRequest({ wallet: owner });
   const stranger = ethers.Wallet.createRandom();
   body.matchIntent.user = stranger.address;
@@ -216,8 +233,9 @@ test("phase2 rejects mismatched user (intent.owner != matchIntent.user)", async 
 test("phase2 strict mode requires match intent or rejects request", async (t) => {
   process.env.MATCHING_REQUIRE_USER_INTENT = "true";
   t.after(() => { delete process.env.MATCHING_REQUIRE_USER_INTENT; });
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const wallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, wallet.address);
   const bare = await buildSignedRequest({ wallet, includeMatchIntent: false });
   const out = await postIntent(baseUrl, bare);
   assert.equal(out.status, 400);
@@ -228,8 +246,9 @@ test("phase2 backward compatible: no match intent in dev mode still accepted", a
   delete process.env.MATCHING_REQUIRE_USER_INTENT;
   delete process.env.NODE_ENV;
   delete process.env.PHANTOM_DEPLOYMENT_TIER;
-  const { baseUrl } = await withApp(t);
+  const { baseUrl, db } = await withApp(t);
   const wallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, wallet.address);
   const bare = await buildSignedRequest({ wallet, includeMatchIntent: false });
   const out = await postIntent(baseUrl, bare);
   assert.equal(out.status, 201);

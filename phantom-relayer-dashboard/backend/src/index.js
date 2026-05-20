@@ -45,6 +45,7 @@ const { assertNoMockRuntimeGate } = require("./noMockRuntimeGate");
 const { pushTransaction, getSnapshot } = require("./relayerActivityBuffer");
 const { computeCanonicalAlignmentWarnings } = require("./configAlignment");
 const { createInternalOrderRouter } = require("./internalOrderRoutes");
+const { createInternalMatchEnrollmentRouter } = require("./internalMatchEnrollmentRoutes");
 const { createSettlementCoordinator } = require("./settlementCoordinator");
 const { createComplianceEngine } = require("./complianceEngine");
 const {
@@ -471,6 +472,17 @@ const internalOrderRouter = createInternalOrderRouter({
   chainId: CHAIN_ID,
   verifyingContract: SHIELDED_POOL_ADDRESS || ethers.ZeroAddress,
   complianceEngine,
+});
+let enrollmentRpcProvider = null;
+try {
+  if (RPC_URL) enrollmentRpcProvider = new ethers.JsonRpcProvider(RPC_URL);
+} catch (_) {
+  enrollmentRpcProvider = null;
+}
+const internalMatchEnrollmentRouter = createInternalMatchEnrollmentRouter({
+  db,
+  provider: enrollmentRpcProvider,
+  poolAddress: SHIELDED_POOL_ADDRESS || "",
 });
 
 const shadowDeposits = new Map();
@@ -2779,6 +2791,7 @@ app.get("/internal-matching/health", (req, res) => {
   return res.status(guardrails.ok ? 200 : 503).json(payload);
 });
 
+app.use("/internal-match", internalMatchEnrollmentRouter);
 app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
 
 // Path-B (M5): the on-chain `/settlement/internal/:matchHash/{start,retry}`

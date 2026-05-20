@@ -15,6 +15,7 @@ const {
   saveCancellation,
   listMatchDecisionsByOrder,
   listComplianceDecisionsByOrder,
+  hasInternalMatchEnrollment,
 } = require("./db");
 const { ORDER_STATUS, canCancel, assertLegalTransition } = require("./internalOrderLifecycle");
 
@@ -346,6 +347,10 @@ function createInternalOrderRouter({ db, chainId, verifyingContract, complianceE
     }
     if (signerAddr.toLowerCase() !== normalizedIntent.signingKey.toLowerCase()) {
       return res.status(400).json({ error: "invalid_internal_order_signer" });
+    }
+
+    if (!hasInternalMatchEnrollment(db, normalizedIntent.owner)) {
+      return res.status(403).json({ error: "enrollment_required" });
     }
 
     const matchIntentResult = verifyMatchIntent(parsed.data, normalizedIntent);

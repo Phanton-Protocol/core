@@ -5,7 +5,7 @@
 ## Flow
 
 1. **Deposit** — User funds the Reduced pool (`0x77C4BadA4306e4b258980f0f0D79Aec814509FDf` on BSC testnet) via existing deposit / shadow path.
-2. **Enroll** — User calls `enrollInternalMatch(enrollmentId, encryptedPayload, userSig)` on-chain. Event `InternalMatchEnrolled` anchors opt-in. Protocol owner may decrypt the enrollment blob for audit (not the order book).
+2. **Enroll** — User calls `enrollInternalMatch(enrollmentId, encryptedPayload, userSig)` on-chain. Event `InternalMatchEnrolled` anchors opt-in. Protocol owner may decrypt the enrollment blob for audit (not the order book). **M6 implementation:** the user signs EIP-191 over `keccak256(abi.encodePacked(enrollmentId, keccak256(encryptedPayload)))`; the pool rejects duplicate `enrollmentId` and one enrollment per address. Clients encrypt enrollment JSON with `PHANTOM_PROTOCOL_OWNER_DECRYPT_KEY_HEX` (AES-256-GCM, see `enrollmentCipher.js`) and POST `txHash` to `/internal-match/enroll` so the relayer gates `POST /intent/internal` on a DB row.
 3. **Order** — User posts encrypted orders via relayer; FHE service compares ciphertexts; v2 attestation binds the one-bit match outcome.
 4. **Match** — Relayer updates **pending notes** in DB only (`pendingNoteLedger.applyMatch`). **No** pool transaction at match time.
 5. **Withdraw** — First on-chain touch: join-split proof spends pre-match nullifiers, mints post-match commitments, applies **0.2%** internal-match fee, then `shieldedWithdraw` + shadow (same as post-swap).

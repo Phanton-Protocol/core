@@ -29,7 +29,8 @@ function initDbJson(dbPath) {
     "settlement_executions",
     "settlement_events",
     "compliance_decisions",
-    "attestation_decisions"
+    "attestation_decisions",
+    "internal_match_enrollments",
   ];
   const keyCol = {
     intents: "intentId",
@@ -49,6 +50,7 @@ function initDbJson(dbPath) {
     settlement_events: "id",
     compliance_decisions: "id",
     attestation_decisions: "id",
+    internal_match_enrollments: "userAddress",
   };
 
   function loadTable(name) {
@@ -392,6 +394,29 @@ function initDbJson(dbPath) {
           reasonCode, signerCount, signerSetHash, detailsJson, createdAt
         });
         saveTable("attestation_decisions", rows);
+      } else if (sqlLower.includes("insert into internal_match_enrollments")) {
+        const [
+          userAddress,
+          enrollmentId,
+          payloadHash,
+          encryptedPayload,
+          txHash,
+          blockNumber,
+          createdAt,
+        ] = args;
+        const rows = loadTable("internal_match_enrollments").filter(
+          (r) => r.userAddress !== userAddress
+        );
+        rows.push({
+          userAddress,
+          enrollmentId,
+          payloadHash,
+          encryptedPayload,
+          txHash,
+          blockNumber,
+          createdAt,
+        });
+        saveTable("internal_match_enrollments", rows);
       }
     };
     const get = (...args) => {
@@ -439,6 +464,13 @@ function initDbJson(dbPath) {
         const [replayKey] = args;
         const row = loadTable("orders").find((r) => r.replayKey === replayKey);
         return row ? { ...row } : undefined;
+      }
+      if (sqlLower.includes("from internal_match_enrollments where useraddress")) {
+        const [userAddress] = args;
+        const row = loadTable("internal_match_enrollments").find(
+          (r) => String(r.userAddress).toLowerCase() === String(userAddress).toLowerCase()
+        );
+        return row || undefined;
       }
       if (sqlLower.includes("from orders where owneraddress") && sqlLower.includes("nonce")) {
         const [ownerAddress, nonce] = args;
@@ -820,12 +852,50 @@ function initDb(dbPath) {
       );
       CREATE INDEX IF NOT EXISTS idx_attestation_decisions_match_created ON attestation_decisions(matchHash, createdAt DESC);
       CREATE INDEX IF NOT EXISTS idx_attestation_decisions_execution_created ON attestation_decisions(executionId, createdAt DESC);
+
+      CREATE TABLE IF NOT EXISTS internal_match_enrollments (
+        userAddress TEXT PRIMARY KEY,
+        enrollmentId TEXT NOT NULL UNIQUE,
+        payloadHash TEXT NOT NULL,
+        encryptedPayload TEXT,
+        txHash TEXT NOT NULL,
+        blockNumber INTEGER,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_internal_match_enrollments_created ON internal_match_enrollments(createdAt DESC);
     `);
     return db;
   } catch (e) {
     console.warn("Using JSON file storage (better-sqlite3 unavailable on this system).");
     return initDbJson(dbPath);
   }
+}
+
+function saveInternalMatchEnrollment(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO internal_match_enrollments(
+      userAddress, enrollmentId, payloadHash, encryptedPayload, txHash, blockNumber, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.userAddress,
+    row.enrollmentId,
+    row.payloadHash,
+    row.encryptedPayload ?? null,
+    row.txHash,
+    row.blockNumber ?? null,
+    row.createdAt
+  );
+}
+
+function getInternalMatchEnrollmentByUser(db, userAddress) {
+  return db
+    .prepare("SELECT * FROM internal_match_enrollments WHERE userAddress = ?")
+    .get(String(userAddress).toLowerCase()) || null;
+}
+
+function hasInternalMatchEnrollment(db, userAddress) {
+  return !!getInternalMatchEnrollmentByUser(db, userAddress);
 }
 
 function saveIntent(db, intentId, userAddress, payload) {
@@ -1482,8 +1552,10 @@ module.exports = {
   saveDepositSession,
   getDepositSessionByIdempotencyKey,
   getDepositSessionBySessionId,
-  saveDepositTxReceipt
-  ,
+  saveDepositTxReceipt,
+  saveInternalMatchEnrollment,
+  getInternalMatchEnrollmentByUser,
+  hasInternalMatchEnrollment,
   saveInternalOrder,
   updateInternalOrderState,
   getInternalOrderById,
