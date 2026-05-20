@@ -98,7 +98,42 @@ const orderBook = new Map();
 const MAX_ORDERS_PER_PAIR = 50;
 const DEFAULT_RESERVATION_TTL_MS = Number(process.env.MATCHING_RESERVATION_TTL_MS || 90_000);
 const DEFAULT_FHE_POLICY_MODE = String(process.env.MATCHING_FHE_POLICY_MODE || "degraded").toLowerCase();
-const DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE = process.env.MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE !== "false";
+// M4: degraded fallback is OFF by default now. Production assertion (above)
+// still hard-fails if it is left on in production; for dev environments that
+// rely on the legacy behaviour, the env var must be explicitly set to "true"
+// and the operator will see a boot-time WARNING below.
+const DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE =
+  String(process.env.MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE || "false").toLowerCase() === "true";
+
+// M4 boot-time advisory warnings. These never block boot in non-production
+// (production guardrails are enforced by assertFheProductionSafety + the
+// internal-matching guardrails), but they make it obvious when an operator
+// has flipped a privacy-relevant lever on.
+(function emitFheMatchingStartupWarnings() {
+  try {
+    if (DEFAULT_FHE_DEGRADED_ALLOW_UNAVAILABLE) {
+      console.warn(
+        "[fheMatchingService] WARNING: MATCHING_FHE_DEGRADED_ALLOW_UNAVAILABLE=true — degraded fallback permits matches without a fresh FHE attestation. Set to 'false' for production-equivalent safety."
+      );
+    }
+    const expectedSignerRaw = String(process.env.EXPECTED_FHE_ATTESTATION_SIGNER || "").trim();
+    if (!expectedSignerRaw) {
+      const strict = DEFAULT_FHE_POLICY_MODE === "strict" || FHE_PRODUCTION_MODE;
+      const msg =
+        "[fheMatchingService] EXPECTED_FHE_ATTESTATION_SIGNER is not configured — verifyFheAttestation will reject every match in strict mode and only verify the signature shape elsewhere.";
+      if (strict) console.warn(msg);
+    }
+    // Deprecation notice — v1 canonical (with plaintext execAmount/execPrice)
+    // is accepted for one release as a fallback so a TenSEAL-style service can
+    // still drive the dev compare path. v2 canonical (execAmountCiphertextHash
+    // + execPriceCiphertextHash) is the supported shape going forward.
+    console.warn(
+      "[fheMatchingService] NOTICE: 'phantom-fhe-attestation/v1' canonical (plaintext execAmount/execPrice) is DEPRECATED. Use 'phantom-fhe-attestation/v2' (execAmountCiphertextHash / execPriceCiphertextHash). v1 will be removed after the next release."
+    );
+  } catch (_) {
+    /* never block boot on warnings */
+  }
+})();
 let matchingContext = {
   db: null,
   reservationTtlMs: DEFAULT_RESERVATION_TTL_MS,
@@ -624,6 +659,63 @@ function getExpectedFheAttestationSigner() {
   }
 }
 
+// ─── M4: canonical version negotiation ───────────────────────────────────
+//
+// M0+M1+M2 introduced the v2 canonical produced by tfhe-matching-service.
+// The v2 shape replaces the v1 plaintext `execAmount`/`execPrice` fields
+// with `execAmountCiphertextHash`/`execPriceCiphertextHash` — the matching
+// service never exfiltrates plaintext exec values.
+//
+// For one release we still accept v1 so a TenSEAL-style service can drive
+// the dev compare path. v1 will be removed after the next release.
+const CANONICAL_DOMAIN_V1 = "phantom-fhe-attestation/v1";
+const CANONICAL_DOMAIN_V2 = "phantom-fhe-attestation/v2";
+const SUPPORTED_CANONICAL_DOMAINS = new Set([CANONICAL_DOMAIN_V1, CANONICAL_DOMAIN_V2]);
+
+const REQUIRED_V2_FIELDS = [
+  "v",
+  "matched",
+  "makerCiphertextHash",
+  "takerCiphertextHash",
+  "makerUser",
+  "takerUser",
+  "makerNonce",
+  "takerNonce",
+  "inputAssetID",
+  "outputAssetID",
+  "execAmountCiphertextHash",
+  "execPriceCiphertextHash",
+  "ts",
+];
+
+// v2 canonicals MUST NOT carry plaintext exec amount / exec price; this is
+// the privacy contract the FHE service signs against. If a tampered service
+// ships a v2 canonical with a plaintext field, refuse it explicitly.
+const PLAINTEXT_EXEC_FIELDS_FORBIDDEN_IN_V2 = ["execAmount", "execPrice"];
+
+function detectCanonicalDomain(canonical) {
+  if (!canonical || typeof canonical !== "object") return null;
+  const v = typeof canonical.v === "string" ? canonical.v : null;
+  if (!v) return null;
+  return SUPPORTED_CANONICAL_DOMAINS.has(v) ? v : null;
+}
+
+function validateCanonicalShape(canonical, domain) {
+  if (domain === CANONICAL_DOMAIN_V2) {
+    for (const k of REQUIRED_V2_FIELDS) {
+      if (canonical[k] == null) return `v2_missing_field:${k}`;
+    }
+    for (const k of PLAINTEXT_EXEC_FIELDS_FORBIDDEN_IN_V2) {
+      if (canonical[k] != null) return `v2_plaintext_exec_field_forbidden:${k}`;
+    }
+    return null;
+  }
+  // v1 — accepted but deprecated; we only require enough fields for the
+  // decisionHash to be reproducible. The plaintext exec fields are a known
+  // v1 leak — see the deprecation warning above.
+  return null;
+}
+
 function safeDecryptOrderEnvelope(order) {
   try {
     if (!order?.encryptedPayload) return null;
@@ -645,7 +737,7 @@ function extractMatchIntentBundle(order) {
   return { intent, ciphertext, signature };
 }
 
-function verifyFheAttestation(attestation) {
+function verifyFheAttestation(attestation, opts = {}) {
   if (!attestation || typeof attestation !== "object") {
     return { valid: false, reason: "attestation_missing" };
   }
@@ -653,33 +745,67 @@ function verifyFheAttestation(attestation) {
   if (!decisionHash || !signature) {
     return { valid: false, reason: "attestation_fields_missing" };
   }
+
+  // ── Canonical shape gating (M4): when a `canonical` blob is provided we
+  // identify its version, enforce the v2 privacy contract (no plaintext
+  // execAmount/execPrice), and recompute the decisionHash. v1 is still
+  // accepted for one release with a deprecation warning emitted at module
+  // init.
+  let domain = null;
   if (canonical && typeof canonical === "object") {
+    domain = detectCanonicalDomain(canonical);
+    if (canonical.v != null && !domain) {
+      return { valid: false, reason: "canonical_domain_unsupported", canonicalDomain: String(canonical.v) };
+    }
+    const shapeErr = validateCanonicalShape(canonical, domain);
+    if (shapeErr) {
+      return { valid: false, reason: shapeErr, canonicalDomain: domain };
+    }
     const recomputed = ethers.keccak256(ethers.toUtf8Bytes(stableStringify(canonical)));
     if (recomputed.toLowerCase() !== String(decisionHash).toLowerCase()) {
-      return { valid: false, reason: "decision_hash_canonical_mismatch", recomputed };
+      return { valid: false, reason: "decision_hash_canonical_mismatch", recomputed, canonicalDomain: domain };
     }
   }
+
   let recovered;
   try {
     recovered = ethers.recoverAddress(decisionHash, signature);
   } catch (e) {
-    return { valid: false, reason: "signature_recover_failed", error: e?.message || String(e) };
+    return { valid: false, reason: "signature_recover_failed", error: e?.message || String(e), canonicalDomain: domain };
   }
   if (signerAddress) {
     try {
       const expected = ethers.getAddress(signerAddress);
       if (expected.toLowerCase() !== recovered.toLowerCase()) {
-        return { valid: false, reason: "claimed_signer_mismatch", recovered, claimed: expected };
+        return { valid: false, reason: "claimed_signer_mismatch", recovered, claimed: expected, canonicalDomain: domain };
       }
     } catch {
-      return { valid: false, reason: "claimed_signer_invalid", recovered };
+      return { valid: false, reason: "claimed_signer_invalid", recovered, canonicalDomain: domain };
     }
   }
+
   const expectedSigner = getExpectedFheAttestationSigner();
-  if (expectedSigner && expectedSigner.toLowerCase() !== recovered.toLowerCase()) {
-    return { valid: false, reason: "unexpected_signer", recovered, expected: expectedSigner };
+  const strictMode =
+    typeof opts.strictExpectedSigner === "boolean"
+      ? opts.strictExpectedSigner
+      : (matchingContext.fhePolicyMode === "strict" || FHE_PRODUCTION_MODE);
+
+  if (!expectedSigner && strictMode) {
+    // M4: strict mode forbids the permissive fallback that previously let any
+    // signature recover-only pass when EXPECTED_FHE_ATTESTATION_SIGNER was
+    // unset. Production must pin the expected signer.
+    return {
+      valid: false,
+      reason: "expected_signer_unconfigured_in_strict_mode",
+      recovered,
+      canonicalDomain: domain,
+    };
   }
-  return { valid: true, recovered };
+  if (expectedSigner && expectedSigner.toLowerCase() !== recovered.toLowerCase()) {
+    return { valid: false, reason: "unexpected_signer", recovered, expected: expectedSigner, canonicalDomain: domain };
+  }
+
+  return { valid: true, recovered, canonicalDomain: domain };
 }
 
 async function evaluateInternalMatchCompare(taker, maker, traceId) {
@@ -732,6 +858,10 @@ async function evaluateInternalMatchCompare(taker, maker, traceId) {
   const matched = Boolean(body?.matched);
   const attestation = body?.attestation || null;
   const verification = matched ? verifyFheAttestation(attestation) : { valid: !attestation || true };
+  // Derive decisionDomain from the actual canonical version (M4 v1+v2 path).
+  const decisionDomain =
+    detectCanonicalDomain(attestation?.canonical) ||
+    (typeof attestation?.canonical?.v === "string" ? attestation.canonical.v : CANONICAL_DOMAIN_V2);
   if (matched && !verification.valid) {
     return {
       availability: "available",
@@ -740,7 +870,7 @@ async function evaluateInternalMatchCompare(taker, maker, traceId) {
       attestationRef: attestation?.decisionHash || null,
       attestationSignature: attestation?.signature || null,
       attestationPayloadHash: attestation?.decisionHash || null,
-      decisionDomain: "phantom-fhe-attestation/v1",
+      decisionDomain,
       error: verification.error || verification.reason || "attestation_invalid",
       verifiedSigner: verification.recovered || null,
       fheCanonical: attestation?.canonical || null,
@@ -756,7 +886,7 @@ async function evaluateInternalMatchCompare(taker, maker, traceId) {
     attestationRef: attestation?.decisionHash || null,
     attestationSignature: attestation?.signature || null,
     attestationPayloadHash: attestation?.decisionHash || null,
-    decisionDomain: "phantom-fhe-attestation/v1",
+    decisionDomain,
     decisionNonce: attestation?.canonical?.ts || null,
     verifiedSigner: matched ? verification.recovered : null,
     fheCanonical: attestation?.canonical || null,
@@ -764,6 +894,43 @@ async function evaluateInternalMatchCompare(taker, maker, traceId) {
     makerSignedIntent: { intent: makerBundle.intent, signature: makerBundle.signature },
     takerSignedIntent: { intent: takerBundle.intent, signature: takerBundle.signature },
   };
+}
+
+// M4: privacy filter applied AT THE PERSISTENCE BOUNDARY. The v2 canonical
+// contract is that the FHE service never returns plaintext exec amount /
+// price — only ciphertext bundles + their hashes. We strip any stray
+// plaintext-looking fields here as defense-in-depth before the result is
+// embedded in the match metadata that lands in the DB. The v1 canonical
+// itself still carries execAmount/execPrice as plaintext (known v1 leak,
+// see deprecation notice above); for v1 the leak is sealed inside
+// `canonical` and cannot be redacted without breaking the signature, so we
+// document the limitation rather than mutate.
+const PLAINTEXT_EXEC_KEYS = new Set([
+  "execAmount",
+  "execAmountPlain",
+  "execAmountPlaintext",
+  "execPrice",
+  "execPricePlain",
+  "execPricePlaintext",
+]);
+
+function stripPlaintextExecFields(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (PLAINTEXT_EXEC_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function sanitizeMatchAttestationForPersistence(attestation) {
+  if (!attestation || typeof attestation !== "object") return attestation;
+  const out = { ...attestation };
+  if (out.result) out.result = stripPlaintextExecFields(out.result);
+  // The canonical is sealed by the signature — DO NOT mutate. The v2 shape
+  // gate above already rejects v2 canonicals that try to smuggle plaintext.
+  return out;
 }
 
 async function evaluateFheCompatibility(taker, maker, traceId) {
@@ -1069,13 +1236,13 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       makerSignedIntent: selected.fheDetails?.makerSignedIntent || null,
       takerSignedIntent: selected.fheDetails?.takerSignedIntent || null,
       fheAttestation: selected.fheDetails?.fheCanonical
-        ? {
+        ? sanitizeMatchAttestationForPersistence({
             decisionHash: selected.fheDetails?.attestationPayloadHash || null,
             signature: selected.fheDetails?.attestationSignature || null,
             signerAddress: selected.fheDetails?.verifiedSigner || null,
             canonical: selected.fheDetails?.fheCanonical || null,
             result: selected.fheDetails?.fheResult || null,
-          }
+          })
         : null,
     });
 

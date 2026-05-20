@@ -1,0 +1,19 @@
+node_modules/
+npm-debug.log
+.env
+.env.local
+.env.*.local
+
+# CRITICAL: TFHE secret key MUST NEVER be committed.
+# The public key MAY be safe to commit in dev, but we keep both out of git
+# to keep the discipline strict (no key material in the repo, ever).
+keys/*.key
+keys/*.bin
+keys/*.tfhe
+keys/secret.*
+keys/public.*
+
+# Test temporary outputs
+.test-keys/
+.test-*.log
+coverage/

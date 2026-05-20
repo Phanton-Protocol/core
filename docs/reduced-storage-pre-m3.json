@@ -1,0 +1,490 @@
+{
+  "storage": [
+    {
+      "astId": 505,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "_initialized",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_uint8"
+    },
+    {
+      "astId": 508,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "_initializing",
+      "offset": 1,
+      "slot": "0",
+      "type": "t_bool"
+    },
+    {
+      "astId": 487,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__gap",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "astId": 803,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__gap",
+      "offset": 0,
+      "slot": "51",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "astId": 1269,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__gap",
+      "offset": 0,
+      "slot": "101",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "astId": 11,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "_owner",
+      "offset": 0,
+      "slot": "151",
+      "type": "t_address"
+    },
+    {
+      "astId": 131,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__gap",
+      "offset": 0,
+      "slot": "152",
+      "type": "t_array(t_uint256)49_storage"
+    },
+    {
+      "astId": 819,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "_status",
+      "offset": 0,
+      "slot": "201",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 888,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__gap",
+      "offset": 0,
+      "slot": "202",
+      "type": "t_array(t_uint256)49_storage"
+    },
+    {
+      "astId": 2271,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "verifier",
+      "offset": 0,
+      "slot": "251",
+      "type": "t_contract(IVerifier)5250"
+    },
+    {
+      "astId": 2274,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "thresholdVerifier",
+      "offset": 0,
+      "slot": "252",
+      "type": "t_contract(IVerifier)5250"
+    },
+    {
+      "astId": 2277,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "swapAdaptor",
+      "offset": 0,
+      "slot": "253",
+      "type": "t_contract(IPancakeSwapAdaptor)5063"
+    },
+    {
+      "astId": 2280,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "feeOracle",
+      "offset": 0,
+      "slot": "254",
+      "type": "t_contract(IFeeOracle)5040"
+    },
+    {
+      "astId": 2283,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "relayerRegistry",
+      "offset": 0,
+      "slot": "255",
+      "type": "t_contract(IRelayerRegistry)5087"
+    },
+    {
+      "astId": 2285,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "depositHandler",
+      "offset": 0,
+      "slot": "256",
+      "type": "t_address"
+    },
+    {
+      "astId": 2287,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "withdrawHandler",
+      "offset": 0,
+      "slot": "257",
+      "type": "t_address"
+    },
+    {
+      "astId": 2290,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "tree",
+      "offset": 0,
+      "slot": "258",
+      "type": "t_struct(Tree)5311_storage"
+    },
+    {
+      "astId": 2292,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "merkleRoot",
+      "offset": 0,
+      "slot": "272",
+      "type": "t_bytes32"
+    },
+    {
+      "astId": 2297,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "validMerkleRoots",
+      "offset": 0,
+      "slot": "273",
+      "type": "t_mapping(t_bytes32,t_bool)"
+    },
+    {
+      "astId": 2300,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "commitmentCount",
+      "offset": 0,
+      "slot": "274",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 2304,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "commitments",
+      "offset": 0,
+      "slot": "275",
+      "type": "t_mapping(t_uint256,t_bytes32)"
+    },
+    {
+      "astId": 2308,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "nullifiers",
+      "offset": 0,
+      "slot": "276",
+      "type": "t_mapping(t_bytes32,t_bool)"
+    },
+    {
+      "astId": 2312,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "assetRegistry",
+      "offset": 0,
+      "slot": "277",
+      "type": "t_mapping(t_uint256,t_address)"
+    },
+    {
+      "astId": 2316,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "assetIDMap",
+      "offset": 0,
+      "slot": "278",
+      "type": "t_mapping(t_address,t_uint256)"
+    },
+    {
+      "astId": 2318,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "nextAssetID",
+      "offset": 0,
+      "slot": "279",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 2322,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "userNotes",
+      "offset": 0,
+      "slot": "280",
+      "type": "t_mapping(t_address,t_bytes32)"
+    },
+    {
+      "astId": 2326,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "userNoteAssetID",
+      "offset": 0,
+      "slot": "281",
+      "type": "t_mapping(t_address,t_uint256)"
+    },
+    {
+      "astId": 2328,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "gasReserve",
+      "offset": 0,
+      "slot": "282",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 2332,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "blacklistedRelayers",
+      "offset": 0,
+      "slot": "283",
+      "type": "t_mapping(t_address,t_bool)"
+    },
+    {
+      "astId": 2334,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "complianceModuleAddress",
+      "offset": 0,
+      "slot": "284",
+      "type": "t_address"
+    },
+    {
+      "astId": 2336,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "poolOwner",
+      "offset": 0,
+      "slot": "285",
+      "type": "t_address"
+    },
+    {
+      "astId": 2339,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "timelock",
+      "offset": 0,
+      "slot": "286",
+      "type": "t_address"
+    },
+    {
+      "astId": 2342,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "emergencyAdmin",
+      "offset": 0,
+      "slot": "287",
+      "type": "t_address"
+    },
+    {
+      "astId": 2345,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "emergencyPaused",
+      "offset": 20,
+      "slot": "287",
+      "type": "t_bool"
+    },
+    {
+      "astId": 2350,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "allowedERC20",
+      "offset": 0,
+      "slot": "288",
+      "type": "t_mapping(t_address,t_bool)"
+    },
+    {
+      "astId": 2353,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "fundFlowLocked",
+      "offset": 0,
+      "slot": "289",
+      "type": "t_bool"
+    },
+    {
+      "astId": 2358,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "swapCommitmentCommitter",
+      "offset": 0,
+      "slot": "290",
+      "type": "t_mapping(t_bytes32,t_address)"
+    },
+    {
+      "astId": 2362,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "swapCommitmentDeadline",
+      "offset": 0,
+      "slot": "291",
+      "type": "t_mapping(t_bytes32,t_uint256)"
+    },
+    {
+      "astId": 2367,
+      "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+      "label": "__moduleOneSecurityGap",
+      "offset": 0,
+      "slot": "292",
+      "type": "t_array(t_uint256)44_storage"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "label": "address",
+      "numberOfBytes": "20"
+    },
+    "t_array(t_bytes32)10_storage": {
+      "base": "t_bytes32",
+      "encoding": "inplace",
+      "label": "bytes32[10]",
+      "numberOfBytes": "320"
+    },
+    "t_array(t_uint256)44_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "label": "uint256[44]",
+      "numberOfBytes": "1408"
+    },
+    "t_array(t_uint256)49_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "label": "uint256[49]",
+      "numberOfBytes": "1568"
+    },
+    "t_array(t_uint256)50_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "label": "uint256[50]",
+      "numberOfBytes": "1600"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "label": "bool",
+      "numberOfBytes": "1"
+    },
+    "t_bytes32": {
+      "encoding": "inplace",
+      "label": "bytes32",
+      "numberOfBytes": "32"
+    },
+    "t_contract(IFeeOracle)5040": {
+      "encoding": "inplace",
+      "label": "contract IFeeOracle",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IPancakeSwapAdaptor)5063": {
+      "encoding": "inplace",
+      "label": "contract IPancakeSwapAdaptor",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IRelayerRegistry)5087": {
+      "encoding": "inplace",
+      "label": "contract IRelayerRegistry",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IVerifier)5250": {
+      "encoding": "inplace",
+      "label": "contract IVerifier",
+      "numberOfBytes": "20"
+    },
+    "t_mapping(t_address,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_address,t_bytes32)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => bytes32)",
+      "numberOfBytes": "32",
+      "value": "t_bytes32"
+    },
+    "t_mapping(t_address,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => uint256)",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_mapping(t_bytes32,t_address)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => address)",
+      "numberOfBytes": "32",
+      "value": "t_address"
+    },
+    "t_mapping(t_bytes32,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_bytes32,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => uint256)",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_mapping(t_uint256,t_address)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => address)",
+      "numberOfBytes": "32",
+      "value": "t_address"
+    },
+    "t_mapping(t_uint256,t_bytes32)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => bytes32)",
+      "numberOfBytes": "32",
+      "value": "t_bytes32"
+    },
+    "t_struct(Tree)5311_storage": {
+      "encoding": "inplace",
+      "label": "struct IncrementalMerkleTree.Tree",
+      "members": [
+        {
+          "astId": 5298,
+          "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+          "label": "depth",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 5300,
+          "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+          "label": "nextIndex",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 5302,
+          "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+          "label": "root",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_bytes32"
+        },
+        {
+          "astId": 5306,
+          "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+          "label": "zeros",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_array(t_bytes32)10_storage"
+        },
+        {
+          "astId": 5310,
+          "contract": "contracts/_full/core/ShieldedPoolUpgradeableReduced.sol:ShieldedPoolUpgradeableReduced",
+          "label": "filledSubtrees",
+          "offset": 0,
+          "slot": "13",
+          "type": "t_mapping(t_uint256,t_bytes32)"
+        }
+      ],
+      "numberOfBytes": "448"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "label": "uint256",
+      "numberOfBytes": "32"
+    },
+    "t_uint8": {
+      "encoding": "inplace",
+      "label": "uint8",
+      "numberOfBytes": "1"
+    }
+  }
+}

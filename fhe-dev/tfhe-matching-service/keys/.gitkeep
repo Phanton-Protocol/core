@@ -1,0 +1,6 @@
+# This directory holds TFHE key material generated on first service boot.
+# Files matching keys/*.key are ignored by .gitignore — never commit secret
+# key material to source control.
+#
+# The service writes keys/secret.key (mode 0600) and keys/public.key (mode 0644)
+# on first boot.

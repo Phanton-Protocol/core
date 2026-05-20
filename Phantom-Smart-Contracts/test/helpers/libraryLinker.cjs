@@ -3,8 +3,10 @@ const { ethers } = require("hardhat");
 const JOIN_SPLIT_FEE_LIB_FQN =
   "contracts/_full/libraries/JoinSplitFeeValidation.sol:JoinSplitFeeValidation";
 const MEV_COMMIT_LIB_FQN = "contracts/_full/libraries/MevCommitReveal.sol:MevCommitReveal";
+const POOL_HELPERS_LIB_FQN = "contracts/_full/libraries/PoolHelpersLib.sol:PoolHelpersLib";
 let cachedIntentLib = null;
 let cachedJoinSplitFeeLib = null;
+let cachedPoolHelpersLib = null;
 let cachedNetworkKey = null;
 
 async function networkKey() {
@@ -54,10 +56,33 @@ async function getMevCommitRevealLibraries() {
   return { MevCommitReveal: cachedMevLib };
 }
 
+async function getPoolHelpersLibraries() {
+  const key = await networkKey();
+  if (!cachedPoolHelpersLib || cachedNetworkKey !== key) {
+    const Factory = await ethers.getContractFactory(POOL_HELPERS_LIB_FQN);
+    const lib = await Factory.deploy();
+    await lib.waitForDeployment();
+    cachedPoolHelpersLib = await lib.getAddress();
+    cachedNetworkKey = key;
+  }
+  return { PoolHelpersLib: cachedPoolHelpersLib };
+}
+
 async function getUpgradeablePoolLibraries(fqn) {
   const libs = { ...(await getJoinSplitFeeValidationLibraries()) };
   if (fqn.includes("ShieldedPoolUpgradeableReduced")) {
     Object.assign(libs, await getMevCommitRevealLibraries());
+    // M3: Reduced pool calls InternalMatchIntentLib via an inline-assembly
+    // DELEGATECALL forwarder, NOT via the Solidity library linker — so the
+    // library address is held in storage as `internalMatchIntentLib` and is
+    // passed via the impl constructor; no `libraries` link is required at
+    // contract-factory time for InternalMatchIntentLib.
+    //
+    // M3 also moved `_checkCompliance`, `_distributeProtocolFee`, and the
+    // deposit-fee branch of `_finalizeDepositLogic` into the new
+    // {PoolHelpersLib} (linked normally via the Solidity library linker) so
+    // the Reduced impl stays under the EIP-170 24,576-byte runtime cap.
+    Object.assign(libs, await getPoolHelpersLibraries());
   }
   return libs;
 }
@@ -75,6 +100,7 @@ async function getUpgradeablePoolFactory(fqn) {
 module.exports = {
   getShieldedPoolLibraries,
   getJoinSplitFeeValidationLibraries,
+  getPoolHelpersLibraries,
   getUpgradeablePoolLibraries,
   getShieldedPoolFactory,
   getUpgradeablePoolFactory,

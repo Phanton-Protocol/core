@@ -102,7 +102,11 @@ describe("Module 6 — integrations & oracle hardening", function () {
       expect(pool.setSwapAdaptor).to.equal(undefined);
       const poolAddr = await pool.getAddress();
       const Impl = await getUpgradeablePoolFactory(REDUCED_FQN);
-      const impl2 = await Impl.deploy();
+      // M3: Reduced impl takes the InternalMatchIntentLib address as a
+      // constructor argument (immutable in impl bytecode).
+      const { getShieldedPoolLibraries } = require("../helpers/libraryLinker.cjs");
+      const { InternalMatchIntentLib: imlAddr } = await getShieldedPoolLibraries();
+      const impl2 = await Impl.deploy(imlAddr);
       await impl2.waitForDeployment();
       const data = pool.interface.encodeFunctionData("upgradeTo", [await impl2.getAddress()]);
       const salt = ethers.id("m6-uups-swap-adaptor-path");
