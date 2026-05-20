@@ -39,6 +39,18 @@ On-chain Merkle updates only on deposit, swap, withdraw. Path B records match ou
 | Owner can decrypt enrollment payload | Yes (by design) |
 | Amounts hidden on-chain forever | **No** — withdraw reveals payout/conservation |
 
+## M7 implementation (pending note ledger)
+
+After FHE attestation verification on `matched=true`, the relayer calls `pendingNoteLedger.applyMatch` (not `settlementCoordinator` / `internalMatchSettle`):
+
+- **Pending notes** (`pending_notes`): encrypted output note payloads per maker/taker (`status`: `pending` → `spent` → `withdrawn` at M8). Bookkeeping amounts use **signed intent** `amount` / `limitPrice` (or v2 `execAmountCiphertextHash` / `execPriceCiphertextHash` references only). The matcher never returns plaintext exec fields.
+- **Input notes**: IDs from order `envelope.inputNoteIds` (or `envelope.noteRefs[].noteId`); marked `pending_spent` inside the encrypted deposit-note payload.
+- **Fee accrual**: `PHANTOM_INTERNAL_MATCH_FEE_BPS` (default 20 = 0.2%) applied in encrypted ledger math (`protocolFeeAccrued` / `netAmount`); enforced on-chain at withdraw (M8).
+- **Audit log** (`internal_match_audit_log`): hash-chained entries  
+  `entry_hash = H(prev_hash ‖ match_hash ‖ decision_hash ‖ maker_enrollment_id ‖ taker_enrollment_id ‖ keccak(inputNoteIds) ‖ keccak(outputNoteCommitments) ‖ ts)`  
+  (ABI-packed `bytes32` tuple in `pendingNoteLedger.computeAuditEntryHash`).
+- **Status API**: `GET /internal-match/:matchHash/status` returns ledger status + pending note refs (`txHash: null`, `mode: off_chain`). Optional `GET /internal-match/pending-notes/:owner` for withdraw planner (M8).
+
 ## Explicitly removed (Path A / M3)
 
 - `internalMatchSettle` at match time

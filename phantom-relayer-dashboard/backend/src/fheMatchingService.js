@@ -14,7 +14,9 @@ const {
   listFillsByMatch,
   saveMatchDecision,
   listMatchDecisionsByOrder,
+  patchMatchMetadata,
 } = require("./db");
+const { applyMatch: applyPendingNoteLedgerMatch } = require("./pendingNoteLedger");
 const { ORDER_STATUS, assertLegalTransition } = require("./internalOrderLifecycle");
 const { decryptJsonAtRest } = require("./noteCipher");
 const router = express.Router();
@@ -1228,6 +1230,16 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       decisionNonce: selected.fheDetails?.decisionNonce || null,
       decisionDomain: selected.fheDetails?.decisionDomain || null,
     });
+    const fheAttestationPersisted = selected.fheDetails?.fheCanonical
+      ? sanitizeMatchAttestationForPersistence({
+          decisionHash: selected.fheDetails?.attestationPayloadHash || null,
+          signature: selected.fheDetails?.attestationSignature || null,
+          signerAddress: selected.fheDetails?.verifiedSigner || null,
+          canonical: selected.fheDetails?.fheCanonical || null,
+          result: selected.fheDetails?.fheResult || null,
+        })
+      : null;
+
     const persisted = persistMatchAndFills(db, {
       matchHash,
       executionKey,
@@ -1244,15 +1256,37 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       decisionArtifact: decisionArtifactBundle.artifact,
       makerSignedIntent: selected.fheDetails?.makerSignedIntent || null,
       takerSignedIntent: selected.fheDetails?.takerSignedIntent || null,
-      fheAttestation: selected.fheDetails?.fheCanonical
-        ? sanitizeMatchAttestationForPersistence({
-            decisionHash: selected.fheDetails?.attestationPayloadHash || null,
-            signature: selected.fheDetails?.attestationSignature || null,
-            signerAddress: selected.fheDetails?.verifiedSigner || null,
-            canonical: selected.fheDetails?.fheCanonical || null,
-            result: selected.fheDetails?.fheResult || null,
-          })
-        : null,
+      fheAttestation: fheAttestationPersisted,
+    });
+
+    const ledgerResult = applyPendingNoteLedgerMatch(db, {
+      matchHash,
+      decisionHash: decisionArtifactBundle.decisionHash,
+      attestation: fheAttestationPersisted,
+      makerOrder: makerReservedRow,
+      takerOrder: takerReservedRow,
+      makerSignedIntent: selected.fheDetails?.makerSignedIntent || null,
+      takerSignedIntent: selected.fheDetails?.takerSignedIntent || null,
+      fillQty: fillQty.toString(),
+    });
+
+    patchMatchMetadata(db, matchHash, {
+      pathB: {
+        matched: true,
+        matchHash,
+        executionKey,
+        decisionHash: decisionArtifactBundle.decisionHash,
+        makerSignedIntent: selected.fheDetails?.makerSignedIntent || null,
+        takerSignedIntent: selected.fheDetails?.takerSignedIntent || null,
+        ledger: {
+          status: ledgerResult.ledgerStatus,
+          pendingNotesCreated: ledgerResult.pendingNotesCreated,
+          auditEntryHash: ledgerResult.auditEntryHash,
+          pendingNoteIds: ledgerResult.pendingNoteIds,
+          inputNoteIds: ledgerResult.inputNoteIds,
+          idempotent: ledgerResult.idempotent,
+        },
+      },
     });
 
     const takerAfter = derivePostFillState(takerReservedRow, fillQty, executionKey, actor);
@@ -1349,6 +1383,8 @@ async function runDeterministicMatchForOrderCore(db, takerOrderId, workerId = "m
       fheDecisionHash: persisted.match?.fheDecisionHash || null,
       fheAttestationRef: persisted.match?.fheAttestationRef || null,
       fills: persisted.fills,
+      ledgerStatus: ledgerResult.ledgerStatus,
+      pendingNotesCreated: ledgerResult.pendingNotesCreated,
     };
   };
 

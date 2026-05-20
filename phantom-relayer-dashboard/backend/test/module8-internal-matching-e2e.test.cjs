@@ -12,7 +12,7 @@ const dbPath = path.join(tempDir, "relayer.db");
 process.env.FIREBASE_FUNCTIONS = "true";
 process.env.SEE_MODE = "disabled";
 process.env.NOTES_ENCRYPTION_KEY_HEX = process.env.NOTES_ENCRYPTION_KEY_HEX || "11".repeat(32);
-process.env.RELAYER_DB_PATH = dbPath;
+process.env.DB_PATH = dbPath;
 process.env.SETTLEMENT_SUBMISSION_MODE = "dry_run";
 process.env.COMPLIANCE_POLICY_MODE = "disabled";
 process.env.ATTESTATION_REQUIRED = "false";
@@ -20,7 +20,7 @@ process.env.SHIELDED_POOL_ADDRESS =
   process.env.SHIELDED_POOL_ADDRESS || "0xC1C4cb6d27790cf61132e62062Ae66392Bc013F2";
 
 const { app } = require("../src/index");
-const { initDb, getMatchByHash, saveMatch, saveFill, saveInternalOrder } = require("../src/db");
+const { initDb, getMatchByHash, saveMatch, saveFill, saveInternalOrder, saveInternalMatchEnrollment } = require("../src/db");
 const { configureMatchingEngine, runDeterministicMatchForOrder, REASON_CODES } = require("../src/fheMatchingService");
 const {
   createSettlementCoordinator,
@@ -295,6 +295,17 @@ test("module8 happy path: intent create -> encrypted match -> decision artifact 
   const db = initDb(dbPath);
   const alice = ethers.Wallet.createRandom();
   const bob = ethers.Wallet.createRandom();
+  for (const addr of [alice.address, bob.address]) {
+    saveInternalMatchEnrollment(db, {
+      userAddress: addr.toLowerCase(),
+      enrollmentId: ethers.keccak256(ethers.toUtf8Bytes(`m8-${addr}`)),
+      payloadHash: ethers.ZeroHash,
+      encryptedPayload: null,
+      txHash: "0x" + "ee".repeat(32),
+      blockNumber: 1,
+      createdAt: Date.now(),
+    });
+  }
 
   const buy = await createSignedInternalIntent({
     baseUrl,

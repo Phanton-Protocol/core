@@ -50,7 +50,7 @@ delete process.env.PHANTOM_DEPLOYMENT_TIER;
 // cache right before each setup.
 const matchingModulePath = require.resolve("../src/fheMatchingService");
 
-const { initDb, getMatchByHash } = require("../src/db");
+const { initDb, getMatchByHash, saveInternalMatchEnrollment } = require("../src/db");
 const {
   createInternalOrderRouter,
   INTERNAL_ORDER_TYPES,
@@ -199,6 +199,18 @@ async function setupBackend(t, { fheUrl, expectedSigner } = {}) {
   });
 }
 
+function seedEnrollment(db, ownerAddress) {
+  saveInternalMatchEnrollment(db, {
+    userAddress: ownerAddress.toLowerCase(),
+    enrollmentId: ethers.keccak256(ethers.toUtf8Bytes(`p4b-${ownerAddress}`)),
+    payloadHash: ethers.ZeroHash,
+    encryptedPayload: null,
+    txHash: "0x" + "dd".repeat(32),
+    blockNumber: 1,
+    createdAt: Date.now(),
+  });
+}
+
 async function postSignedIntent({ baseUrl, wallet, side, amount, limitPrice, opNonce, matchNonce, baseAsset = "WBNB", quoteAsset = "USDT" }) {
   const expiry = String(Math.floor(Date.now() / 1000) + 3600);
   const replayKey = ethers.keccak256(
@@ -328,6 +340,8 @@ test("phase4b: v2 canonical compare response keeps the in-memory match record fr
 
   const seller = ethers.Wallet.createRandom();
   const buyer = ethers.Wallet.createRandom();
+  seedEnrollment(db, seller.address);
+  seedEnrollment(db, buyer.address);
   const sellerOut = await postSignedIntent({
     baseUrl, wallet: seller, side: "sell", amount: 100, limitPrice: 10, opNonce: 1, matchNonce: 1001,
   });
@@ -397,6 +411,8 @@ test("phase4b: attestation verification passes when signer matches EXPECTED_FHE_
 
   const seller = ethers.Wallet.createRandom();
   const buyer = ethers.Wallet.createRandom();
+  seedEnrollment(db, seller.address);
+  seedEnrollment(db, buyer.address);
   const sellerOut = await postSignedIntent({
     baseUrl, wallet: seller, side: "sell", amount: 100, limitPrice: 10, opNonce: 1, matchNonce: 1001,
   });
@@ -431,6 +447,8 @@ test("phase4b: attestation verification FAILS when EXPECTED_FHE_ATTESTATION_SIGN
 
   const seller = ethers.Wallet.createRandom();
   const buyer = ethers.Wallet.createRandom();
+  seedEnrollment(db, seller.address);
+  seedEnrollment(db, buyer.address);
   await postSignedIntent({
     baseUrl, wallet: seller, side: "sell", amount: 100, limitPrice: 10, opNonce: 1, matchNonce: 1001,
   });

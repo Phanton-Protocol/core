@@ -26,7 +26,8 @@ const {
   saveDepositSession,
   getDepositSessionByIdempotencyKey,
   getDepositSessionBySessionId,
-  saveDepositTxReceipt
+  saveDepositTxReceipt,
+  getMatchByHash,
 } = require("./db");
 const { mimc7 } = require("./mimc7");
 const { canonicalizeNote, noteIdFromCanonical, normalizeHex32 } = require("./noteModel");
@@ -47,6 +48,7 @@ const { computeCanonicalAlignmentWarnings } = require("./configAlignment");
 const { createInternalOrderRouter } = require("./internalOrderRoutes");
 const { createInternalMatchEnrollmentRouter } = require("./internalMatchEnrollmentRoutes");
 const { createSettlementCoordinator } = require("./settlementCoordinator");
+const { getMatchLedgerStatus, getPendingNotes } = require("./pendingNoteLedger");
 const { createComplianceEngine } = require("./complianceEngine");
 const {
   assertRelayerRegistered,
@@ -2750,6 +2752,7 @@ app.get("/health", (req, res) => {
         "/intent/internal/cancel",
         "/intent/internal/:id",
         "/internal-match/:matchHash/status",
+        "/internal-match/pending-notes/:owner",
       ],
     },
   });
@@ -2786,6 +2789,7 @@ app.get("/internal-matching/health", (req, res) => {
       "/intent/internal/cancel",
       "/intent/internal/:id",
       "/internal-match/:matchHash/status",
+      "/internal-match/pending-notes/:owner",
     ],
   };
   return res.status(guardrails.ok ? 200 : 503).json(payload);
@@ -2800,23 +2804,22 @@ app.use("/intent/internal", requireSeeForSensitiveFlow, internalOrderRouter);
 app.get("/internal-match/:matchHash/status", requireSeeForSensitiveFlow, (req, res) => {
   const matchHash = String(req.params.matchHash || "").trim();
   if (!matchHash) return res.status(400).json({ error: "match_hash_required" });
-  const snapshot = settlementCoordinator.getStatus(matchHash);
-  if (!snapshot) return res.status(404).json({ error: "internal_match_status_not_found", matchHash });
-  // Path-B: do not surface any `onchain.internalMatchData` payload — match has
-  // no on-chain leg until withdraw.
-  return res.json({
-    matchHash,
-    execution: {
-      status: snapshot.execution?.status || null,
-      attemptCount: snapshot.execution?.attemptCount || 0,
-      txHash: null,
-      mode: "off_chain",
-    },
-    events: snapshot.events,
-    latestGateOutcome: snapshot.latestGateOutcome,
-    complianceDecisions: snapshot.complianceDecisions,
-    attestationDecisions: snapshot.attestationDecisions,
-  });
+  if (!db) return res.status(503).json({ error: "db_not_configured" });
+  const ledger = getMatchLedgerStatus(db, matchHash);
+  if (!ledger) {
+    const match = getMatchByHash(db, matchHash);
+    if (!match) return res.status(404).json({ error: "internal_match_status_not_found", matchHash });
+    return res.status(404).json({ error: "internal_match_ledger_not_applied", matchHash });
+  }
+  return res.json(ledger);
+});
+
+app.get("/internal-match/pending-notes/:owner", requireSeeForSensitiveFlow, (req, res) => {
+  const owner = String(req.params.owner || "").trim();
+  if (!owner || !ethers.isAddress(owner)) return res.status(400).json({ error: "owner_address_required" });
+  if (!db) return res.status(503).json({ error: "db_not_configured" });
+  const notes = getPendingNotes(db, ethers.getAddress(owner));
+  return res.json({ owner: ethers.getAddress(owner), pendingNotes: notes });
 });
 
 app.get("/config", (req, res) => {

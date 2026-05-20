@@ -9,7 +9,7 @@ const { ethers } = require("ethers");
 process.env.SEE_MODE = process.env.SEE_MODE || "disabled";
 process.env.NOTES_ENCRYPTION_KEY_HEX = process.env.NOTES_ENCRYPTION_KEY_HEX || "11".repeat(32);
 
-const { initDb, getMatchByHash } = require("../src/db");
+const { initDb, getMatchByHash, saveInternalMatchEnrollment } = require("../src/db");
 const {
   createInternalOrderRouter,
   INTERNAL_ORDER_TYPES,
@@ -42,6 +42,18 @@ function signMatchAttestation(canonical, key = SERVICE_KEY) {
   const sk = new ethers.SigningKey(key);
   const sig = sk.sign(digest);
   return { decisionHash: digest, signature: ethers.Signature.from(sig).serialized, signerAddress: new ethers.Wallet(key).address, canonical };
+}
+
+function seedEnrollment(db, ownerAddress) {
+  saveInternalMatchEnrollment(db, {
+    userAddress: ownerAddress.toLowerCase(),
+    enrollmentId: ethers.keccak256(ethers.toUtf8Bytes(`phase4-${ownerAddress}`)),
+    payloadHash: ethers.ZeroHash,
+    encryptedPayload: null,
+    txHash: "0x" + "dd".repeat(32),
+    blockNumber: 1,
+    createdAt: Date.now(),
+  });
 }
 
 async function setupApp(t) {
@@ -194,6 +206,8 @@ test("phase4 matching service uses /internal-match/compare and persists user sig
   const { baseUrl, db } = await setupApp(t);
   const sellerWallet = ethers.Wallet.createRandom();
   const buyerWallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, sellerWallet.address);
+  seedEnrollment(db, buyerWallet.address);
   const sellerOut = await postSignedIntent({ baseUrl, wallet: sellerWallet, side: "sell", amount: 100, limitPrice: 10, opNonce: 1, matchNonce: 1001 });
   assert.equal(sellerOut.status, 201);
   assert.equal(sellerOut.body.matchIntentBound, true);
@@ -221,6 +235,8 @@ test("phase4 matching service uses /internal-match/compare and persists user sig
   });
   assert.equal(verification.valid, true, `attestation must verify: ${JSON.stringify(verification)}`);
   assert.equal(verification.recovered.toLowerCase(), SERVICE_ADDR.toLowerCase());
+  assert.equal(meta.pathB?.ledger?.status, "ledger_applied");
+  assert.ok(meta.pathB?.ledger?.auditEntryHash);
 });
 
 test("phase4 fallback to legacy compatibility path when matchIntent missing", async (t) => {
@@ -229,6 +245,8 @@ test("phase4 fallback to legacy compatibility path when matchIntent missing", as
 
   const sellerWallet = ethers.Wallet.createRandom();
   const buyerWallet = ethers.Wallet.createRandom();
+  seedEnrollment(db, sellerWallet.address);
+  seedEnrollment(db, buyerWallet.address);
   const sellerOut = await postBareIntent({ baseUrl, wallet: sellerWallet, side: "sell", amount: 100, limitPrice: 10, opNonce: 1 });
   assert.equal(sellerOut.status, 201);
   assert.equal(sellerOut.body.matchIntentBound, false);

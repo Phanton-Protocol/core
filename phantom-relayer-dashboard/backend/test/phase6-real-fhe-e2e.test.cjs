@@ -43,7 +43,7 @@ delete process.env.PHANTOM_DEPLOYMENT_TIER;
 const matchingModulePath = require.resolve("../src/fheMatchingService");
 delete require.cache[matchingModulePath];
 
-const { initDb, getMatchByHash } = require("../src/db");
+const { initDb, getMatchByHash, saveInternalMatchEnrollment } = require("../src/db");
 const {
   createInternalOrderRouter,
 } = require("../src/internalOrderRoutes");
@@ -152,6 +152,17 @@ test("phase6 end-to-end: real /internal-match/compare drives signed match attest
 
   const seller = ethers.Wallet.createRandom();
   const buyer = ethers.Wallet.createRandom();
+  for (const addr of [seller.address, buyer.address]) {
+    saveInternalMatchEnrollment(db, {
+      userAddress: addr.toLowerCase(),
+      enrollmentId: ethers.keccak256(ethers.toUtf8Bytes(`p6-${addr}`)),
+      payloadHash: ethers.ZeroHash,
+      encryptedPayload: null,
+      txHash: "0x" + "ee".repeat(32),
+      blockNumber: 1,
+      createdAt: Date.now(),
+    });
+  }
   const sellerOut = await placeSignedIntent({
     baseUrl, wallet: seller, side: "sell", amount: 100, limitPrice: 10, opNonce: 1, matchNonce: 1001,
   });

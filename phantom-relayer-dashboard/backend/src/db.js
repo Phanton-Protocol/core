@@ -31,6 +31,8 @@ function initDbJson(dbPath) {
     "compliance_decisions",
     "attestation_decisions",
     "internal_match_enrollments",
+    "internal_match_audit_log",
+    "pending_notes",
   ];
   const keyCol = {
     intents: "intentId",
@@ -51,6 +53,8 @@ function initDbJson(dbPath) {
     compliance_decisions: "id",
     attestation_decisions: "id",
     internal_match_enrollments: "userAddress",
+    internal_match_audit_log: "id",
+    pending_notes: "note_id",
   };
 
   function loadTable(name) {
@@ -417,6 +421,24 @@ function initDbJson(dbPath) {
           createdAt,
         });
         saveTable("internal_match_enrollments", rows);
+      } else if (sqlLower.includes("insert into internal_match_audit_log")) {
+        const [id, prevHash, entryHash, matchHash, decisionHash, payloadJson, createdAt] = args;
+        const rows = loadTable("internal_match_audit_log").filter((r) => r.id !== id);
+        rows.push({ id, prev_hash: prevHash, entry_hash: entryHash, match_hash: matchHash, decision_hash: decisionHash, payload_json: payloadJson, created_at: createdAt });
+        saveTable("internal_match_audit_log", rows);
+      } else if (sqlLower.includes("insert into pending_notes")) {
+        const [noteId, owner, matchHash, status, payloadEnc, inputNoteId, createdAt] = args;
+        const rows = loadTable("pending_notes").filter((r) => r.note_id !== noteId);
+        rows.push({ note_id: noteId, owner, match_hash: matchHash, status, payload_enc: payloadEnc, input_note_id: inputNoteId, created_at: createdAt });
+        saveTable("pending_notes", rows);
+      } else if (sqlLower.includes("update matches") && sqlLower.includes("metadatajson")) {
+        const [metadataJson, matchHash] = args;
+        const rows = loadTable("matches");
+        const idx = rows.findIndex((r) => r.matchHash === matchHash);
+        if (idx >= 0) {
+          rows[idx] = { ...rows[idx], metadataJson };
+          saveTable("matches", rows);
+        }
       }
     };
     const get = (...args) => {
@@ -471,6 +493,17 @@ function initDbJson(dbPath) {
           (r) => String(r.userAddress).toLowerCase() === String(userAddress).toLowerCase()
         );
         return row || undefined;
+      }
+      if (sqlLower.includes("from internal_match_audit_log where match_hash")) {
+        const [matchHash] = args;
+        const row = loadTable("internal_match_audit_log").find((r) => r.match_hash === matchHash);
+        return row || undefined;
+      }
+      if (sqlLower.includes("from internal_match_audit_log order by created_at desc limit 1")) {
+        const rows = loadTable("internal_match_audit_log").sort(
+          (a, b) => (b.created_at || 0) - (a.created_at || 0) || String(b.id).localeCompare(String(a.id))
+        );
+        return rows[0] || undefined;
       }
       if (sqlLower.includes("from orders where owneraddress") && sqlLower.includes("nonce")) {
         const [ownerAddress, nonce] = args;
@@ -598,6 +631,23 @@ function initDbJson(dbPath) {
           .filter((r) => r.executionId === executionId)
           .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.id).localeCompare(String(a.id)))
           .slice(0, limit || 100);
+      }
+      if (sqlLower.includes("from pending_notes where owner =") && sqlLower.includes("status =")) {
+        const [owner, status, limit] = args;
+        return loadTable("pending_notes")
+          .filter(
+            (r) =>
+              String(r.owner).toLowerCase() === String(owner).toLowerCase() &&
+              String(r.status) === String(status)
+          )
+          .sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || String(b.note_id).localeCompare(String(a.note_id)))
+          .slice(0, limit || 100);
+      }
+      if (sqlLower.includes("from pending_notes where match_hash =")) {
+        const [matchHash] = args;
+        return loadTable("pending_notes")
+          .filter((r) => r.match_hash === matchHash)
+          .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || String(a.note_id).localeCompare(String(b.note_id)));
       }
       return [];
     };
@@ -863,6 +913,30 @@ function initDb(dbPath) {
         createdAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_internal_match_enrollments_created ON internal_match_enrollments(createdAt DESC);
+
+      CREATE TABLE IF NOT EXISTS internal_match_audit_log (
+        id TEXT PRIMARY KEY,
+        prev_hash TEXT NOT NULL,
+        entry_hash TEXT NOT NULL,
+        match_hash TEXT NOT NULL,
+        decision_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_internal_match_audit_match ON internal_match_audit_log(match_hash);
+      CREATE INDEX IF NOT EXISTS idx_internal_match_audit_created ON internal_match_audit_log(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS pending_notes (
+        note_id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        match_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_enc TEXT NOT NULL,
+        input_note_id TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_notes_owner_status ON pending_notes(owner, status);
+      CREATE INDEX IF NOT EXISTS idx_pending_notes_match ON pending_notes(match_hash);
     `);
     return db;
   } catch (e) {
@@ -896,6 +970,82 @@ function getInternalMatchEnrollmentByUser(db, userAddress) {
 
 function hasInternalMatchEnrollment(db, userAddress) {
   return !!getInternalMatchEnrollmentByUser(db, userAddress);
+}
+
+function appendInternalMatchAuditEntry(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO internal_match_audit_log(
+      id, prev_hash, entry_hash, match_hash, decision_hash, payload_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.id,
+    row.prevHash,
+    row.entryHash,
+    row.matchHash,
+    row.decisionHash,
+    typeof row.payloadJson === "string" ? row.payloadJson : JSON.stringify(row.payloadJson || {}),
+    row.createdAt
+  );
+}
+
+function getLatestInternalMatchAuditEntry(db) {
+  return db
+    .prepare(
+      "SELECT * FROM internal_match_audit_log ORDER BY created_at DESC, id DESC LIMIT 1"
+    )
+    .get();
+}
+
+function getInternalMatchAuditByMatchHash(db, matchHash) {
+  const row = db
+    .prepare("SELECT * FROM internal_match_audit_log WHERE match_hash = ?")
+    .get(matchHash);
+  if (!row) return null;
+  return {
+    ...row,
+    payload:
+      typeof row.payload_json === "string" ? JSON.parse(row.payload_json || "{}") : (row.payload_json || {}),
+  };
+}
+
+function savePendingNote(db, row) {
+  const stmt = db.prepare(
+    `INSERT INTO pending_notes(note_id, owner, match_hash, status, payload_enc, input_note_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  stmt.run(
+    row.noteId,
+    String(row.owner).toLowerCase(),
+    row.matchHash,
+    row.status,
+    row.payloadEnc,
+    row.inputNoteId ?? null,
+    row.createdAt
+  );
+}
+
+function listPendingNotesByOwner(db, owner, status = "pending", limit = 100) {
+  return db
+    .prepare(
+      "SELECT * FROM pending_notes WHERE owner = ? AND status = ? ORDER BY created_at DESC, note_id DESC LIMIT ?"
+    )
+    .all(String(owner).toLowerCase(), status, limit);
+}
+
+function listPendingNotesByMatchHash(db, matchHash) {
+  return db
+    .prepare("SELECT * FROM pending_notes WHERE match_hash = ? ORDER BY created_at ASC, note_id ASC")
+    .all(matchHash);
+}
+
+function patchMatchMetadata(db, matchHash, patch) {
+  const row = getMatchByHash(db, matchHash);
+  if (!row) return false;
+  const meta = { ...(row.metadataJson || {}), ...patch };
+  const stmt = db.prepare("UPDATE matches SET metadataJson = ? WHERE matchHash = ?");
+  stmt.run(JSON.stringify(meta), matchHash);
+  return true;
 }
 
 function saveIntent(db, intentId, userAddress, payload) {
@@ -1556,6 +1706,13 @@ module.exports = {
   saveInternalMatchEnrollment,
   getInternalMatchEnrollmentByUser,
   hasInternalMatchEnrollment,
+  appendInternalMatchAuditEntry,
+  getLatestInternalMatchAuditEntry,
+  getInternalMatchAuditByMatchHash,
+  savePendingNote,
+  listPendingNotesByOwner,
+  listPendingNotesByMatchHash,
+  patchMatchMetadata,
   saveInternalOrder,
   updateInternalOrderState,
   getInternalOrderById,
